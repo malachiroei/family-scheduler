@@ -11,6 +11,14 @@ const modelAliasMap: Record<string, SupportedModel> = {
 };
 const allowedChildren = ["ravid", "amit", "alin"] as const;
 const allowedTypes = ["dog", "gym", "sport", "lesson", "dance"] as const;
+const allowedScheduleChildren = [
+  "ravid",
+  "amit",
+  "alin",
+  "amit_alin",
+  "alin_ravid",
+  "amit_ravid",
+] as const;
 
 type ChildKey = (typeof allowedChildren)[number];
 type EventType = (typeof allowedTypes)[number];
@@ -33,7 +41,20 @@ const extractJsonArray = (text: string) => {
   return text.slice(start, end + 1);
 };
 
+const ensurePostgresEnv = () => {
+  const hasPostgresEnv = Boolean(
+    process.env.POSTGRES_URL ||
+    process.env.POSTGRES_PRISMA_URL ||
+    process.env.DATABASE_URL
+  );
+
+  if (!hasPostgresEnv) {
+    throw new Error("Missing Postgres environment variables (POSTGRES_URL / DATABASE_URL)");
+  }
+};
+
 const ensureFamilyScheduleTable = async () => {
+  ensurePostgresEnv();
   await sql`
     CREATE TABLE IF NOT EXISTS family_schedule (
       event_id TEXT PRIMARY KEY,
@@ -62,7 +83,7 @@ const sanitizeDbEvent = (value: unknown) => {
   const time = typeof payload.time === "string" ? payload.time.trim() : "";
   const child = typeof payload.child === "string" ? payload.child : "";
   const title = typeof payload.title === "string" ? payload.title.trim() : "";
-  const type = typeof payload.type === "string" ? payload.type : "";
+  const type = typeof payload.type === "string" ? payload.type.trim() : "";
   const isRecurring = Boolean(payload.isRecurring);
   const recurringTemplateId = typeof payload.recurringTemplateId === "string"
     ? payload.recurringTemplateId.trim()
@@ -76,8 +97,8 @@ const sanitizeDbEvent = (value: unknown) => {
     dayIndex > 6 ||
     !time ||
     !title ||
-    !allowedChildren.includes(child as ChildKey) ||
-    !allowedTypes.includes(type as EventType)
+    !allowedScheduleChildren.includes(child as (typeof allowedScheduleChildren)[number]) ||
+    !type
   ) {
     return null;
   }
@@ -129,6 +150,7 @@ export async function GET() {
     return NextResponse.json({ events });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Failed to fetch events";
+    console.error('[API] GET /api/schedule failed', error);
     return NextResponse.json({ error: message }, { status: 500 });
   }
 }
@@ -184,6 +206,7 @@ export async function PUT(request: NextRequest) {
     return NextResponse.json({ ok: true });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Failed to save event";
+    console.error('[API] PUT /api/schedule failed', error);
     return NextResponse.json({ error: message }, { status: 500 });
   }
 }
@@ -223,6 +246,7 @@ export async function DELETE(request: NextRequest) {
     return NextResponse.json({ ok: true });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Failed to delete event";
+    console.error('[API] DELETE /api/schedule failed', error);
     return NextResponse.json({ error: message }, { status: 500 });
   }
 }
@@ -290,10 +314,10 @@ const normalizeModel = (value: unknown, fallback: SupportedModel): SupportedMode
 
 export async function POST(request: NextRequest) {
   console.log('[API] POST /api/schedule');
-  const apiKey = process.env.NEXT_PUBLIC_GEMINI_API_KEY;
+  const apiKey = process.env.GEMINI_API_KEY || process.env.NEXT_PUBLIC_GEMINI_API_KEY;
   if (!apiKey) {
     return NextResponse.json(
-      { error: "Missing NEXT_PUBLIC_GEMINI_API_KEY on server" },
+      { error: "Missing GEMINI_API_KEY (or NEXT_PUBLIC_GEMINI_API_KEY) on server" },
       { status: 500 }
     );
   }
@@ -418,6 +442,7 @@ ${text}`;
     return NextResponse.json({ events });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown server error";
+    console.error('[API] POST /api/schedule failed', error);
     return NextResponse.json({ error: message }, { status: 500 });
   }
 }

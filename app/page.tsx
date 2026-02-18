@@ -712,7 +712,6 @@ export default function FamilyScheduler() {
 
   const weekKey = toIsoDate(weekStart);
   const days = weeksData[weekKey] ?? [];
-  const hasGeminiKey = Boolean(process.env.NEXT_PUBLIC_GEMINI_API_KEY);
 
   useEffect(() => {
     setWeeksData((prev) => {
@@ -847,16 +846,17 @@ export default function FamilyScheduler() {
   const weekRangeLabel = `${toDisplayDate(weekStart)} - ${toDisplayDate(addDays(weekStart, 6))}`;
 
   const refetchEventsFromDatabase = async (targetWeekStart: Date) => {
-    console.log('[API] GET /api/schedule -> start');
-    const response = await fetch('/api/schedule', { cache: 'no-store' });
-    const payload = await response.json();
-    console.log('[API] GET /api/schedule ->', response.status, payload);
-    if (!response.ok) {
-      throw new Error(payload?.error || 'Failed fetching events');
-    }
+    try {
+      console.log('[API] GET /api/schedule -> start');
+      const response = await fetch('/api/schedule', { cache: 'no-store' });
+      const payload = await response.json();
+      console.log('[API] GET /api/schedule ->', response.status, payload);
+      if (!response.ok) {
+        throw new Error(payload?.error || 'Failed fetching events');
+      }
 
-    const allEvents = (Array.isArray(payload?.events) ? payload.events : []) as ScheduleApiEvent[];
-    const recurringRows = allEvents.filter((event) => event.isRecurring);
+      const allEvents = (Array.isArray(payload?.events) ? payload.events : []) as ScheduleApiEvent[];
+      const recurringRows = allEvents.filter((event) => event.isRecurring);
 
     const templatesMap = new Map<string, RecurringTemplate>();
     recurringRows.forEach((event) => {
@@ -874,11 +874,11 @@ export default function FamilyScheduler() {
       }
     });
 
-    const templates = [...templatesMap.values()];
-    const targetWeekKey = toIsoDate(targetWeekStart);
-    const weekDays = createWeekDays(targetWeekStart, false, templates).map((day) => ({ ...day, events: [...day.events] }));
+      const templates = [...templatesMap.values()];
+      const targetWeekKey = toIsoDate(targetWeekStart);
+      const weekDays = createWeekDays(targetWeekStart, false, templates).map((day) => ({ ...day, events: [...day.events] }));
 
-    allEvents
+      allEvents
       .filter((event) => !event.isRecurring)
       .forEach((event) => {
         const eventDate = parseEventDateKey(event.date);
@@ -903,40 +903,54 @@ export default function FamilyScheduler() {
         weekDays[dayIndex].events = sortEvents(weekDays[dayIndex].events);
       });
 
-    setRecurringTemplates(templates);
-    setWeeksData((prev) => ({ ...prev, [targetWeekKey]: weekDays }));
+      setRecurringTemplates(templates);
+      setWeeksData((prev) => ({ ...prev, [targetWeekKey]: weekDays }));
+    } catch (error) {
+      console.error('[API] GET /api/schedule client failed', error);
+      throw error;
+    }
   };
 
   const upsertEventToDatabase = async (event: SchedulerEvent, dayIndex: number) => {
-    console.log('[API] PUT /api/schedule -> start', event);
-    const response = await fetch('/api/schedule', {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        event: {
-          ...event,
-          dayIndex,
-        },
-      }),
-    });
-    const payload = await response.json();
-    console.log('[API] PUT /api/schedule ->', response.status, payload);
-    if (!response.ok) {
-      throw new Error(payload?.error || 'Failed saving event');
+    try {
+      console.log('[API] PUT /api/schedule -> start', event);
+      const response = await fetch('/api/schedule', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          event: {
+            ...event,
+            dayIndex,
+          },
+        }),
+      });
+      const payload = await response.json();
+      console.log('[API] PUT /api/schedule ->', response.status, payload);
+      if (!response.ok) {
+        throw new Error(payload?.error || 'Failed saving event');
+      }
+    } catch (error) {
+      console.error('[API] PUT /api/schedule client failed', error);
+      throw error;
     }
   };
 
   const deleteEventFromDatabase = async (payload: { eventId: string; recurringTemplateId?: string }) => {
-    console.log('[API] DELETE /api/schedule -> start', payload);
-    const response = await fetch('/api/schedule', {
-      method: 'DELETE',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
-    });
-    const body = await response.json();
-    console.log('[API] DELETE /api/schedule ->', response.status, body);
-    if (!response.ok) {
-      throw new Error(body?.error || 'Failed deleting event');
+    try {
+      console.log('[API] DELETE /api/schedule -> start', payload);
+      const response = await fetch('/api/schedule', {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      const body = await response.json();
+      console.log('[API] DELETE /api/schedule ->', response.status, body);
+      if (!response.ok) {
+        throw new Error(body?.error || 'Failed deleting event');
+      }
+    } catch (error) {
+      console.error('[API] DELETE /api/schedule client failed', error);
+      throw error;
     }
   };
 
@@ -946,9 +960,10 @@ export default function FamilyScheduler() {
       await upsertEventToDatabase(event, dayIndex);
       await refetchEventsFromDatabase(targetWeekStart);
       setDbSyncStatus({ state: 'saved', message: 'Saved' });
-    } catch {
+    } catch (error) {
+      console.error('[API] handleSubmit failed', error);
       setDbSyncStatus({ state: 'error', message: 'Failed' });
-      throw new Error('Submit failed');
+      throw error;
     }
   };
 
@@ -958,9 +973,10 @@ export default function FamilyScheduler() {
       await deleteEventFromDatabase(payload);
       await refetchEventsFromDatabase(targetWeekStart);
       setDbSyncStatus({ state: 'saved', message: 'Deleted' });
-    } catch {
+    } catch (error) {
+      console.error('[API] handleDelete failed', error);
       setDbSyncStatus({ state: 'error', message: 'Failed' });
-      throw new Error('Delete failed');
+      throw error;
     }
   };
 
@@ -1063,7 +1079,7 @@ export default function FamilyScheduler() {
     setWeekStart((prev) => addDays(prev, offset * 7));
   };
 
-  const clearAllEvents = async () => {
+  const handleClearAll = async () => {
     try {
       setDbSyncStatus({ state: 'saving', message: 'Clearing database...' });
       console.log('[API] DELETE /api/schedule -> start clearAll');
@@ -1077,9 +1093,17 @@ export default function FamilyScheduler() {
       if (!response.ok) {
         throw new Error(payload?.error || 'Failed to clear events');
       }
+
+      setRecurringTemplates([]);
+      setWeeksData((prev) => ({
+        ...prev,
+        [weekKey]: createWeekDays(weekStart, false, []),
+      }));
+
       await refetchEventsFromDatabase(weekStart);
       setDbSyncStatus({ state: 'saved', message: 'Cleared' });
-    } catch {
+    } catch (error) {
+      console.error('[API] DELETE /api/schedule clearAll client failed', error);
       setDbSyncStatus({ state: 'error', message: 'Failed' });
       setApiError('השמירה לבסיס הנתונים נכשלה. נסה שוב.');
       return;
@@ -1144,11 +1168,6 @@ export default function FamilyScheduler() {
       return;
     }
 
-    if (!hasGeminiKey) {
-      setApiError('חסר מפתח NEXT_PUBLIC_GEMINI_API_KEY בקובץ הסביבה.');
-      return;
-    }
-
     requestInFlightRef.current = true;
     setIsSubmitting(true);
 
@@ -1200,6 +1219,7 @@ export default function FamilyScheduler() {
       setInputText('');
       setSelectedImage(null);
     } catch (error) {
+      console.error('[API] POST /api/schedule client failed', error);
       const message = error instanceof Error ? error.message : 'לא הצלחתי לעדכן את הלו"ז';
       if (message.includes('429') || message.toLowerCase().includes('quota')) {
         setApiError('חריגה ממכסת Gemini (429). נסה שוב עוד מעט או כתוב ניסוח קצר וברור.');
@@ -1378,7 +1398,7 @@ export default function FamilyScheduler() {
       <div className="max-w-6xl mx-auto mb-8 print:mb-4">
         <div className="print-controls flex justify-end gap-3 print:hidden">
           <button
-            onClick={() => { void clearAllEvents(); }}
+            onClick={() => { void handleClearAll(); }}
             className="flex items-center gap-2 bg-red-50 text-red-700 border border-red-200 px-4 py-2 rounded-lg hover:bg-red-100 transition shadow-sm"
           >
             Clear All
