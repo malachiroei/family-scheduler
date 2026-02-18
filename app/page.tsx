@@ -120,6 +120,18 @@ type PersistedStatePayload = {
   weeksData?: Record<string, DaySchedule[]>;
 };
 
+type ScheduleApiEvent = {
+  id: string;
+  date: string;
+  dayIndex: number;
+  time: string;
+  child: ChildKey;
+  title: string;
+  type: EventType;
+  isRecurring?: boolean;
+  recurringTemplateId?: string;
+};
+
 const normalizeWeekEventsWithDate = (weeksData: Record<string, DaySchedule[]> | undefined) => {
   if (!weeksData || typeof weeksData !== 'object') {
     return {} as Record<string, DaySchedule[]>;
@@ -232,14 +244,6 @@ const normalizeTimeForPicker = (value: string) => {
     return value;
   }
   return '08:00';
-};
-
-const parseWeekKeyToDate = (value: string) => {
-  const parsed = new Date(`${value}T00:00:00`);
-  if (Number.isNaN(parsed.getTime())) {
-    return null;
-  }
-  return getWeekStart(parsed);
 };
 
 const halfHourTimeOptions = Array.from({ length: 48 }, (_, index) => {
@@ -681,6 +685,10 @@ export default function FamilyScheduler() {
   const [successMessage, setSuccessMessage] = useState("");
   const [selectedImage, setSelectedImage] = useState<File | null>(null);
   const [selectedImagePreview, setSelectedImagePreview] = useState<string | null>(null);
+  const [dbSyncStatus, setDbSyncStatus] = useState<{ state: 'idle' | 'saving' | 'saved' | 'error'; message: string }>({
+    state: 'idle',
+    message: '',
+  });
   const [showRecurringOnly, setShowRecurringOnly] = useState(false);
   const [weekStart, setWeekStart] = useState(initialWeekStart);
   const [recurringTemplates, setRecurringTemplates] = useState<RecurringTemplate[]>([]);
@@ -699,18 +707,8 @@ export default function FamilyScheduler() {
   const [isChatOpen, setIsChatOpen] = useState(false);
   const persistDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const requestInFlightRef = useRef(false);
-  const writeQueueRef = useRef<Promise<void>>(Promise.resolve());
   const lastApiRequestAtRef = useRef<number>(0);
   const hasLoadedStorageRef = useRef(false);
-  const stateSnapshotRef = useRef<{
-    weekStart: Date;
-    recurringTemplates: RecurringTemplate[];
-    weeksData: Record<string, DaySchedule[]>;
-  }>({
-    weekStart: initialWeekStart,
-    recurringTemplates: [],
-    weeksData: { [initialWeekKey]: createWeekDays(initialWeekStart, false, []) },
-  });
 
   const weekKey = toIsoDate(weekStart);
   const days = weeksData[weekKey] ?? [];
@@ -817,13 +815,6 @@ export default function FamilyScheduler() {
     }, 120);
   }, [weekStart, recurringTemplates, weeksData]);
 
-  useEffect(() => {
-    stateSnapshotRef.current = {
-      weekStart,
-      recurringTemplates,
-      weeksData,
-    };
-  }, [weekStart, recurringTemplates, weeksData]);
 
   useEffect(() => {
     return () => {
@@ -847,153 +838,138 @@ export default function FamilyScheduler() {
     };
   }, [selectedImage]);
 
+  useEffect(() => {
+    if (creatingEvent || editingEvent) {
+      setDbSyncStatus({ state: 'idle', message: '' });
+    }
+  }, [creatingEvent, editingEvent]);
+
   const weekRangeLabel = `${toDisplayDate(weekStart)} - ${toDisplayDate(addDays(weekStart, 6))}`;
 
-  const persistStateToDatabase = async () => {
-    const snapshot = stateSnapshotRef.current;
-    const normalizedWeeksForPersist = normalizeWeekEventsWithDate(snapshot.weeksData);
-    const payload = {
-      weekStart: snapshot.weekStart.toISOString(),
-      recurringTemplates: snapshot.recurringTemplates,
-      weeksData: normalizedWeeksForPersist,
-    };
+  const refetchEventsFromDatabase = async (targetWeekStart: Date) => {
+    console.log('[API] GET /api/schedule -> start');
+    const response = await fetch('/api/schedule', { cache: 'no-store' });
+    const payload = await response.json();
+    console.log('[API] GET /api/schedule ->', response.status, payload);
+    if (!response.ok) {
+      throw new Error(payload?.error || 'Failed fetching events');
+    }
 
-    await fetch(SCHEDULER_STATE_ENDPOINT, {
+    const allEvents = (Array.isArray(payload?.events) ? payload.events : []) as ScheduleApiEvent[];
+    const recurringRows = allEvents.filter((event) => event.isRecurring);
+
+    const templatesMap = new Map<string, RecurringTemplate>();
+    recurringRows.forEach((event) => {
+      const templateId = event.recurringTemplateId || event.id;
+      if (!templatesMap.has(templateId)) {
+        templatesMap.set(templateId, {
+          templateId,
+          dayIndex: event.dayIndex,
+          time: normalizeTimeForPicker(event.time),
+          child: event.child,
+          title: event.title,
+          type: event.type,
+          isRecurring: true,
+        });
+      }
+    });
+
+    const templates = [...templatesMap.values()];
+    const targetWeekKey = toIsoDate(targetWeekStart);
+    const weekDays = createWeekDays(targetWeekStart, false, templates).map((day) => ({ ...day, events: [...day.events] }));
+
+    allEvents
+      .filter((event) => !event.isRecurring)
+      .forEach((event) => {
+        const eventDate = parseEventDateKey(event.date);
+        if (!eventDate) {
+          return;
+        }
+        const eventWeekKey = toIsoDate(getWeekStart(eventDate));
+        if (eventWeekKey !== targetWeekKey) {
+          return;
+        }
+        const dayIndex = eventDate.getDay();
+        weekDays[dayIndex].events.push({
+          id: event.id,
+          date: event.date,
+          time: normalizeTimeForPicker(event.time),
+          child: event.child,
+          title: event.title,
+          type: event.type,
+          isRecurring: false,
+          recurringTemplateId: undefined,
+        });
+        weekDays[dayIndex].events = sortEvents(weekDays[dayIndex].events);
+      });
+
+    setRecurringTemplates(templates);
+    setWeeksData((prev) => ({ ...prev, [targetWeekKey]: weekDays }));
+  };
+
+  const upsertEventToDatabase = async (event: SchedulerEvent, dayIndex: number) => {
+    console.log('[API] PUT /api/schedule -> start', event);
+    const response = await fetch('/api/schedule', {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
+      body: JSON.stringify({
+        event: {
+          ...event,
+          dayIndex,
+        },
+      }),
     });
+    const payload = await response.json();
+    console.log('[API] PUT /api/schedule ->', response.status, payload);
+    if (!response.ok) {
+      throw new Error(payload?.error || 'Failed saving event');
+    }
   };
 
   const deleteEventFromDatabase = async (payload: { eventId: string; recurringTemplateId?: string }) => {
-    await fetch(SCHEDULER_STATE_ENDPOINT, {
+    console.log('[API] DELETE /api/schedule -> start', payload);
+    const response = await fetch('/api/schedule', {
       method: 'DELETE',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
     });
+    const body = await response.json();
+    console.log('[API] DELETE /api/schedule ->', response.status, body);
+    if (!response.ok) {
+      throw new Error(body?.error || 'Failed deleting event');
+    }
   };
 
-  const addSingleEventToDays = (baseDays: DaySchedule[], eventData: AiEvent) => {
-    const nextDays = baseDays.map((day) => ({ ...day, events: [...day.events] }));
-
-    if (eventData.dayIndex < 0 || eventData.dayIndex > 6) {
-      return nextDays;
+  const handleSubmit = async (event: SchedulerEvent, dayIndex: number, targetWeekStart: Date) => {
+    setDbSyncStatus({ state: 'saving', message: 'Saving to database...' });
+    try {
+      await upsertEventToDatabase(event, dayIndex);
+      await refetchEventsFromDatabase(targetWeekStart);
+      setDbSyncStatus({ state: 'saved', message: 'Saved' });
+    } catch {
+      setDbSyncStatus({ state: 'error', message: 'Failed' });
+      throw new Error('Submit failed');
     }
+  };
 
-    const normalizedTime = normalizeTimeForPicker(eventData.time);
-    const normalizedChild = normalizeChildKey(String(eventData.child));
-    if (!normalizedChild) {
-      return nextDays;
+  const handleDelete = async (payload: { eventId: string; recurringTemplateId?: string }, targetWeekStart: Date) => {
+    setDbSyncStatus({ state: 'saving', message: 'Deleting from database...' });
+    try {
+      await deleteEventFromDatabase(payload);
+      await refetchEventsFromDatabase(targetWeekStart);
+      setDbSyncStatus({ state: 'saved', message: 'Deleted' });
+    } catch {
+      setDbSyncStatus({ state: 'error', message: 'Failed' });
+      throw new Error('Delete failed');
     }
+  };
 
-    const eventType = normalizeTypeForStorage(String(eventData.type || ''), String(eventData.title || ''));
-    const eventDate = toEventDateKey(new Date(`${nextDays[eventData.dayIndex].isoDate}T00:00:00`));
-
-    const hasDuplicate = nextDays[eventData.dayIndex].events.some((existing) => {
-      if (existing.time !== normalizedTime || existing.type !== eventType) {
-        return false;
-      }
-      return getChildKeys(existing.child).includes(normalizedChild);
+  useEffect(() => {
+    void refetchEventsFromDatabase(weekStart).catch((error) => {
+      const message = error instanceof Error ? error.message : 'Failed to refetch events';
+      setApiError(message);
     });
-
-    if (hasDuplicate) {
-      return nextDays;
-    }
-
-    nextDays[eventData.dayIndex].events.push(createEvent({
-      date: eventDate,
-      time: normalizedTime,
-      child: normalizedChild,
-      title: eventData.title,
-      type: eventType,
-      isRecurring: Boolean(eventData.recurringWeekly),
-    }));
-    nextDays[eventData.dayIndex].events = sortEvents(nextDays[eventData.dayIndex].events);
-
-    return nextDays;
-  };
-
-  const addNewEvent = (eventData: AiEvent, forceRecurring = false, targetWeekStartOverride?: Date) => {
-    writeQueueRef.current = writeQueueRef.current.then(async () => {
-      console.log(eventData);
-
-      const targetWeekStart = targetWeekStartOverride ? getWeekStart(targetWeekStartOverride) : weekStart;
-      const targetWeekKey = toIsoDate(targetWeekStart);
-
-      const isRecurringFixed = forceRecurring;
-
-      const normalizedType = normalizeTypeForStorage(String(eventData.type || ''), String(eventData.title || ''));
-      setWeeksData((prev) => {
-        const baseDays = prev[targetWeekKey] ?? createWeekDays(targetWeekStart, false, recurringTemplates);
-        return {
-          ...prev,
-          [targetWeekKey]: addSingleEventToDays(baseDays, { ...eventData, type: normalizedType }),
-        };
-      });
-
-      if (isRecurringFixed) {
-        const normalizedChild = normalizeChildKey(String(eventData.child));
-        if (!normalizedChild) {
-          return;
-        }
-
-        const templateId = generateId();
-        const template: RecurringTemplate = {
-          templateId,
-          dayIndex: eventData.dayIndex,
-          time: normalizeTimeForPicker(eventData.time),
-          child: normalizedChild,
-          title: eventData.title,
-          type: normalizedType,
-          isRecurring: true,
-        };
-
-        setRecurringTemplates((prev) => [...prev, template]);
-
-        setWeeksData((prev) => {
-          const nextData: Record<string, DaySchedule[]> = {};
-
-          Object.entries(prev).forEach(([key, value]) => {
-            if (key <= targetWeekKey) {
-              nextData[key] = value.map((day) => ({ ...day, events: [...day.events] }));
-              return;
-            }
-
-            const nextDays = value.map((day) => ({ ...day, events: [...day.events] }));
-            const targetDay = nextDays[template.dayIndex];
-            const duplicate = targetDay.events.some(
-              (event) =>
-                event.time === template.time &&
-                event.type === template.type &&
-                getChildKeys(event.child).includes(normalizedChild)
-            );
-
-            if (!duplicate) {
-              targetDay.events.push({
-                id: `${templateId}-${key}`,
-                date: toEventDateKey(addDays(parseWeekKeyToDate(key) ?? targetWeekStart, template.dayIndex)),
-                time: template.time,
-                child: template.child,
-                title: template.title,
-                type: template.type,
-                isRecurring: true,
-                recurringTemplateId: templateId,
-              });
-              targetDay.events = sortEvents(targetDay.events);
-            }
-
-            nextData[key] = nextDays;
-          });
-
-          return nextData;
-        });
-      }
-
-      await delay(20);
-    });
-
-    return writeQueueRef.current;
-  };
+  }, [weekStart]);
 
   const parseInstructionFallback = (text: string): { targetWeekStart: Date; events: AiEvent[] } | null => {
     const timeMatch = extractTimesFromLine(text)[0];
@@ -1088,14 +1064,23 @@ export default function FamilyScheduler() {
   };
 
   const clearAllEvents = async () => {
-    setRecurringTemplates([]);
-    setWeeksData({
-      [weekKey]: createWeekDays(weekStart, false, []),
-    });
     try {
-      await delay(120);
-      await persistStateToDatabase();
+      setDbSyncStatus({ state: 'saving', message: 'Clearing database...' });
+      console.log('[API] DELETE /api/schedule -> start clearAll');
+      const response = await fetch('/api/schedule', {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ clearAll: true }),
+      });
+      const payload = await response.json();
+      console.log('[API] DELETE /api/schedule ->', response.status, payload);
+      if (!response.ok) {
+        throw new Error(payload?.error || 'Failed to clear events');
+      }
+      await refetchEventsFromDatabase(weekStart);
+      setDbSyncStatus({ state: 'saved', message: 'Cleared' });
     } catch {
+      setDbSyncStatus({ state: 'error', message: 'Failed' });
       setApiError('השמירה לבסיס הנתונים נכשלה. נסה שוב.');
       return;
     }
@@ -1103,6 +1088,34 @@ export default function FamilyScheduler() {
     if (apiError) {
       setApiError('');
     }
+  };
+
+  const persistAiEventsToDatabase = async (events: AiEvent[], targetWeekStart: Date) => {
+    setDbSyncStatus({ state: 'saving', message: 'Saving AI events...' });
+    for (const eventData of events) {
+      const normalizedChild = normalizeChildKey(String(eventData.child));
+      if (!normalizedChild || eventData.dayIndex < 0 || eventData.dayIndex > 6) {
+        continue;
+      }
+
+      const eventDate = toEventDateKey(addDays(targetWeekStart, eventData.dayIndex));
+      const recurringTemplateId = eventData.recurringWeekly ? generateId() : undefined;
+      const event: SchedulerEvent = {
+        id: generateId(),
+        date: eventDate,
+        time: normalizeTimeForPicker(eventData.time),
+        child: normalizedChild,
+        title: eventData.title,
+        type: normalizeTypeForStorage(eventData.type, eventData.title),
+        isRecurring: Boolean(eventData.recurringWeekly),
+        recurringTemplateId,
+      };
+
+      await upsertEventToDatabase(event, eventData.dayIndex);
+    }
+
+    await refetchEventsFromDatabase(targetWeekStart);
+    setDbSyncStatus({ state: 'saved', message: 'Saved' });
   };
 
   const sendMessageNow = async (text: string, imageFile: File | null) => {
@@ -1115,7 +1128,7 @@ export default function FamilyScheduler() {
 
     const parsedComplex = parseComplexWhatsAppMessage(text, weekStart);
     if (parsedComplex && !imageFile) {
-      parsedComplex.events.forEach((eventData) => addNewEvent(eventData, Boolean(eventData.recurringWeekly), parsedComplex.targetWeekStart));
+      await persistAiEventsToDatabase(parsedComplex.events, parsedComplex.targetWeekStart);
 
       setInputText('');
       setSuccessMessage('האירועים נוספו בהצלחה ללו״ז.');
@@ -1124,7 +1137,7 @@ export default function FamilyScheduler() {
 
     const parsedFallback = parseInstructionFallback(text);
     if (parsedFallback && !imageFile) {
-      parsedFallback.events.forEach((eventData) => addNewEvent(eventData, Boolean(eventData.recurringWeekly), parsedFallback.targetWeekStart));
+      await persistAiEventsToDatabase(parsedFallback.events, parsedFallback.targetWeekStart);
 
       setInputText('');
       setSuccessMessage('האירוע נוסף בהצלחה ללו״ז.');
@@ -1171,12 +1184,12 @@ export default function FamilyScheduler() {
       const rawEvents = payload?.events ?? payload?.event ?? [];
       const events = (Array.isArray(rawEvents) ? rawEvents : [rawEvents]) as AiEvent[];
       if (events.length) {
-        events.forEach((eventData) => addNewEvent(eventData, Boolean(eventData.recurringWeekly), weekStart));
+        await persistAiEventsToDatabase(events, weekStart);
         setSuccessMessage('האירועים נוספו בהצלחה ללו״ז.');
       } else {
         if (imageFile) {
           const fallbackEvents = getEnglishOcrFallbackEvents();
-          fallbackEvents.forEach((eventData) => addNewEvent(eventData, false, weekStart));
+          await persistAiEventsToDatabase(fallbackEvents, weekStart);
           setSuccessMessage('אירועי האנגלית נוספו מהתמונה.');
         } else {
           setApiError('לא זוהו אירועים חדשים בטקסט. נסה ניסוח מפורט יותר.');
@@ -1192,11 +1205,11 @@ export default function FamilyScheduler() {
         setApiError('חריגה ממכסת Gemini (429). נסה שוב עוד מעט או כתוב ניסוח קצר וברור.');
       } else if ((message.includes('404') || message.toLowerCase().includes('not found')) && imageFile) {
         const fallbackEvents = getEnglishOcrFallbackEvents();
-        fallbackEvents.forEach((eventData) => addNewEvent(eventData, false, weekStart));
+        await persistAiEventsToDatabase(fallbackEvents, weekStart);
         setSuccessMessage('אירועי האנגלית נוספו מהתמונה (fallback למודל נתמך).');
       } else if (message.includes('502') && imageFile) {
         const fallbackEvents = getEnglishOcrFallbackEvents();
-        fallbackEvents.forEach((eventData) => addNewEvent(eventData, false, weekStart));
+        await persistAiEventsToDatabase(fallbackEvents, weekStart);
         setSuccessMessage('אירועי האנגלית נוספו מהתמונה (fallback).');
       } else {
         setApiError(message);
@@ -1265,18 +1278,17 @@ export default function FamilyScheduler() {
 
     const targetWeekStart = getWeekStart(selectedDate);
     const targetDayIndex = selectedDate.getDay();
-
-    await addNewEvent(
-      {
-        dayIndex: targetDayIndex,
-        time: normalizeTimeForPicker(creatingEvent.data.time),
-        child: creatingEvent.data.child,
-        title,
-        type: creatingEvent.data.type || 'lesson',
-      },
-      creatingEvent.recurringWeekly,
-      targetWeekStart
-    );
+    const recurringTemplateId = creatingEvent.recurringWeekly ? generateId() : undefined;
+    const eventToSave: SchedulerEvent = {
+      id: generateId(),
+      date: toEventDateKey(selectedDate),
+      time: normalizeTimeForPicker(creatingEvent.data.time),
+      child: creatingEvent.data.child,
+      title,
+      type: normalizeTypeForStorage(creatingEvent.data.type || 'lesson', title),
+      isRecurring: creatingEvent.recurringWeekly,
+      recurringTemplateId,
+    };
 
     const targetWeekKey = toIsoDate(targetWeekStart);
     if (targetWeekKey !== weekKey) {
@@ -1284,8 +1296,7 @@ export default function FamilyScheduler() {
     }
 
     try {
-      await delay(120);
-      await persistStateToDatabase();
+      await handleSubmit(eventToSave, targetDayIndex, targetWeekStart);
     } catch {
       setApiError('שמירת העריכה לבסיס הנתונים נכשלה. נסה שוב.');
       return;
@@ -1318,98 +1329,23 @@ export default function FamilyScheduler() {
     const targetWeekStart = getWeekStart(selectedDate);
     const targetWeekKey = toIsoDate(targetWeekStart);
     const targetDayIndex = selectedDate.getDay();
-    const targetDate = toEventDateKey(selectedDate);
-
-    const time = normalizeTimeForPicker(editingEvent.data.time);
-    const existingTemplateId = editingEvent.originalRecurringTemplateId;
-    const templateId = editingEvent.recurringWeekly ? (existingTemplateId ?? generateId()) : undefined;
-
     const updatedEvent: SchedulerEvent = {
       ...editingEvent.data,
-      date: targetDate,
+      date: toEventDateKey(selectedDate),
       title: trimmedTitle,
-      time,
-      isRecurring: Boolean(templateId),
-      recurringTemplateId: templateId,
+      time: normalizeTimeForPicker(editingEvent.data.time),
+      isRecurring: editingEvent.recurringWeekly,
+      recurringTemplateId: editingEvent.recurringWeekly
+        ? (editingEvent.originalRecurringTemplateId ?? editingEvent.data.recurringTemplateId ?? generateId())
+        : undefined,
     };
-
-    const nextTemplates = editingEvent.recurringWeekly
-      ? [
-          ...recurringTemplates.filter((template) => template.templateId !== templateId),
-          {
-            templateId: templateId!,
-            dayIndex: targetDayIndex,
-            time,
-            child: editingEvent.data.child,
-            title: trimmedTitle,
-            type: editingEvent.data.type,
-            isRecurring: true,
-          },
-        ]
-      : recurringTemplates.filter((template) => template.templateId !== existingTemplateId);
-
-    setRecurringTemplates(nextTemplates);
-
-    setWeeksData((prev) => {
-      const nextData: Record<string, DaySchedule[]> = {};
-
-      const allKeys = new Set([...Object.keys(prev), targetWeekKey]);
-      for (const key of allKeys) {
-        const existingWeek = prev[key];
-        const weekDate = parseWeekKeyToDate(key) ?? weekStart;
-        const baseWeek = existingWeek ?? createWeekDays(weekDate, false, nextTemplates);
-        nextData[key] = baseWeek.map((day) => ({ ...day, events: [...day.events] }));
-      }
-
-      if (nextData[editingEvent.sourceWeekKey]?.[editingEvent.dayIndex]) {
-        nextData[editingEvent.sourceWeekKey][editingEvent.dayIndex].events = nextData[editingEvent.sourceWeekKey][editingEvent.dayIndex].events
-          .filter((event) => event.id !== editingEvent.data.id);
-      }
-
-      if (existingTemplateId) {
-        Object.values(nextData).forEach((weekDays) => {
-          weekDays.forEach((day) => {
-            day.events = day.events.filter((event) => event.recurringTemplateId !== existingTemplateId);
-          });
-        });
-      }
-
-      if (editingEvent.recurringWeekly && templateId) {
-        Object.entries(nextData)
-          .filter(([key]) => key >= targetWeekKey)
-          .forEach(([key, weekDays]) => {
-            const targetDay = weekDays[targetDayIndex];
-            const recurringEvent: SchedulerEvent = {
-              id: `${templateId}-${key}`,
-              date: toEventDateKey(addDays(parseWeekKeyToDate(key) ?? targetWeekStart, targetDayIndex)),
-              time,
-              child: editingEvent.data.child,
-              title: trimmedTitle,
-              type: editingEvent.data.type,
-              isRecurring: true,
-              recurringTemplateId: templateId,
-            };
-            targetDay.events.push(recurringEvent);
-            targetDay.events = sortEvents(
-              targetDay.events.filter((event, idx, arr) => idx === arr.findIndex((candidate) => candidate.id === event.id))
-            );
-          });
-      } else {
-        const targetDay = nextData[targetWeekKey][targetDayIndex];
-        targetDay.events.push({ ...updatedEvent, isRecurring: false, recurringTemplateId: undefined });
-        targetDay.events = sortEvents(targetDay.events);
-      }
-
-      return nextData;
-    });
 
     if (targetWeekKey !== weekKey) {
       setWeekStart(targetWeekStart);
     }
 
     try {
-      await delay(120);
-      await persistStateToDatabase();
+      await handleSubmit(updatedEvent, targetDayIndex, targetWeekStart);
     } catch {
       setApiError('ניקוי הנתונים בבסיס הנתונים נכשל. נסה שוב.');
       return;
@@ -1424,37 +1360,10 @@ export default function FamilyScheduler() {
     }
 
     const deletingEventId = editingEvent.data.id;
-
     const existingTemplateId = editingEvent.originalRecurringTemplateId;
-    if (existingTemplateId) {
-      setRecurringTemplates((prev) => prev.filter((template) => template.templateId !== existingTemplateId));
-    }
-
-    setWeeksData((prev) => {
-      const nextData: Record<string, DaySchedule[]> = {};
-
-      Object.entries(prev).forEach(([key, value]) => {
-        const nextDays = value.map((day) => ({ ...day, events: [...day.events] }));
-
-        if (key === editingEvent.sourceWeekKey && nextDays[editingEvent.dayIndex]) {
-          nextDays[editingEvent.dayIndex].events = nextDays[editingEvent.dayIndex].events
-            .filter((event) => event.id !== editingEvent.data.id);
-        }
-
-        if (existingTemplateId) {
-          nextDays.forEach((day) => {
-            day.events = day.events.filter((event) => event.recurringTemplateId !== existingTemplateId);
-          });
-        }
-
-        nextData[key] = nextDays;
-      });
-
-      return nextData;
-    });
 
     try {
-      await deleteEventFromDatabase({ eventId: deletingEventId, recurringTemplateId: existingTemplateId });
+      await handleDelete({ eventId: deletingEventId, recurringTemplateId: existingTemplateId }, weekStart);
     } catch {
       setApiError('מחיקה מבסיס הנתונים נכשלה. נסה שוב.');
       return;
@@ -1793,6 +1702,11 @@ export default function FamilyScheduler() {
             </label>
 
             <div className="flex gap-2 justify-end pt-2">
+              {dbSyncStatus.state !== 'idle' && (
+                <div className={`self-center text-xs font-semibold ${dbSyncStatus.state === 'error' ? 'text-red-600' : dbSyncStatus.state === 'saving' ? 'text-amber-600' : 'text-emerald-600'}`}>
+                  {dbSyncStatus.message}
+                </div>
+              )}
               <button
                 type="button"
                 onClick={() => setCreatingEvent(null)}
@@ -1925,6 +1839,11 @@ export default function FamilyScheduler() {
             </button>
 
             <div className="flex gap-2 justify-end pt-2">
+              {dbSyncStatus.state !== 'idle' && (
+                <div className={`self-center text-xs font-semibold ${dbSyncStatus.state === 'error' ? 'text-red-600' : dbSyncStatus.state === 'saving' ? 'text-amber-600' : 'text-emerald-600'}`}>
+                  {dbSyncStatus.message}
+                </div>
+              )}
               <button
                 type="button"
                 onClick={() => setEditingEvent(null)}
