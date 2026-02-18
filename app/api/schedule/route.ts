@@ -3,7 +3,7 @@ import { NextRequest, NextResponse } from "next/server";
 const allowedModels = ["gemini-1.5-flash", "gemini-2.0-flash"] as const;
 type SupportedModel = (typeof allowedModels)[number];
 const defaultModel: SupportedModel = "gemini-1.5-flash";
-const defaultFallbackModel: SupportedModel = "gemini-2.0-flash";
+const defaultFallbackModel: SupportedModel = "gemini-1.5-flash";
 const modelAliasMap: Record<string, SupportedModel> = {
   "gemini-1.5-flash-latest": "gemini-1.5-flash",
   "gemini-2.0-flash-exp": "gemini-2.0-flash",

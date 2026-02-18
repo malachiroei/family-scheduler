@@ -112,7 +112,7 @@ const AI_OCR_SYSTEM_PROMPT = `אתה מנתח צילום מסך של אפליק�
 const SCHEDULER_STORAGE_KEY = 'family-scheduler-state-v1';
 const SCHEDULER_STATE_ENDPOINT = '/api/state';
 const PRIMARY_GEMINI_MODEL = 'gemini-1.5-flash';
-const FALLBACK_GEMINI_MODEL = 'gemini-2.0-flash';
+const FALLBACK_GEMINI_MODEL = 'gemini-1.5-flash';
 
 type PersistedStatePayload = {
   weekStart?: string;
@@ -242,21 +242,15 @@ const parseWeekKeyToDate = (value: string) => {
   return getWeekStart(parsed);
 };
 
-type TimeMeridiem = 'AM' | 'PM';
+const halfHourTimeOptions = Array.from({ length: 48 }, (_, index) => {
+  const hours = Math.floor(index / 2);
+  const minutes = index % 2 === 0 ? '00' : '30';
+  return `${`${hours}`.padStart(2, '0')}:${minutes}`;
+});
 
-const toTwelveHourState = (value: string) => {
-  const normalized = normalizeTimeForPicker(value);
-  const [rawHour, rawMinute] = normalized.split(':').map(Number);
-  const meridiem: TimeMeridiem = rawHour >= 12 ? 'PM' : 'AM';
-  const hour12 = rawHour % 12 === 0 ? 12 : rawHour % 12;
-  return { hour12, minute: rawMinute, meridiem };
-};
+const normalizeManualTimeInput = (value: string) => normalizeLooseClock(value) ?? normalizeTimeForPicker(value);
 
-const toTwentyFourHourClock = (hour12: number, minute: number, meridiem: TimeMeridiem) => {
-  const normalizedHour = hour12 === 12 ? 0 : hour12;
-  const hour24 = meridiem === 'PM' ? normalizedHour + 12 : normalizedHour;
-  return `${`${hour24}`.padStart(2, '0')}:${`${minute}`.padStart(2, '0')}`;
-};
+const getDropdownTimeValue = (value: string) => (halfHourTimeOptions.includes(value) ? value : '');
 
 const normalizeClock = (value: string) => {
   const match = value.match(/^(\d{1,2}):(\d{2})$/);
@@ -677,82 +671,6 @@ const getEventIcon = (eventType: EventType, title?: string) => {
   return <Music size={18} />;
 };
 
-const TimeWheelPicker = ({ value, onChange }: { value: string; onChange: (next: string) => void }) => {
-  const { hour12, minute, meridiem } = toTwelveHourState(value);
-  const hourOptions = Array.from({ length: 12 }, (_, idx) => idx + 1);
-  const minuteOptions = Array.from({ length: 60 }, (_, idx) => idx);
-  const hourListRef = useRef<HTMLDivElement | null>(null);
-  const minuteListRef = useRef<HTMLDivElement | null>(null);
-
-  useEffect(() => {
-    const selectedHour = hourListRef.current?.querySelector<HTMLButtonElement>(`[data-hour="${hour12}"]`);
-    selectedHour?.scrollIntoView({ block: 'center' });
-
-    const selectedMinute = minuteListRef.current?.querySelector<HTMLButtonElement>(`[data-minute="${minute}"]`);
-    selectedMinute?.scrollIntoView({ block: 'center' });
-  }, [hour12, minute]);
-
-  const updateHour = (nextHour: number) => onChange(toTwentyFourHourClock(nextHour, minute, meridiem));
-  const updateMinute = (nextMinute: number) => onChange(toTwentyFourHourClock(hour12, nextMinute, meridiem));
-  const updateMeridiem = (nextMeridiem: TimeMeridiem) => onChange(toTwentyFourHourClock(hour12, minute, nextMeridiem));
-
-  return (
-    <div className="mt-1 rounded-xl border border-slate-300 p-3 bg-white">
-      <div className="grid grid-cols-3 gap-3 items-start">
-        <div>
-          <div className="text-xs text-slate-500 mb-1 text-center">שעה</div>
-          <div ref={hourListRef} className="h-36 overflow-y-auto rounded-lg border border-slate-200 p-1 snap-y snap-mandatory">
-            {hourOptions.map((option) => (
-              <button
-                key={`hour-${option}`}
-                data-hour={option}
-                type="button"
-                onClick={() => updateHour(option)}
-                className={`w-full snap-center rounded-md px-2 py-1.5 text-sm font-semibold transition ${hour12 === option ? 'bg-blue-600 text-white' : 'text-slate-700 hover:bg-slate-100'}`}
-              >
-                {`${option}`.padStart(2, '0')}
-              </button>
-            ))}
-          </div>
-        </div>
-
-        <div>
-          <div className="text-xs text-slate-500 mb-1 text-center">דקות</div>
-          <div ref={minuteListRef} className="h-36 overflow-y-auto rounded-lg border border-slate-200 p-1 snap-y snap-mandatory">
-            {minuteOptions.map((option) => (
-              <button
-                key={`minute-${option}`}
-                data-minute={option}
-                type="button"
-                onClick={() => updateMinute(option)}
-                className={`w-full snap-center rounded-md px-2 py-1.5 text-sm font-semibold transition ${minute === option ? 'bg-blue-600 text-white' : 'text-slate-700 hover:bg-slate-100'}`}
-              >
-                {`${option}`.padStart(2, '0')}
-              </button>
-            ))}
-          </div>
-        </div>
-
-        <div>
-          <div className="text-xs text-slate-500 mb-1 text-center">AM / PM</div>
-          <div className="flex flex-col gap-2">
-            {(['AM', 'PM'] as const).map((period) => (
-              <button
-                key={period}
-                type="button"
-                onClick={() => updateMeridiem(period)}
-                className={`h-[68px] rounded-xl text-base font-extrabold transition ${meridiem === period ? 'bg-slate-800 text-white' : 'bg-slate-100 text-slate-700 hover:bg-slate-200'}`}
-              >
-                {period}
-              </button>
-            ))}
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-};
-
 export default function FamilyScheduler() {
   const initialWeekStart = useMemo(() => getWeekStart(new Date()), []);
   const initialWeekKey = useMemo(() => toIsoDate(initialWeekStart), [initialWeekStart]);
@@ -784,6 +702,15 @@ export default function FamilyScheduler() {
   const writeQueueRef = useRef<Promise<void>>(Promise.resolve());
   const lastApiRequestAtRef = useRef<number>(0);
   const hasLoadedStorageRef = useRef(false);
+  const stateSnapshotRef = useRef<{
+    weekStart: Date;
+    recurringTemplates: RecurringTemplate[];
+    weeksData: Record<string, DaySchedule[]>;
+  }>({
+    weekStart: initialWeekStart,
+    recurringTemplates: [],
+    weeksData: { [initialWeekKey]: createWeekDays(initialWeekStart, false, []) },
+  });
 
   const weekKey = toIsoDate(weekStart);
   const days = weeksData[weekKey] ?? [];
@@ -891,6 +818,14 @@ export default function FamilyScheduler() {
   }, [weekStart, recurringTemplates, weeksData]);
 
   useEffect(() => {
+    stateSnapshotRef.current = {
+      weekStart,
+      recurringTemplates,
+      weeksData,
+    };
+  }, [weekStart, recurringTemplates, weeksData]);
+
+  useEffect(() => {
     return () => {
       if (persistDebounceRef.current) {
         clearTimeout(persistDebounceRef.current);
@@ -913,6 +848,30 @@ export default function FamilyScheduler() {
   }, [selectedImage]);
 
   const weekRangeLabel = `${toDisplayDate(weekStart)} - ${toDisplayDate(addDays(weekStart, 6))}`;
+
+  const persistStateToDatabase = async () => {
+    const snapshot = stateSnapshotRef.current;
+    const normalizedWeeksForPersist = normalizeWeekEventsWithDate(snapshot.weeksData);
+    const payload = {
+      weekStart: snapshot.weekStart.toISOString(),
+      recurringTemplates: snapshot.recurringTemplates,
+      weeksData: normalizedWeeksForPersist,
+    };
+
+    await fetch(SCHEDULER_STATE_ENDPOINT, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+  };
+
+  const deleteEventFromDatabase = async (payload: { eventId: string; recurringTemplateId?: string }) => {
+    await fetch(SCHEDULER_STATE_ENDPOINT, {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+  };
 
   const addSingleEventToDays = (baseDays: DaySchedule[], eventData: AiEvent) => {
     const nextDays = baseDays.map((day) => ({ ...day, events: [...day.events] }));
@@ -1032,6 +991,8 @@ export default function FamilyScheduler() {
 
       await delay(20);
     });
+
+    return writeQueueRef.current;
   };
 
   const parseInstructionFallback = (text: string): { targetWeekStart: Date; events: AiEvent[] } | null => {
@@ -1126,11 +1087,18 @@ export default function FamilyScheduler() {
     setWeekStart((prev) => addDays(prev, offset * 7));
   };
 
-  const clearAllEvents = () => {
+  const clearAllEvents = async () => {
     setRecurringTemplates([]);
     setWeeksData({
       [weekKey]: createWeekDays(weekStart, false, []),
     });
+    try {
+      await delay(120);
+      await persistStateToDatabase();
+    } catch {
+      setApiError('השמירה לבסיס הנתונים נכשלה. נסה שוב.');
+      return;
+    }
     setSuccessMessage('הנתונים נוקו. ניתן להתחיל הזנה מחדש ללא הכפילויות הישנות.');
     if (apiError) {
       setApiError('');
@@ -1278,7 +1246,7 @@ export default function FamilyScheduler() {
     });
   };
 
-  const saveCreatedEvent = () => {
+  const saveCreatedEvent = async () => {
     if (!creatingEvent) {
       return;
     }
@@ -1298,7 +1266,7 @@ export default function FamilyScheduler() {
     const targetWeekStart = getWeekStart(selectedDate);
     const targetDayIndex = selectedDate.getDay();
 
-    addNewEvent(
+    await addNewEvent(
       {
         dayIndex: targetDayIndex,
         time: normalizeTimeForPicker(creatingEvent.data.time),
@@ -1315,6 +1283,14 @@ export default function FamilyScheduler() {
       setWeekStart(targetWeekStart);
     }
 
+    try {
+      await delay(120);
+      await persistStateToDatabase();
+    } catch {
+      setApiError('שמירת העריכה לבסיס הנתונים נכשלה. נסה שוב.');
+      return;
+    }
+
     setCreatingEvent(null);
     setSuccessMessage('המשימה נוספה בהצלחה ללו״ז.');
     if (apiError) {
@@ -1322,7 +1298,7 @@ export default function FamilyScheduler() {
     }
   };
 
-  const saveEditedEvent = () => {
+  const saveEditedEvent = async () => {
     if (!editingEvent) {
       return;
     }
@@ -1431,13 +1407,23 @@ export default function FamilyScheduler() {
       setWeekStart(targetWeekStart);
     }
 
+    try {
+      await delay(120);
+      await persistStateToDatabase();
+    } catch {
+      setApiError('ניקוי הנתונים בבסיס הנתונים נכשל. נסה שוב.');
+      return;
+    }
+
     setEditingEvent(null);
   };
 
-  const deleteEditedEvent = () => {
+  const deleteEditedEvent = async () => {
     if (!editingEvent) {
       return;
     }
+
+    const deletingEventId = editingEvent.data.id;
 
     const existingTemplateId = editingEvent.originalRecurringTemplateId;
     if (existingTemplateId) {
@@ -1467,6 +1453,13 @@ export default function FamilyScheduler() {
       return nextData;
     });
 
+    try {
+      await deleteEventFromDatabase({ eventId: deletingEventId, recurringTemplateId: existingTemplateId });
+    } catch {
+      setApiError('מחיקה מבסיס הנתונים נכשלה. נסה שוב.');
+      return;
+    }
+
     setEditingEvent(null);
     setSuccessMessage('המשימה נמחקה מהלו״ז.');
   };
@@ -1476,7 +1469,7 @@ export default function FamilyScheduler() {
       <div className="max-w-6xl mx-auto mb-8 print:mb-4">
         <div className="print-controls flex justify-end gap-3 print:hidden">
           <button
-            onClick={clearAllEvents}
+            onClick={() => { void clearAllEvents(); }}
             className="flex items-center gap-2 bg-red-50 text-red-700 border border-red-200 px-4 py-2 rounded-lg hover:bg-red-100 transition shadow-sm"
           >
             Clear All
@@ -1733,10 +1726,28 @@ export default function FamilyScheduler() {
 
             <label className="text-sm text-slate-700 font-medium block">
               שעה
-              <TimeWheelPicker
-                value={creatingEvent.data.time}
-                onChange={(nextTime) => setCreatingEvent((prev) => prev ? ({ ...prev, data: { ...prev.data, time: nextTime } }) : prev)}
-              />
+              <div className="mt-1 flex items-center gap-2">
+                <select
+                  value={getDropdownTimeValue(creatingEvent.data.time)}
+                  onChange={(e) => setCreatingEvent((prev) => prev ? ({ ...prev, data: { ...prev.data, time: e.target.value || prev.data.time } }) : prev)}
+                  className="flex-1 border border-slate-300 rounded-xl px-3 py-2 outline-none focus:border-blue-400"
+                >
+                  <option value="">בחר שעה</option>
+                  {halfHourTimeOptions.map((timeOption) => (
+                    <option key={`create-time-${timeOption}`} value={timeOption}>{timeOption}</option>
+                  ))}
+                </select>
+                <input
+                  value={creatingEvent.data.time}
+                  onChange={(e) => setCreatingEvent((prev) => prev ? ({ ...prev, data: { ...prev.data, time: e.target.value } }) : prev)}
+                  onBlur={(e) => {
+                    const normalized = normalizeManualTimeInput(e.target.value);
+                    setCreatingEvent((prev) => prev ? ({ ...prev, data: { ...prev.data, time: normalized } }) : prev);
+                  }}
+                  className="w-24 border border-slate-300 rounded-xl px-2 py-2 text-center outline-none focus:border-blue-400"
+                  placeholder="14:25"
+                />
+              </div>
             </label>
 
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
@@ -1791,7 +1802,7 @@ export default function FamilyScheduler() {
               </button>
               <button
                 type="button"
-                onClick={saveCreatedEvent}
+                onClick={() => { void saveCreatedEvent(); }}
                 className="px-4 py-2 rounded-xl bg-blue-600 text-white hover:bg-blue-700"
               >
                 הוסף
@@ -1846,10 +1857,28 @@ export default function FamilyScheduler() {
 
             <label className="text-sm text-slate-700 font-medium block">
               שעה
-              <TimeWheelPicker
-                value={editingEvent.data.time}
-                onChange={(nextTime) => setEditingEvent((prev) => prev ? ({ ...prev, data: { ...prev.data, time: nextTime } }) : prev)}
-              />
+              <div className="mt-1 flex items-center gap-2">
+                <select
+                  value={getDropdownTimeValue(editingEvent.data.time)}
+                  onChange={(e) => setEditingEvent((prev) => prev ? ({ ...prev, data: { ...prev.data, time: e.target.value || prev.data.time } }) : prev)}
+                  className="flex-1 border border-slate-300 rounded-xl px-3 py-2 outline-none focus:border-blue-400"
+                >
+                  <option value="">בחר שעה</option>
+                  {halfHourTimeOptions.map((timeOption) => (
+                    <option key={`edit-time-${timeOption}`} value={timeOption}>{timeOption}</option>
+                  ))}
+                </select>
+                <input
+                  value={editingEvent.data.time}
+                  onChange={(e) => setEditingEvent((prev) => prev ? ({ ...prev, data: { ...prev.data, time: e.target.value } }) : prev)}
+                  onBlur={(e) => {
+                    const normalized = normalizeManualTimeInput(e.target.value);
+                    setEditingEvent((prev) => prev ? ({ ...prev, data: { ...prev.data, time: normalized } }) : prev);
+                  }}
+                  className="w-24 border border-slate-300 rounded-xl px-2 py-2 text-center outline-none focus:border-blue-400"
+                  placeholder="14:25"
+                />
+              </div>
             </label>
 
             <label className="text-sm text-slate-700 font-medium block">
@@ -1889,7 +1918,7 @@ export default function FamilyScheduler() {
 
             <button
               type="button"
-              onClick={deleteEditedEvent}
+              onClick={() => { void deleteEditedEvent(); }}
               className="w-full rounded-xl bg-red-600 text-white font-bold py-2.5 hover:bg-red-700 transition"
             >
               מחק משימה
@@ -1905,7 +1934,7 @@ export default function FamilyScheduler() {
               </button>
               <button
                 type="button"
-                onClick={saveEditedEvent}
+                onClick={() => { void saveEditedEvent(); }}
                 className="px-4 py-2 rounded-xl bg-blue-600 text-white hover:bg-blue-700"
               >
                 שמירה

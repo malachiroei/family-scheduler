@@ -105,6 +105,60 @@ const sanitizeState = (value: unknown): PersistedState => {
   };
 };
 
+const removeEventFromState = (
+  state: PersistedState,
+  payload: { eventId?: string; recurringTemplateId?: string }
+): PersistedState => {
+  const eventId = typeof payload.eventId === "string" ? payload.eventId : "";
+  const recurringTemplateId = typeof payload.recurringTemplateId === "string" ? payload.recurringTemplateId : "";
+
+  if (!eventId && !recurringTemplateId) {
+    return state;
+  }
+
+  const nextWeeksData: Record<string, unknown> = {};
+  Object.entries(state.weeksData ?? {}).forEach(([weekKey, value]) => {
+    if (!Array.isArray(value)) {
+      nextWeeksData[weekKey] = value;
+      return;
+    }
+
+    nextWeeksData[weekKey] = value.map((day) => {
+      if (!isObject(day)) {
+        return day;
+      }
+
+      const events = Array.isArray(day.events) ? day.events : [];
+      return {
+        ...day,
+        events: events.filter((event) => {
+          if (!isObject(event)) {
+            return true;
+          }
+          const byId = eventId && event.id === eventId;
+          const byTemplate = recurringTemplateId && event.recurringTemplateId === recurringTemplateId;
+          return !(byId || byTemplate);
+        }),
+      };
+    });
+  });
+
+  const nextTemplates = Array.isArray(state.recurringTemplates)
+    ? state.recurringTemplates.filter((template) => {
+        if (!recurringTemplateId || !isObject(template)) {
+          return true;
+        }
+        return template.templateId !== recurringTemplateId;
+      })
+    : [];
+
+  return {
+    ...state,
+    recurringTemplates: nextTemplates,
+    weeksData: nextWeeksData,
+  };
+};
+
 export async function GET() {
   try {
     await ensureTable();
@@ -145,6 +199,41 @@ export async function PUT(request: NextRequest) {
     return NextResponse.json({ ok: true });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Failed to save state";
+    return NextResponse.json({ error: message }, { status: 500 });
+  }
+}
+
+export async function DELETE(request: NextRequest) {
+  try {
+    const body = await request.json();
+
+    await ensureTable();
+    const result = await sql`
+      SELECT payload
+      FROM scheduler_state
+      WHERE state_key = ${STATE_KEY}
+      LIMIT 1
+    `;
+
+    const row = result.rows[0] as { payload?: unknown } | undefined;
+    const currentState = sanitizeState(row?.payload ?? {});
+    const nextState = removeEventFromState(currentState, {
+      eventId: body?.eventId,
+      recurringTemplateId: body?.recurringTemplateId,
+    });
+
+    await sql`
+      INSERT INTO scheduler_state (state_key, payload, updated_at)
+      VALUES (${STATE_KEY}, ${JSON.stringify(nextState)}::jsonb, NOW())
+      ON CONFLICT (state_key)
+      DO UPDATE SET
+        payload = EXCLUDED.payload,
+        updated_at = NOW()
+    `;
+
+    return NextResponse.json({ ok: true });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Failed to delete event";
     return NextResponse.json({ error: message }, { status: 500 });
   }
 }
