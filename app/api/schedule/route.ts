@@ -1,7 +1,20 @@
 import { NextRequest, NextResponse } from "next/server";
 import { sql } from "@vercel/postgres";
+import { sendPushToAll } from "@/app/lib/push";
 
-console.log(Object.keys(process.env));
+export const revalidate = 0;
+
+if (!process.env.POSTGRES_URL && process.env.DATABASE_URL) {
+  process.env.POSTGRES_URL = process.env.DATABASE_URL;
+}
+
+const activeDatabaseUrl = process.env.POSTGRES_URL?.trim() || "";
+
+console.log("Syncing with Neon DB: ", process.env.POSTGRES_URL ? "CONNECTED" : "MISSING");
+
+console.log("Saving to DB:", activeDatabaseUrl ? activeDatabaseUrl.substring(0, 15) + "..." : "(missing)");
+
+console.log("Current ENV keys:", Object.keys(process.env));
 
 const allowedModels = ["gemini-1.5-flash", "gemini-2.0-flash"] as const;
 type SupportedModel = (typeof allowedModels)[number];
@@ -52,10 +65,9 @@ const getErrorMessage = (error: unknown) => {
 };
 
 const ensurePostgresEnv = () => {
-  const postgresUrl = process.env.POSTGRES_URL?.trim();
-  const databaseUrl = process.env.DATABASE_URL?.trim();
-  if (!postgresUrl && !databaseUrl) {
-    return "Missing Postgres environment variables: POSTGRES_URL or DATABASE_URL";
+  const dbUrl = process.env.POSTGRES_URL?.trim();
+  if (!dbUrl) {
+    return "MISSING_POSTGRES_ENV";
   }
 
   return null;
@@ -64,29 +76,63 @@ const ensurePostgresEnv = () => {
 const ensureFamilyScheduleTable = async () => {
   const envError = ensurePostgresEnv();
   if (envError) {
-    return { ok: false as const, error: envError };
+    return { ok: false as const, code: envError, error: envError };
   }
 
   try {
     await sql`
       CREATE TABLE IF NOT EXISTS family_schedule (
-        event_id TEXT PRIMARY KEY,
-        event_date TEXT NOT NULL,
-        day_index INT NOT NULL,
-        event_time TEXT NOT NULL,
+        id TEXT PRIMARY KEY,
+        text TEXT NOT NULL,
+        day TEXT NOT NULL,
+        time TEXT NOT NULL,
+        type TEXT NOT NULL,
         child TEXT NOT NULL,
-        title TEXT NOT NULL,
-        event_type TEXT NOT NULL,
-        is_recurring BOOLEAN NOT NULL DEFAULT FALSE,
-        recurring_template_id TEXT,
-        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        is_weekly BOOLEAN NOT NULL DEFAULT FALSE
       )
+    `;
+    await sql`ALTER TABLE family_schedule ADD COLUMN IF NOT EXISTS id TEXT`;
+    await sql`ALTER TABLE family_schedule ADD COLUMN IF NOT EXISTS text TEXT`;
+    await sql`ALTER TABLE family_schedule ADD COLUMN IF NOT EXISTS day TEXT`;
+    await sql`ALTER TABLE family_schedule ADD COLUMN IF NOT EXISTS time TEXT`;
+    await sql`ALTER TABLE family_schedule ADD COLUMN IF NOT EXISTS type TEXT`;
+    await sql`ALTER TABLE family_schedule ADD COLUMN IF NOT EXISTS child TEXT`;
+    await sql`ALTER TABLE family_schedule ADD COLUMN IF NOT EXISTS event_id TEXT`;
+    await sql`ALTER TABLE family_schedule ADD COLUMN IF NOT EXISTS event_date TEXT`;
+    await sql`ALTER TABLE family_schedule ADD COLUMN IF NOT EXISTS day_index INT`;
+    await sql`ALTER TABLE family_schedule ADD COLUMN IF NOT EXISTS event_time TEXT`;
+    await sql`ALTER TABLE family_schedule ADD COLUMN IF NOT EXISTS title TEXT`;
+    await sql`ALTER TABLE family_schedule ADD COLUMN IF NOT EXISTS event_type TEXT`;
+    await sql`ALTER TABLE family_schedule ADD COLUMN IF NOT EXISTS is_recurring BOOLEAN NOT NULL DEFAULT FALSE`;
+    await sql`ALTER TABLE family_schedule ADD COLUMN IF NOT EXISTS recurring_template_id TEXT`;
+    await sql`ALTER TABLE family_schedule ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()`;
+    await sql`
+      ALTER TABLE family_schedule
+      ADD COLUMN IF NOT EXISTS is_weekly BOOLEAN NOT NULL DEFAULT FALSE
+    `;
+    try {
+      await sql`
+        UPDATE family_schedule
+        SET
+          id = COALESCE(id, event_id),
+          text = COALESCE(text, title),
+          day = COALESCE(day, event_date),
+          time = COALESCE(time, event_time),
+          type = COALESCE(type, event_type),
+          is_weekly = COALESCE(is_weekly, is_recurring, FALSE)
+      `;
+    } catch {
+    }
+    await sql`
+      CREATE UNIQUE INDEX IF NOT EXISTS family_schedule_id_unique
+      ON family_schedule(id)
     `;
 
     return { ok: true as const };
   } catch (error) {
     return {
       ok: false as const,
+      code: "TABLE_BOOTSTRAP_FAILED",
       error: `Failed to ensure family_schedule table: ${getErrorMessage(error)}`,
     };
   }
@@ -154,6 +200,64 @@ const sanitizeDbEvent = (value: unknown) => {
   };
 };
 
+const createIncomingFromFlatBody = (body: Record<string, unknown>) => {
+  const day = typeof body.day === "string" ? body.day.trim() : "";
+  const time = typeof body.time === "string" ? body.time.trim() : "";
+  const child = typeof body.child === "string" ? body.child.trim() : "";
+  const type = typeof body.type === "string" ? body.type.trim() : "";
+  const text = typeof body.text === "string" ? body.text.trim() : "";
+  const id = typeof body.id === "string" && body.id.trim()
+    ? body.id.trim()
+    : (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+      ? crypto.randomUUID()
+      : `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`);
+
+  if (!day || !time || !child || !type || !text) {
+    return null;
+  }
+
+  if (!allowedScheduleChildren.includes(child as (typeof allowedScheduleChildren)[number])) {
+    return null;
+  }
+
+  return sanitizeDbEvent({
+    id,
+    date: day,
+    dayIndex: toDayIndex(day, 0),
+    time,
+    child,
+    title: text,
+    type,
+    isRecurring: false,
+  });
+};
+
+const toDayIndex = (dayValue: string, fallback: number) => {
+  const trimmed = dayValue.trim();
+  const numericDay = Number(trimmed);
+  if (Number.isInteger(numericDay) && numericDay >= 0 && numericDay <= 6) {
+    return numericDay;
+  }
+
+  const ddMmYyyy = trimmed.match(/^(\d{2})-(\d{2})-(\d{4})$/);
+  if (ddMmYyyy) {
+    const parsed = new Date(`${ddMmYyyy[3]}-${ddMmYyyy[2]}-${ddMmYyyy[1]}T00:00:00`);
+    if (!Number.isNaN(parsed.getTime())) {
+      return parsed.getDay();
+    }
+  }
+
+  const yyyyMmDd = trimmed.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (yyyyMmDd) {
+    const parsed = new Date(`${yyyyMmDd[1]}-${yyyyMmDd[2]}-${yyyyMmDd[3]}T00:00:00`);
+    if (!Number.isNaN(parsed.getTime())) {
+      return parsed.getDay();
+    }
+  }
+
+  return fallback;
+};
+
 const upsertScheduleEvent = async (incoming: ReturnType<typeof sanitizeDbEvent>) => {
   if (!incoming) {
     return { ok: false as const, error: "Invalid event payload" };
@@ -165,13 +269,38 @@ const upsertScheduleEvent = async (incoming: ReturnType<typeof sanitizeDbEvent>)
   }
 
   try {
-    await sql`
+    const data = {
+      id: incoming.eventId,
+      text: incoming.title,
+      day: incoming.date,
+      time: incoming.time,
+      type: incoming.type,
+      child: incoming.child,
+      is_weekly: incoming.isRecurring ?? false,
+      event_id: incoming.eventId,
+      event_date: incoming.date,
+      day_index: incoming.dayIndex,
+      event_time: incoming.time,
+      title: incoming.title,
+      event_type: incoming.type,
+      is_recurring: incoming.isRecurring ?? false,
+      recurring_template_id: incoming.recurringTemplateId ?? null,
+    };
+    console.log("Data to save:", data);
+
+    const newRow = await sql`
       INSERT INTO family_schedule (
+        id,
+        text,
+        day,
+        time,
+        type,
+        child,
+        is_weekly,
         event_id,
         event_date,
         day_index,
         event_time,
-        child,
         title,
         event_type,
         is_recurring,
@@ -179,31 +308,66 @@ const upsertScheduleEvent = async (incoming: ReturnType<typeof sanitizeDbEvent>)
         updated_at
       )
       VALUES (
-        ${incoming.eventId},
-        ${incoming.date},
-        ${incoming.dayIndex},
-        ${incoming.time},
-        ${incoming.child},
-        ${incoming.title},
-        ${incoming.type},
-        ${incoming.isRecurring},
-        ${incoming.recurringTemplateId},
+        ${data.id},
+        ${data.text},
+        ${data.day},
+        ${data.time},
+        ${data.type},
+        ${data.child},
+        ${data.is_weekly},
+        ${data.event_id},
+        ${data.event_date},
+        ${data.day_index},
+        ${data.event_time},
+        ${data.title},
+        ${data.event_type},
+        ${data.is_recurring},
+        ${data.recurring_template_id},
         NOW()
       )
-      ON CONFLICT (event_id)
+      ON CONFLICT (id)
       DO UPDATE SET
+        text = EXCLUDED.text,
+        day = EXCLUDED.day,
+        time = EXCLUDED.time,
+        type = EXCLUDED.type,
+        child = EXCLUDED.child,
+        is_weekly = EXCLUDED.is_weekly,
+        event_id = EXCLUDED.event_id,
         event_date = EXCLUDED.event_date,
         day_index = EXCLUDED.day_index,
         event_time = EXCLUDED.event_time,
-        child = EXCLUDED.child,
         title = EXCLUDED.title,
         event_type = EXCLUDED.event_type,
         is_recurring = EXCLUDED.is_recurring,
         recurring_template_id = EXCLUDED.recurring_template_id,
         updated_at = NOW()
+      RETURNING *
     `;
+    console.log("DB Action Success:", newRow.rowCount);
 
-    return { ok: true as const };
+    const saved = newRow.rows[0];
+    if (!saved) {
+      return { ok: false as const, error: "Saved row was not found" };
+    }
+
+    console.log("Saved successfully:", newRow.rows[0]);
+
+    return {
+      ok: true as const,
+      row: newRow.rows[0],
+      event: {
+        id: String(saved.id),
+        date: String(saved.day),
+        dayIndex: toDayIndex(String(saved.day ?? ""), incoming.dayIndex),
+        time: String(saved.time),
+        child: String(saved.child),
+        title: String(saved.text),
+        type: String(saved.type),
+        isRecurring: Boolean(saved.is_weekly),
+        recurringTemplateId: incoming.recurringTemplateId ?? undefined,
+      },
+    };
   } catch (error) {
     return {
       ok: false as const,
@@ -217,34 +381,32 @@ export async function GET() {
     console.log('[API] GET /api/schedule');
     const tableStatus = await ensureFamilyScheduleTable();
     if (!tableStatus.ok) {
+      if (tableStatus.code === "MISSING_POSTGRES_ENV") {
+        return NextResponse.json([]);
+      }
       return NextResponse.json({ error: tableStatus.error }, { status: 500 });
     }
 
     const result = await sql`
-      SELECT
-        event_id,
-        event_date,
-        day_index,
-        event_time,
-        child,
-        title,
-        event_type,
-        is_recurring,
-        recurring_template_id
+      SELECT *
       FROM family_schedule
-      ORDER BY event_date ASC, event_time ASC
+      ORDER BY time ASC
     `;
+    console.log("DB Action Success:", result.rowCount);
 
-    const events = result.rows.map((row) => ({
-      id: row.event_id,
-      date: row.event_date,
-      dayIndex: Number(row.day_index),
-      time: row.event_time,
+    const rows = result.rows;
+    console.log("Events found in DB:", rows);
+
+    const events = rows.map((row) => ({
+      id: row.id,
+      date: row.day,
+      dayIndex: toDayIndex(String(row.day ?? ""), 0),
+      time: row.time,
       child: row.child,
-      title: row.title,
-      type: row.event_type,
-      isRecurring: Boolean(row.is_recurring),
-      recurringTemplateId: row.recurring_template_id || undefined,
+      title: row.text,
+      type: row.type,
+      isRecurring: Boolean(row.is_weekly),
+      recurringTemplateId: undefined,
     }));
 
     return NextResponse.json({ events });
@@ -285,6 +447,9 @@ export async function DELETE(request: NextRequest) {
     console.log('[API] DELETE /api/schedule');
     const tableStatus = await ensureFamilyScheduleTable();
     if (!tableStatus.ok) {
+      if (tableStatus.code === "MISSING_POSTGRES_ENV") {
+        return NextResponse.json([]);
+      }
       return NextResponse.json({ error: tableStatus.error }, { status: 500 });
     }
 
@@ -293,6 +458,8 @@ export async function DELETE(request: NextRequest) {
     const queryRecurringTemplateId = url.searchParams.get("recurringTemplateId")?.trim() || "";
     const queryClearAllRaw = url.searchParams.get("clearAll")?.trim().toLowerCase() || "";
     const queryClearAll = queryClearAllRaw === "1" || queryClearAllRaw === "true";
+    const queryPassword = url.searchParams.get("password")?.trim() || "";
+    const headerPassword = request.headers.get("x-delete-password")?.trim() || "";
 
     const parsedBody = await tryParseJsonBody(request);
     if (!parsedBody.ok && !queryId && !queryRecurringTemplateId && !queryClearAll) {
@@ -303,6 +470,13 @@ export async function DELETE(request: NextRequest) {
     const bodyClearAll = Boolean(body?.clearAll);
     const bodyEventId = typeof body?.eventId === "string" ? body.eventId.trim() : "";
     const bodyRecurringTemplateId = typeof body?.recurringTemplateId === "string" ? body.recurringTemplateId.trim() : "";
+    const bodyPassword = typeof body?.password === "string" ? body.password.trim() : "";
+
+    const providedDeletePassword = headerPassword || queryPassword || bodyPassword;
+    const expectedDeletePassword = process.env.DELETE_PASSWORD?.trim() || "2101";
+    if (!providedDeletePassword || providedDeletePassword !== expectedDeletePassword) {
+      return NextResponse.json({ error: "Invalid delete password" }, { status: 403 });
+    }
 
     const clearAll = queryClearAll || bodyClearAll;
     const eventId = queryId || bodyEventId;
@@ -320,13 +494,13 @@ export async function DELETE(request: NextRequest) {
     if (recurringTemplateId) {
       await sql`
         DELETE FROM family_schedule
-        WHERE recurring_template_id = ${recurringTemplateId}
-           OR event_id = ${eventId}
+        WHERE id = ${recurringTemplateId}
+           OR id = ${eventId}
       `;
     } else {
       await sql`
         DELETE FROM family_schedule
-        WHERE event_id = ${eventId}
+        WHERE id = ${eventId}
       `;
     }
 
@@ -404,6 +578,9 @@ export async function POST(request: NextRequest) {
   try {
     const tableStatus = await ensureFamilyScheduleTable();
     if (!tableStatus.ok) {
+      if (tableStatus.code === "MISSING_POSTGRES_ENV") {
+        return NextResponse.json([]);
+      }
       return NextResponse.json({ error: tableStatus.error }, { status: 500 });
     }
 
@@ -413,15 +590,50 @@ export async function POST(request: NextRequest) {
     }
 
     const body = parsedBody.data as Record<string, unknown>;
+    const senderSubscriptionEndpoint = typeof body?.senderSubscriptionEndpoint === "string"
+      ? body.senderSubscriptionEndpoint.trim()
+      : "";
 
-    const incoming = sanitizeDbEvent(body?.event);
+    const flatIncoming = createIncomingFromFlatBody(body);
+    if (flatIncoming) {
+      const upsertResult = await upsertScheduleEvent(flatIncoming);
+      if (!upsertResult.ok) {
+        return NextResponse.json({ error: upsertResult.error }, { status: 500 });
+      }
+
+      await sendPushToAll(
+        {
+          title: "משימה חדשה נוספה",
+          body: `${flatIncoming.title} - ${flatIncoming.time}`,
+          url: "/",
+        },
+        { excludeEndpoint: senderSubscriptionEndpoint }
+      );
+
+      return NextResponse.json(upsertResult.row);
+    }
+
+    const nestedEvent = body?.event && typeof body.event === "object"
+      ? (body.event as Record<string, unknown>)
+      : null;
+    const nestedFlatIncoming = nestedEvent ? createIncomingFromFlatBody(nestedEvent) : null;
+    const incoming = sanitizeDbEvent(body?.event) ?? nestedFlatIncoming;
     if (incoming) {
       const upsertResult = await upsertScheduleEvent(incoming);
       if (!upsertResult.ok) {
         return NextResponse.json({ error: upsertResult.error }, { status: 500 });
       }
 
-      return NextResponse.json({ ok: true });
+      await sendPushToAll(
+        {
+          title: "משימה חדשה נוספה",
+          body: `${incoming.title} - ${incoming.time}`,
+          url: "/",
+        },
+        { excludeEndpoint: senderSubscriptionEndpoint }
+      );
+
+      return NextResponse.json(upsertResult.row);
     }
 
     const text = typeof body?.text === "string" ? body.text.trim() : "";

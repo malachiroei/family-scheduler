@@ -256,6 +256,19 @@ const normalizeManualTimeInput = (value: string) => normalizeLooseClock(value) ?
 
 const getDropdownTimeValue = (value: string) => (halfHourTimeOptions.includes(value) ? value : '');
 
+const urlBase64ToUint8Array = (base64String: string) => {
+  const padding = '='.repeat((4 - (base64String.length % 4)) % 4);
+  const base64 = (base64String + padding).replace(/-/g, '+').replace(/_/g, '/');
+  const rawData = atob(base64);
+  const outputArray = new Uint8Array(rawData.length);
+
+  for (let i = 0; i < rawData.length; ++i) {
+    outputArray[i] = rawData.charCodeAt(i);
+  }
+
+  return outputArray;
+};
+
 const normalizeClock = (value: string) => {
   const match = value.match(/^(\d{1,2}):(\d{2})$/);
   if (!match) {
@@ -524,6 +537,18 @@ const normalizeTypeForStorage = (eventType: string, title: string) => {
   return eventType.trim() || title.trim() || 'lesson';
 };
 
+const getDefaultTitleFromType = (eventType: string) => {
+  const normalized = eventType.trim().toLowerCase();
+  if (normalized === 'sport') return 'כדורסל';
+  if (normalized === 'gym') return 'אימון';
+  if (normalized === 'lesson') return 'שיעור';
+  if (normalized === 'dance') return 'ריקוד';
+  if (normalized === 'dog') return 'טיפול בכלב';
+  if (normalized === 'tutoring') return 'תגבור';
+  if (normalized === 'other') return 'אחר';
+  return eventType.trim();
+};
+
 const getChildKeys = (key: ChildKey): BaseChildKey[] => {
   if (key === 'amit_alin') return ['amit', 'alin'];
   if (key === 'alin_ravid') return ['alin', 'ravid'];
@@ -705,10 +730,15 @@ export default function FamilyScheduler() {
   } | null>(null);
   const [creatingEvent, setCreatingEvent] = useState<NewEventDraft | null>(null);
   const [isChatOpen, setIsChatOpen] = useState(false);
+  const [pushSupported, setPushSupported] = useState(false);
+  const [pushEnabled, setPushEnabled] = useState(false);
+  const [pushBusy, setPushBusy] = useState(false);
+  const [subscriptionEndpoint, setSubscriptionEndpoint] = useState("");
   const persistDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const requestInFlightRef = useRef(false);
   const lastApiRequestAtRef = useRef<number>(0);
   const hasLoadedStorageRef = useRef(false);
+  const [isHydrated, setIsHydrated] = useState(false);
   const autoRefetchInFlightRef = useRef(false);
   const autoRefetchWeekKeyRef = useRef<string>('');
 
@@ -739,7 +769,9 @@ export default function FamilyScheduler() {
             const normalized = normalizePersistedState(payload.state, initialWeekStart);
             setWeekStart(normalized.weekStart);
             setRecurringTemplates(normalized.recurringTemplates);
-            setWeeksData(normalized.weeksData);
+            setWeeksData({
+              [toIsoDate(normalized.weekStart)]: createWeekDays(normalized.weekStart, false, normalized.recurringTemplates),
+            });
             return;
           }
         }
@@ -754,7 +786,9 @@ export default function FamilyScheduler() {
         if (!cancelled) {
           setWeekStart(normalized.weekStart);
           setRecurringTemplates(normalized.recurringTemplates);
-          setWeeksData(normalized.weeksData);
+          setWeeksData({
+            [toIsoDate(normalized.weekStart)]: createWeekDays(normalized.weekStart, false, normalized.recurringTemplates),
+          });
         }
       } catch {
         if (!cancelled) {
@@ -771,6 +805,7 @@ export default function FamilyScheduler() {
     void hydrateState().finally(() => {
       if (!cancelled) {
         hasLoadedStorageRef.current = true;
+        setIsHydrated(true);
       }
     });
 
@@ -780,7 +815,7 @@ export default function FamilyScheduler() {
   }, [initialWeekStart]);
 
   useEffect(() => {
-    if (!hasLoadedStorageRef.current) {
+    if (!isHydrated) {
       return;
     }
 
@@ -845,6 +880,103 @@ export default function FamilyScheduler() {
     }
   }, [creatingEvent, editingEvent]);
 
+  useEffect(() => {
+    let cancelled = false;
+
+    const setupPush = async () => {
+      if (!("serviceWorker" in navigator) || !("PushManager" in window)) {
+        return;
+      }
+
+      setPushSupported(true);
+
+      try {
+        const registration = await navigator.serviceWorker.register('/sw.js');
+        const configResponse = await fetch('/api/push/subscribe', { cache: 'no-store' });
+        const configPayload = await configResponse.json();
+        if (!configResponse.ok || !configPayload?.enabled || !configPayload?.publicKey) {
+          return;
+        }
+
+        const existing = await registration.pushManager.getSubscription();
+        if (!existing) {
+          return;
+        }
+
+        const serialized = existing.toJSON();
+        await fetch('/api/push/subscribe', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ subscription: serialized }),
+        });
+
+        if (!cancelled) {
+          setPushEnabled(true);
+          setSubscriptionEndpoint(serialized.endpoint || '');
+        }
+      } catch {
+      }
+    };
+
+    void setupPush();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const enablePushNotifications = async () => {
+    if (!pushSupported || pushBusy) {
+      return;
+    }
+
+    setPushBusy(true);
+    try {
+      const permission = await Notification.requestPermission();
+      if (permission !== 'granted') {
+        setApiError('לא אושרו התראות בדפדפן.');
+        return;
+      }
+
+      const registration = await navigator.serviceWorker.register('/sw.js');
+      const configResponse = await fetch('/api/push/subscribe', { cache: 'no-store' });
+      const configPayload = await configResponse.json();
+      if (!configResponse.ok || !configPayload?.enabled || !configPayload?.publicKey) {
+        setApiError('התראות אינן זמינות כרגע בשרת.');
+        return;
+      }
+
+      let subscription = await registration.pushManager.getSubscription();
+      if (!subscription) {
+        subscription = await registration.pushManager.subscribe({
+          userVisibleOnly: true,
+          applicationServerKey: urlBase64ToUint8Array(String(configPayload.publicKey)),
+        });
+      }
+
+      const serialized = subscription.toJSON();
+      const saveResponse = await fetch('/api/push/subscribe', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ subscription: serialized }),
+      });
+
+      if (!saveResponse.ok) {
+        const body = await saveResponse.json().catch(() => ({}));
+        throw new Error(body?.error || 'Failed to save notification subscription');
+      }
+
+      setPushEnabled(true);
+      setSubscriptionEndpoint(serialized.endpoint || '');
+      setSuccessMessage('התראות הופעלו בהצלחה.');
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'הפעלת התראות נכשלה';
+      setApiError(message);
+    } finally {
+      setPushBusy(false);
+    }
+  };
+
   const weekRangeLabel = `${toDisplayDate(weekStart)} - ${toDisplayDate(addDays(weekStart, 6))}`;
 
   const refetchEventsFromDatabase = async (targetWeekStart: Date) => {
@@ -894,7 +1026,7 @@ export default function FamilyScheduler() {
         const dayIndex = eventDate.getDay();
         weekDays[dayIndex].events.push({
           id: event.id,
-          date: event.date,
+          date: toEventDateKey(eventDate),
           time: normalizeTimeForPicker(event.time),
           child: event.child,
           title: event.title,
@@ -920,6 +1052,7 @@ export default function FamilyScheduler() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
+          senderSubscriptionEndpoint: subscriptionEndpoint || undefined,
           event: {
             ...event,
             dayIndex,
@@ -931,13 +1064,15 @@ export default function FamilyScheduler() {
       if (!response.ok) {
         throw new Error(payload?.error || 'Failed saving event');
       }
+
+      return payload;
     } catch (error) {
       console.error('[API] POST /api/schedule client failed', error);
       throw error;
     }
   };
 
-  const deleteEventFromDatabase = async (payload: { eventId: string; recurringTemplateId?: string }) => {
+  const deleteEventFromDatabase = async (payload: { eventId: string; recurringTemplateId?: string }, deletePassword: string) => {
     try {
       console.log('[API] DELETE /api/schedule -> start', payload);
       const query = new URLSearchParams();
@@ -950,6 +1085,9 @@ export default function FamilyScheduler() {
 
       const response = await fetch(`/api/schedule?${query.toString()}`, {
         method: 'DELETE',
+        headers: {
+          'x-delete-password': deletePassword,
+        },
       });
       const body = await response.json();
       console.log('[API] DELETE /api/schedule ->', response.status, body);
@@ -967,25 +1105,8 @@ export default function FamilyScheduler() {
     setDbSyncStatus({ state: 'saving', message: 'Saving to database...' });
     try {
       await upsertEventToDatabase(event, dayIndex);
-
-      const targetWeekKey = toIsoDate(targetWeekStart);
-      setWeeksData((prev) => {
-        const weekDays = prev[targetWeekKey] ? prev[targetWeekKey].map((day) => ({ ...day, events: [...day.events] })) : createWeekDays(targetWeekStart, false, recurringTemplates);
-        const existingDay = weekDays[dayIndex] || {
-          date: toDisplayDate(addDays(targetWeekStart, dayIndex)),
-          dayName: dayNames[dayIndex],
-          isoDate: toIsoDate(addDays(targetWeekStart, dayIndex)),
-          events: [],
-        };
-
-        const nextEvents = existingDay.events.filter((existingEvent) => existingEvent.id !== event.id);
-        nextEvents.push(event);
-        weekDays[dayIndex] = { ...existingDay, events: sortEvents(nextEvents) };
-
-        return { ...prev, [targetWeekKey]: weekDays };
-      });
-
       await refetchEventsFromDatabase(targetWeekStart);
+
       setDbSyncStatus({ state: 'saved', message: 'Saved' });
     } catch (error) {
       console.error('[API] handleSubmit failed', error);
@@ -994,11 +1115,31 @@ export default function FamilyScheduler() {
     }
   };
 
+  const verifyDeletePassword = () => {
+    const entered = window.prompt('הקלידי סיסמה למחיקה');
+    if (entered === null) {
+      return null;
+    }
+
+    const trimmed = entered.trim();
+    if (trimmed !== '2101') {
+      setApiError('סיסמה שגויה. המחיקה בוטלה.');
+      return null;
+    }
+
+    return trimmed;
+  };
+
   const handleDelete = async (payload: { eventId: string; recurringTemplateId?: string }, targetWeekStart: Date) => {
     console.log('Action triggered:', 'delete');
+    const deletePassword = verifyDeletePassword();
+    if (!deletePassword) {
+      return;
+    }
+
     setDbSyncStatus({ state: 'saving', message: 'Deleting from database...' });
     try {
-      await deleteEventFromDatabase(payload);
+      await deleteEventFromDatabase(payload, deletePassword);
 
       const targetWeekKey = toIsoDate(targetWeekStart);
       setWeeksData((prev) => {
@@ -1027,9 +1168,11 @@ export default function FamilyScheduler() {
   };
 
   useEffect(() => {
-    if (!hasLoadedStorageRef.current) {
+    if (!isHydrated) {
       return;
     }
+
+    console.log('[UI] auto refetch trigger', { weekKey, isHydrated });
 
     if (autoRefetchInFlightRef.current && autoRefetchWeekKeyRef.current === weekKey) {
       return;
@@ -1047,7 +1190,7 @@ export default function FamilyScheduler() {
       .finally(() => {
         autoRefetchInFlightRef.current = false;
       });
-  }, [weekKey]);
+  }, [weekKey, isHydrated]);
 
   const parseInstructionFallback = (text: string): { targetWeekStart: Date; events: AiEvent[] } | null => {
     const timeMatch = extractTimesFromLine(text)[0];
@@ -1083,7 +1226,7 @@ export default function FamilyScheduler() {
       {getChildKeys(childKey).map((baseKey) => {
         const config = baseChildrenConfig[baseKey];
         return (
-          <span key={`${childKey}-${baseKey}`} className={`px-3 py-1 rounded-full text-[11px] font-black uppercase tracking-tighter text-white ${config.color} shadow-sm`}>
+          <span key={`${childKey}-${baseKey}`} className={`px-4 py-1.5 rounded-full text-sm font-black uppercase tracking-tighter text-white ${config.color} shadow-sm`}>
             {config.name}
           </span>
         );
@@ -1142,12 +1285,25 @@ export default function FamilyScheduler() {
   };
 
   const handleClearAll = async () => {
+    const confirmed = window.confirm('למחוק את כל המשימות מהלו״ז?');
+    if (!confirmed) {
+      return;
+    }
+
+    const deletePassword = verifyDeletePassword();
+    if (!deletePassword) {
+      return;
+    }
+
     try {
       console.log('Action triggered:', 'delete');
       setDbSyncStatus({ state: 'saving', message: 'Clearing database...' });
       console.log('[API] DELETE /api/schedule -> start clearAll');
       const response = await fetch('/api/schedule?clearAll=true', {
         method: 'DELETE',
+        headers: {
+          'x-delete-password': deletePassword,
+        },
       });
       const payload = await response.json();
       console.log('[API] DELETE /api/schedule ->', response.status, payload);
@@ -1343,17 +1499,20 @@ export default function FamilyScheduler() {
   const saveCreatedEvent = async () => {
     console.log('Action triggered:', 'add');
     if (!creatingEvent) {
+      console.warn('[UI] add aborted: creatingEvent is missing');
       return;
     }
 
-    const title = creatingEvent.data.title.trim();
+    const title = creatingEvent.data.title.trim() || getDefaultTitleFromType(creatingEvent.data.type) || 'פעילות';
     if (!title) {
+      console.warn('[UI] add aborted: missing title');
       setApiError('יש להזין כותרת למשימה לפני שמירה.');
       return;
     }
 
     const selectedDate = new Date(`${creatingEvent.selectedDate}T00:00:00`);
     if (Number.isNaN(selectedDate.getTime())) {
+      console.warn('[UI] add aborted: invalid selectedDate', creatingEvent.selectedDate);
       setApiError('יש לבחור תאריך תקין לפני שמירה.');
       return;
     }
@@ -1378,6 +1537,7 @@ export default function FamilyScheduler() {
     }
 
     try {
+      console.log('[UI] add submit payload', { targetDayIndex, targetWeekStart: toIsoDate(targetWeekStart), eventToSave });
       await handleSubmit(eventToSave, targetDayIndex, targetWeekStart);
     } catch {
       setApiError('שמירת העריכה לבסיס הנתונים נכשלה. נסה שוב.');
@@ -1394,17 +1554,20 @@ export default function FamilyScheduler() {
   const saveEditedEvent = async () => {
     console.log('Action triggered:', 'add');
     if (!editingEvent) {
+      console.warn('[UI] edit aborted: editingEvent is missing');
       return;
     }
 
-    const trimmedTitle = editingEvent.data.title.trim();
+    const trimmedTitle = editingEvent.data.title.trim() || getDefaultTitleFromType(editingEvent.data.type) || 'פעילות';
     if (!trimmedTitle) {
+      console.warn('[UI] edit aborted: missing title');
       setApiError('יש להזין כותרת למשימה לפני שמירה.');
       return;
     }
 
     const selectedDate = new Date(`${editingEvent.selectedDate}T00:00:00`);
     if (Number.isNaN(selectedDate.getTime())) {
+      console.warn('[UI] edit aborted: invalid selectedDate', editingEvent.selectedDate);
       setApiError('יש לבחור תאריך תקין לפני שמירה.');
       return;
     }
@@ -1428,6 +1591,7 @@ export default function FamilyScheduler() {
     }
 
     try {
+      console.log('[UI] edit submit payload', { targetDayIndex, targetWeekStart: toIsoDate(targetWeekStart), updatedEvent });
       await handleSubmit(updatedEvent, targetDayIndex, targetWeekStart);
     } catch {
       setApiError('ניקוי הנתונים בבסיס הנתונים נכשל. נסה שוב.');
@@ -1462,6 +1626,13 @@ export default function FamilyScheduler() {
       <div className="max-w-6xl mx-auto mb-8 print:mb-4">
         <div className="print-controls flex justify-end gap-3 print:hidden">
           <button
+            onClick={() => { void enablePushNotifications(); }}
+            disabled={!pushSupported || pushEnabled || pushBusy}
+            className="flex items-center gap-2 bg-blue-50 text-blue-700 border border-blue-200 px-4 py-2 rounded-lg hover:bg-blue-100 transition shadow-sm disabled:opacity-60 disabled:cursor-not-allowed"
+          >
+            {pushEnabled ? 'התראות פעילות' : (pushBusy ? 'מפעיל התראות...' : 'הפעל התראות')}
+          </button>
+          <button
             onClick={() => { void handleClearAll(); }}
             className="flex items-center gap-2 bg-red-50 text-red-700 border border-red-200 px-4 py-2 rounded-lg hover:bg-red-100 transition shadow-sm"
           >
@@ -1492,6 +1663,21 @@ export default function FamilyScheduler() {
         </button>
       </div>
 
+      <div className="max-w-6xl mx-auto mb-4 bg-white border border-slate-200 rounded-2xl p-3 shadow-sm print:hidden">
+        <div className="text-sm font-bold text-slate-700 mb-2">תרשים ילדים וצבעים</div>
+        <div className="flex flex-wrap items-center gap-2">
+          {(Object.keys(baseChildrenConfig) as BaseChildKey[]).map((childKey) => {
+            const config = baseChildrenConfig[childKey];
+            return (
+              <div key={childKey} className="flex items-center gap-2 bg-slate-50 border border-slate-200 rounded-xl px-3 py-2">
+                <span className={`w-3 h-3 rounded-full ${config.color}`} />
+                <span className="text-sm font-bold text-slate-700">{config.name}</span>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+
       <div className="max-w-6xl mx-auto mb-4 flex justify-end print:hidden">
         <button
           type="button"
@@ -1513,7 +1699,7 @@ export default function FamilyScheduler() {
             if (isRecurringEvent) {
               return true;
             }
-            return event.date === currentCellDate;
+              return normalizeEventDateKey(event.date, new Date(`${day.isoDate}T00:00:00`)) === currentCellDate;
           });
 
           return (

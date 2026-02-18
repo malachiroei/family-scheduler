@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { sql } from "@vercel/postgres";
 
+console.log("Current ENV keys:", Object.keys(process.env));
+
 type PersistedState = {
   weekStart?: string;
   recurringTemplates?: unknown[];
@@ -9,14 +11,41 @@ type PersistedState = {
 
 const STATE_KEY = "global";
 
+const getErrorMessage = (error: unknown) =>
+  error instanceof Error ? error.message : String(error);
+
+const ensurePostgresEnv = () => {
+  const postgresUrl = process.env.POSTGRES_URL?.trim();
+  const databaseUrl = process.env.DATABASE_URL?.trim();
+  if (!postgresUrl && !databaseUrl) {
+    return "MISSING_POSTGRES_ENV";
+  }
+
+  return null;
+};
+
 const ensureTable = async () => {
-  await sql`
-    CREATE TABLE IF NOT EXISTS scheduler_state (
-      state_key TEXT PRIMARY KEY,
-      payload JSONB NOT NULL,
-      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-    )
-  `;
+  const envError = ensurePostgresEnv();
+  if (envError) {
+    return { ok: false as const, code: envError, error: envError };
+  }
+
+  try {
+    await sql`
+      CREATE TABLE IF NOT EXISTS scheduler_state (
+        state_key TEXT PRIMARY KEY,
+        payload JSONB NOT NULL,
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    `;
+    return { ok: true as const };
+  } catch (error) {
+    return {
+      ok: false as const,
+      code: "TABLE_BOOTSTRAP_FAILED",
+      error: `Failed to ensure scheduler_state table: ${getErrorMessage(error)}`,
+    };
+  }
 };
 
 const isObject = (value: unknown): value is Record<string, unknown> =>
@@ -161,7 +190,14 @@ const removeEventFromState = (
 
 export async function GET() {
   try {
-    await ensureTable();
+    const tableStatus = await ensureTable();
+    if (!tableStatus.ok) {
+      if (tableStatus.code === "MISSING_POSTGRES_ENV") {
+        return NextResponse.json({ state: null });
+      }
+      return NextResponse.json({ error: tableStatus.error }, { status: 500 });
+    }
+
     const result = await sql`
       SELECT payload
       FROM scheduler_state
@@ -186,7 +222,14 @@ export async function PUT(request: NextRequest) {
     const incoming = await request.json();
     const state = sanitizeState(incoming);
 
-    await ensureTable();
+    const tableStatus = await ensureTable();
+    if (!tableStatus.ok) {
+      if (tableStatus.code === "MISSING_POSTGRES_ENV") {
+        return NextResponse.json({ ok: true });
+      }
+      return NextResponse.json({ error: tableStatus.error }, { status: 500 });
+    }
+
     await sql`
       INSERT INTO scheduler_state (state_key, payload, updated_at)
       VALUES (${STATE_KEY}, ${JSON.stringify(state)}::jsonb, NOW())
@@ -207,7 +250,14 @@ export async function DELETE(request: NextRequest) {
   try {
     const body = await request.json();
 
-    await ensureTable();
+    const tableStatus = await ensureTable();
+    if (!tableStatus.ok) {
+      if (tableStatus.code === "MISSING_POSTGRES_ENV") {
+        return NextResponse.json({ ok: true });
+      }
+      return NextResponse.json({ error: tableStatus.error }, { status: 500 });
+    }
+
     const result = await sql`
       SELECT payload
       FROM scheduler_state
