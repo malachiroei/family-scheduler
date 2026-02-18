@@ -27,8 +27,15 @@ body {
 
 @media print {
   @page {
-    size: landscape;
-    margin: 8mm;
+    size: A4 landscape;
+    margin: 6mm;
+  }
+
+  html,
+  body {
+    width: 297mm;
+    height: 210mm;
+    overflow: hidden !important;
   }
 
   body {
@@ -38,20 +45,50 @@ body {
 
   .print-scheduler-shell {
     height: auto !important;
-    overflow: visible !important;
+    overflow: hidden !important;
     background: #fff !important;
     padding: 0 !important;
   }
 
+  .print-logo,
+  .print-chat,
+  .print-controls,
+  .print-edit {
+    display: none !important;
+  }
+
   .printable-schedule {
-    max-width: 100% !important;
-    grid-template-columns: repeat(3, minmax(0, 1fr)) !important;
-    gap: 8px !important;
+    max-width: none !important;
+    width: 116% !important;
+    margin: 0 auto !important;
+    transform: scale(0.86) !important;
+    transform-origin: top center !important;
+    grid-template-columns: repeat(4, minmax(0, 1fr)) !important;
+    gap: 4mm !important;
   }
 
   .printable-schedule > div {
     break-inside: avoid;
     box-shadow: none !important;
     border: 1px solid #cbd5e1 !important;
+    border-radius: 10px !important;
+  }
+
+  .print-day-content {
+    min-height: 0 !important;
+    padding: 8px !important;
+    gap: 4px !important;
+  }
+
+  .print-event-item {
+    padding: 6px 4px !important;
+    border: 0 !important;
+    background: transparent !important;
+    box-shadow: none !important;
+  }
+
+  .print-event-item span,
+  .print-event-item div {
+    font-size: 11px !important;
   }
 }

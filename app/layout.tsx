@@ -16,9 +16,9 @@ export const metadata: Metadata = {
   title: "Malachi Family Time Planner",
   description: "לוח זמנים משפחתי חכם עם סנכרון בזמן אמת",
   icons: {
-    icon: "/favicon.ico",
-    shortcut: "/favicon.ico",
-    apple: "/favicon.ico",
+    icon: "/logo.png",
+    shortcut: "/logo.png",
+    apple: "/logo.png",
   },
 };
 

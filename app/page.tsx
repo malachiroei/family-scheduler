@@ -1,7 +1,7 @@
 "use client";
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import Image from 'next/image';
-import { Dog, Dumbbell, Music, GraduationCap, Trophy, Printer, Image as ImageIcon, MessageCircle, ChevronRight, ChevronLeft, X, Plus, Minimize2, Maximize2 } from 'lucide-react';
+import { Dog, Dumbbell, Music, GraduationCap, Trophy, Printer, Image as ImageIcon, MessageCircle, ChevronRight, ChevronLeft, X, Plus, CalendarDays, Clock3 } from 'lucide-react';
 import html2canvas from 'html2canvas';
 
 const baseChildrenConfig = {
@@ -51,7 +51,7 @@ type RecurringTemplate = {
 };
 
 type NewEventDraft = {
-  dayIndex: number;
+  selectedDate: string;
   recurringWeekly: boolean;
   data: {
     time: string;
@@ -70,6 +70,14 @@ const eventTypeLabels: Record<KnownEventType, string> = {
   lesson: 'שיעור/תגבור 📚',
   dance: 'ריקוד 💃',
 };
+
+const activityTypePresets: Array<{ value: EventType; label: string; emoji: string }> = [
+  { value: 'gym', label: 'אימון', emoji: '🏀' },
+  { value: 'lesson', label: 'שיעור', emoji: '📚' },
+  { value: 'dog', label: 'טיפול בכלב', emoji: '🐶' },
+  { value: 'tutoring', label: 'תגבור', emoji: '📖' },
+  { value: 'other', label: 'אחר', emoji: '✨' },
+];
 
 const childOptions: Array<{ key: ChildKey; label: string }> = [
   { key: 'ravid', label: 'רביד' },
@@ -560,6 +568,7 @@ const getEventIcon = (eventType: EventType, title?: string) => {
   if (/gym|כושר|אימון|מצוינות/i.test(source)) return <Dumbbell size={18} />;
   if (/sport|כדורסל|משחק|אולם/i.test(source)) return <Trophy size={18} />;
   if (/lesson|שיעור|תגבור|אנגלית|rachel|karl/i.test(source)) return <GraduationCap size={18} />;
+  if (/other|אחר/i.test(source)) return <Music size={18} />;
   if (/dance|ריקוד/i.test(source)) return <Music size={18} />;
   return <Music size={18} />;
 };
@@ -588,7 +597,7 @@ export default function FamilyScheduler() {
     originalRecurringTemplateId?: string;
   } | null>(null);
   const [creatingEvent, setCreatingEvent] = useState<NewEventDraft | null>(null);
-  const [isChatMinimized, setIsChatMinimized] = useState(false);
+  const [isChatOpen, setIsChatOpen] = useState(false);
   const schedulerRef = useRef<HTMLDivElement>(null);
   const persistDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const requestInFlightRef = useRef(false);
@@ -723,13 +732,6 @@ export default function FamilyScheduler() {
 
   const weekRangeLabel = `${toDisplayDate(weekStart)} - ${toDisplayDate(addDays(weekStart, 6))}`;
 
-  const setDays = (updater: (prev: DaySchedule[]) => DaySchedule[]) => {
-    setWeeksData((prev) => ({
-      ...prev,
-      [weekKey]: updater(prev[weekKey] ?? createWeekDays(weekStart, false, recurringTemplates)),
-    }));
-  };
-
   const addSingleEventToDays = (baseDays: DaySchedule[], eventData: AiEvent) => {
     const nextDays = baseDays.map((day) => ({ ...day, events: [...day.events] }));
 
@@ -767,9 +769,12 @@ export default function FamilyScheduler() {
     return nextDays;
   };
 
-  const addNewEvent = (eventData: AiEvent, forceRecurring = false) => {
+  const addNewEvent = (eventData: AiEvent, forceRecurring = false, targetWeekStartOverride?: Date) => {
     writeQueueRef.current = writeQueueRef.current.then(async () => {
       console.log(eventData);
+
+      const targetWeekStart = targetWeekStartOverride ? getWeekStart(targetWeekStartOverride) : weekStart;
+      const targetWeekKey = toIsoDate(targetWeekStart);
 
       const isRecurringFixed =
         forceRecurring ||
@@ -777,7 +782,13 @@ export default function FamilyScheduler() {
         (eventData.dayIndex === 5 && normalizeTimeForPicker(eventData.time) === '15:30' && normalizeChildKey(String(eventData.child)) === 'ravid');
 
       const normalizedType = normalizeTypeForStorage(String(eventData.type || ''), String(eventData.title || ''));
-      setDays((prevDays) => addSingleEventToDays(prevDays, { ...eventData, type: normalizedType }));
+      setWeeksData((prev) => {
+        const baseDays = prev[targetWeekKey] ?? createWeekDays(targetWeekStart, false, recurringTemplates);
+        return {
+          ...prev,
+          [targetWeekKey]: addSingleEventToDays(baseDays, { ...eventData, type: normalizedType }),
+        };
+      });
 
       if (isRecurringFixed) {
         const normalizedChild = normalizeChildKey(String(eventData.child));
@@ -802,7 +813,7 @@ export default function FamilyScheduler() {
           const nextData: Record<string, DaySchedule[]> = {};
 
           Object.entries(prev).forEach(([key, value]) => {
-            if (key <= weekKey) {
+            if (key <= targetWeekKey) {
               nextData[key] = value.map((day) => ({ ...day, events: [...day.events] }));
               return;
             }
@@ -886,8 +897,10 @@ export default function FamilyScheduler() {
     if (schedulerRef.current) {
       const sourceCanvas = await html2canvas(schedulerRef.current, {
         backgroundColor: '#ffffff',
-        scale: 2,
+        scale: Math.max(3, Math.min(4, window.devicePixelRatio * 2)),
         useCORS: true,
+        logging: false,
+        ignoreElements: (element) => element.classList?.contains('capture-ignore') ?? false,
       });
 
       const targetRatio = 16 / 9;
@@ -910,6 +923,8 @@ export default function FamilyScheduler() {
 
       context.fillStyle = '#f8fafc';
       context.fillRect(0, 0, outputWidth, outputHeight);
+      context.imageSmoothingEnabled = true;
+      context.imageSmoothingQuality = 'high';
 
       const offsetX = Math.round((outputWidth - sourceCanvas.width) / 2);
       const offsetY = Math.round((outputHeight - sourceCanvas.height) / 2);
@@ -1055,8 +1070,9 @@ export default function FamilyScheduler() {
   };
 
   const openCreateEventModal = (dayIndex: number) => {
+    const selectedDate = toIsoDate(addDays(weekStart, dayIndex));
     setCreatingEvent({
-      dayIndex,
+      selectedDate,
       recurringWeekly: false,
       data: {
         time: '08:00',
@@ -1078,16 +1094,31 @@ export default function FamilyScheduler() {
       return;
     }
 
+    const selectedDate = new Date(`${creatingEvent.selectedDate}T00:00:00`);
+    if (Number.isNaN(selectedDate.getTime())) {
+      setApiError('יש לבחור תאריך תקין לפני שמירה.');
+      return;
+    }
+
+    const targetWeekStart = getWeekStart(selectedDate);
+    const targetDayIndex = selectedDate.getDay();
+
     addNewEvent(
       {
-        dayIndex: creatingEvent.dayIndex,
+        dayIndex: targetDayIndex,
         time: normalizeTimeForPicker(creatingEvent.data.time),
         child: creatingEvent.data.child,
         title,
         type: creatingEvent.data.type || 'lesson',
       },
-      creatingEvent.recurringWeekly
+      creatingEvent.recurringWeekly,
+      targetWeekStart
     );
+
+    const targetWeekKey = toIsoDate(targetWeekStart);
+    if (targetWeekKey !== weekKey) {
+      setWeekStart(targetWeekStart);
+    }
 
     setCreatingEvent(null);
     setSuccessMessage('המשימה נוספה בהצלחה ללו״ז.');
@@ -1177,11 +1208,22 @@ export default function FamilyScheduler() {
 
   return (
     <div className="print-scheduler-shell h-screen overflow-y-auto bg-[#f8fafc] p-4 pb-28 md:p-8 md:pb-32 dir-rtl" dir="rtl">
-      <div className="max-w-6xl mx-auto flex justify-between items-center mb-8 print:mb-4">
-        <h1 className="text-3xl font-extrabold text-slate-800 flex items-center gap-3">
-          לו״ז משפחתי <span className="text-sm font-normal bg-blue-100 text-blue-600 px-3 py-1 rounded-full">2026</span>
-        </h1>
-        <div className="flex gap-3 print:hidden">
+      <div className="max-w-6xl mx-auto mb-8 print:mb-4">
+        <div className="print-logo flex justify-center print:hidden">
+          <div className="bg-white border border-slate-200 rounded-2xl px-5 py-3 shadow-sm text-center">
+            <Image
+              src="/logo.png"
+              alt="MALACHI FAMILY TIME PLANNER"
+              width={260}
+              height={70}
+              priority
+              className="mx-auto h-auto w-[220px] sm:w-[260px]"
+            />
+            <div className="mt-1 text-[11px] sm:text-xs font-semibold tracking-[0.24em] text-slate-600">MALACHI FAMILY TIME PLANNER</div>
+          </div>
+        </div>
+
+        <div className="print-controls mt-4 flex justify-end gap-3 print:hidden">
           <button onClick={() => window.print()} className="flex items-center gap-2 bg-white border border-slate-200 px-4 py-2 rounded-lg hover:bg-slate-50 transition shadow-sm">
             <Printer size={18} /> הדפסה
           </button>
@@ -1224,14 +1266,14 @@ export default function FamilyScheduler() {
             : day.events;
 
           return (
-          <div key={day.isoDate} className="bg-white rounded-3xl shadow-xl overflow-hidden border border-slate-100 ring-1 ring-slate-200">
+          <div key={day.isoDate} className="bg-white rounded-3xl shadow-xl overflow-hidden border border-slate-100 ring-1 ring-slate-200 print-day-card">
             <div className="bg-[#1e293b] text-white p-4 flex justify-between items-center">
               <span className="font-bold text-lg">{day.dayName}</span>
               <span className="text-sm font-mono opacity-70">{day.date}</span>
             </div>
 
             <div
-              className="p-4 space-y-3 min-h-[220px]"
+              className="p-4 space-y-3 min-h-[220px] print-day-content"
               onClick={(event) => {
                 if (event.target === event.currentTarget) {
                   openCreateEventModal(dayIndex);
@@ -1242,7 +1284,7 @@ export default function FamilyScheduler() {
                 <button
                   type="button"
                   onClick={() => openCreateEventModal(dayIndex)}
-                  className="w-full text-sm text-slate-500 border border-dashed border-slate-300 rounded-2xl p-3 text-center hover:bg-slate-50 transition"
+                  className="w-full text-sm text-slate-500 border border-dashed border-slate-300 rounded-2xl p-3 text-center hover:bg-slate-50 transition capture-ignore print-edit"
                 >
                   אין אירועים כרגע — לחץ להוספת משימה
                 </button>
@@ -1260,7 +1302,7 @@ export default function FamilyScheduler() {
                       recurringWeekly: Boolean(event.recurringTemplateId),
                       originalRecurringTemplateId: event.recurringTemplateId,
                     })}
-                    className="w-full text-right flex items-center justify-between p-3 rounded-2xl bg-slate-50 border border-transparent hover:border-slate-200 transition print:pointer-events-none"
+                    className="w-full text-right flex items-center justify-between p-3 rounded-2xl bg-slate-50 border border-transparent hover:border-slate-200 transition print:pointer-events-none print-event-item"
                   >
                     <span className="text-slate-500 font-medium text-sm w-14">{event.time}</span>
                     <div className="flex-1 flex items-center gap-3">
@@ -1282,7 +1324,7 @@ export default function FamilyScheduler() {
               <button
                 type="button"
                 onClick={() => openCreateEventModal(dayIndex)}
-                className="w-full mt-1 flex items-center justify-center gap-2 text-sm text-slate-600 border border-dashed border-slate-300 rounded-2xl p-2.5 hover:bg-slate-50 transition print:hidden"
+                className="w-full mt-1 flex items-center justify-center gap-2 text-sm text-slate-600 border border-dashed border-slate-300 rounded-2xl p-2.5 hover:bg-slate-50 transition print:hidden capture-ignore print-edit"
               >
                 <Plus size={16} /> הוסף משימה
               </button>
@@ -1291,21 +1333,21 @@ export default function FamilyScheduler() {
         )})}
       </div>
 
-      <div className="fixed bottom-4 right-4 left-4 md:left-auto md:w-[430px] z-40 print:hidden">
-        <div className="bg-white border border-slate-200 rounded-2xl shadow-2xl overflow-hidden">
-          <div className="bg-slate-800 text-white px-4 py-3 flex items-center justify-between">
-            <span className="text-sm font-semibold">עדכון חכם לצ׳אט</span>
-            <button
-              type="button"
-              onClick={() => setIsChatMinimized((prev) => !prev)}
-              className="rounded-md bg-white/10 hover:bg-white/20 p-1 transition"
-              aria-label={isChatMinimized ? 'הרחב צ׳אט' : 'מזער צ׳אט'}
-            >
-              {isChatMinimized ? <Maximize2 size={16} /> : <Minimize2 size={16} />}
-            </button>
-          </div>
+      <div className="print-chat fixed bottom-5 right-5 z-40 print:hidden">
+        {isChatOpen && (
+          <div className="mb-3 w-[min(92vw,390px)] bg-white border border-slate-200 rounded-2xl shadow-2xl overflow-hidden">
+            <div className="bg-slate-800 text-white px-4 py-3 flex items-center justify-between">
+              <span className="text-sm font-semibold">עדכון חכם לצ׳אט</span>
+              <button
+                type="button"
+                onClick={() => setIsChatOpen(false)}
+                className="rounded-md bg-white/10 hover:bg-white/20 p-1 transition"
+                aria-label="סגור צ׳אט"
+              >
+                <X size={16} />
+              </button>
+            </div>
 
-          {!isChatMinimized && (
             <div className="p-3">
               <div className="relative">
                 <input
@@ -1367,15 +1409,24 @@ export default function FamilyScheduler() {
               {successMessage && <div className="text-emerald-600 text-sm mt-2 text-right px-1">{successMessage}</div>}
               {apiError && <div className="text-red-500 text-sm mt-2 text-right px-1">{apiError}</div>}
             </div>
-          )}
-        </div>
+          </div>
+        )}
+
+        <button
+          type="button"
+          onClick={() => setIsChatOpen((prev) => !prev)}
+          className="h-14 w-14 rounded-full bg-slate-800 text-white shadow-xl hover:bg-slate-700 transition flex items-center justify-center"
+          aria-label={isChatOpen ? 'סגור צ׳אט' : 'פתח צ׳אט'}
+        >
+          <MessageCircle size={24} />
+        </button>
       </div>
 
       {creatingEvent && (
         <div className="fixed inset-0 bg-black/35 backdrop-blur-[1px] flex items-center justify-center p-4 z-50 print:hidden">
           <div className="w-full max-w-lg bg-white rounded-2xl shadow-2xl border border-slate-200 p-5 space-y-4">
             <div className="flex justify-between items-center">
-              <h2 className="text-lg font-bold text-slate-800">הוספת משימה חדשה</h2>
+              <h2 className="text-lg font-bold text-slate-800">אירוע חדש</h2>
               <button
                 type="button"
                 onClick={() => setCreatingEvent(null)}
@@ -1387,16 +1438,34 @@ export default function FamilyScheduler() {
 
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
               <label className="text-sm text-slate-700 font-medium">
-                שעה
-                <input
-                  type="time"
-                  step={300}
-                  value={creatingEvent.data.time}
-                  onChange={(e) => setCreatingEvent((prev) => prev ? ({ ...prev, data: { ...prev.data, time: e.target.value } }) : prev)}
-                  className="mt-1 w-full border border-slate-300 rounded-xl px-3 py-2 outline-none focus:border-blue-400"
-                />
+                תאריך
+                <div className="relative mt-1">
+                  <CalendarDays size={16} className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400" />
+                  <input
+                    type="date"
+                    value={creatingEvent.selectedDate}
+                    onChange={(e) => setCreatingEvent((prev) => prev ? ({ ...prev, selectedDate: e.target.value }) : prev)}
+                    className="w-full border border-slate-300 rounded-xl pl-3 pr-9 py-2 outline-none focus:border-blue-400"
+                  />
+                </div>
               </label>
 
+              <label className="text-sm text-slate-700 font-medium">
+                שעה
+                <div className="relative mt-1">
+                  <Clock3 size={16} className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400" />
+                  <input
+                    type="time"
+                    step={300}
+                    value={creatingEvent.data.time}
+                    onChange={(e) => setCreatingEvent((prev) => prev ? ({ ...prev, data: { ...prev.data, time: e.target.value } }) : prev)}
+                    className="w-full border border-slate-300 rounded-xl pl-3 pr-9 py-2 outline-none focus:border-blue-400"
+                  />
+                </div>
+              </label>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
               <label className="text-sm text-slate-700 font-medium">
                 ילד/ה
                 <select
@@ -1410,6 +1479,26 @@ export default function FamilyScheduler() {
                 </select>
                 <div className="mt-2">{renderChildBadges(creatingEvent.data.child)}</div>
               </label>
+
+              <div className="text-sm text-slate-700 font-medium">
+                סוג פעילות
+                <div className="mt-1 grid grid-cols-2 sm:grid-cols-3 gap-2">
+                  {activityTypePresets.map((preset) => {
+                    const active = creatingEvent.data.type === preset.value;
+                    return (
+                      <button
+                        key={`create-${preset.value}`}
+                        type="button"
+                        onClick={() => setCreatingEvent((prev) => prev ? ({ ...prev, data: { ...prev.data, type: preset.value } }) : prev)}
+                        className={`rounded-xl border px-2 py-2 text-xs font-semibold transition ${active ? 'bg-blue-50 border-blue-400 text-blue-700' : 'bg-white border-slate-300 text-slate-700 hover:bg-slate-50'}`}
+                      >
+                        <span className="text-base" aria-hidden="true">{preset.emoji}</span>
+                        <span className="block mt-0.5">{preset.label}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
             </div>
 
             <label className="text-sm text-slate-700 font-medium block">
@@ -1420,22 +1509,6 @@ export default function FamilyScheduler() {
                 className="mt-1 w-full border border-slate-300 rounded-xl px-3 py-2 outline-none focus:border-blue-400"
                 placeholder="לדוגמה: שיעור קבוע - Karl"
               />
-            </label>
-
-            <label className="text-sm text-slate-700 font-medium block">
-              סוג פעילות
-              <input
-                list="activity-types-create"
-                value={creatingEvent.data.type}
-                onChange={(e) => setCreatingEvent((prev) => prev ? ({ ...prev, data: { ...prev.data, type: e.target.value as EventType } }) : prev)}
-                className="mt-1 w-full border border-slate-300 rounded-xl px-3 py-2 outline-none focus:border-blue-400"
-                placeholder="בחר או הקלד סוג פעילות"
-              />
-              <datalist id="activity-types-create">
-                {eventTypeOptions.map((type) => (
-                  <option key={type} value={type}>{eventTypeLabels[type]}</option>
-                ))}
-              </datalist>
             </label>
 
             <label className="flex items-center gap-2 text-sm text-slate-700 font-medium">
