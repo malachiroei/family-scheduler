@@ -132,6 +132,11 @@ type ScheduleApiEvent = {
   recurringTemplateId?: string;
 };
 
+type BeforeInstallPromptEvent = Event & {
+  prompt: () => Promise<void>;
+  userChoice: Promise<{ outcome: 'accepted' | 'dismissed'; platform: string }>;
+};
+
 const normalizeWeekEventsWithDate = (weeksData: Record<string, DaySchedule[]> | undefined) => {
   if (!weeksData || typeof weeksData !== 'object') {
     return {} as Record<string, DaySchedule[]>;
@@ -715,6 +720,7 @@ export default function FamilyScheduler() {
     message: '',
   });
   const [showRecurringOnly, setShowRecurringOnly] = useState(false);
+  const [selectedChildFilter, setSelectedChildFilter] = useState<'all' | BaseChildKey>('all');
   const [weekStart, setWeekStart] = useState(initialWeekStart);
   const [recurringTemplates, setRecurringTemplates] = useState<RecurringTemplate[]>([]);
   const [weeksData, setWeeksData] = useState<Record<string, DaySchedule[]>>(() => ({
@@ -733,6 +739,8 @@ export default function FamilyScheduler() {
   const [pushSupported, setPushSupported] = useState(false);
   const [pushEnabled, setPushEnabled] = useState(false);
   const [pushBusy, setPushBusy] = useState(false);
+  const [installPromptEvent, setInstallPromptEvent] = useState<BeforeInstallPromptEvent | null>(null);
+  const [isInstallReady, setIsInstallReady] = useState(false);
   const [subscriptionEndpoint, setSubscriptionEndpoint] = useState("");
   const persistDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const requestInFlightRef = useRef(false);
@@ -849,7 +857,7 @@ export default function FamilyScheduler() {
         // keep UI responsive even if server persistence fails
       });
     }, 120);
-  }, [weekStart, recurringTemplates, weeksData]);
+  }, [isHydrated, weekStart, recurringTemplates, weeksData]);
 
 
   useEffect(() => {
@@ -924,6 +932,51 @@ export default function FamilyScheduler() {
       cancelled = true;
     };
   }, []);
+
+  useEffect(() => {
+    const standalone = window.matchMedia('(display-mode: standalone)').matches || Boolean((window.navigator as Navigator & { standalone?: boolean }).standalone);
+    if (standalone) {
+      setIsInstallReady(false);
+      return;
+    }
+
+    const handleBeforeInstallPrompt = (event: Event) => {
+      event.preventDefault();
+      setInstallPromptEvent(event as BeforeInstallPromptEvent);
+      setIsInstallReady(true);
+    };
+
+    const handleInstalled = () => {
+      setInstallPromptEvent(null);
+      setIsInstallReady(false);
+      setSuccessMessage('האפליקציה הותקנה בהצלחה.');
+    };
+
+    window.addEventListener('beforeinstallprompt', handleBeforeInstallPrompt);
+    window.addEventListener('appinstalled', handleInstalled);
+
+    return () => {
+      window.removeEventListener('beforeinstallprompt', handleBeforeInstallPrompt);
+      window.removeEventListener('appinstalled', handleInstalled);
+    };
+  }, []);
+
+  const installApp = async () => {
+    if (!installPromptEvent) {
+      return;
+    }
+
+    try {
+      await installPromptEvent.prompt();
+      const result = await installPromptEvent.userChoice;
+      if (result.outcome === 'accepted') {
+        setSuccessMessage('ההתקנה הופעלה בהצלחה.');
+      }
+    } finally {
+      setInstallPromptEvent(null);
+      setIsInstallReady(false);
+    }
+  };
 
   const enablePushNotifications = async () => {
     if (!pushSupported || pushBusy) {
@@ -1625,6 +1678,14 @@ export default function FamilyScheduler() {
     <div className="print-scheduler-shell h-screen overflow-y-auto bg-[#f8fafc] p-4 pb-28 md:p-8 md:pb-32 dir-rtl" dir="rtl">
       <div className="max-w-6xl mx-auto mb-8 print:mb-4">
         <div className="print-controls flex justify-end gap-3 print:hidden">
+          {isInstallReady && (
+            <button
+              onClick={() => { void installApp(); }}
+              className="flex items-center gap-2 bg-amber-50 text-amber-800 border border-amber-200 px-4 py-2 rounded-lg hover:bg-amber-100 transition shadow-sm"
+            >
+              התקן אפליקציה
+            </button>
+          )}
           <button
             onClick={() => { void enablePushNotifications(); }}
             disabled={!pushSupported || pushEnabled || pushBusy}
@@ -1678,7 +1739,28 @@ export default function FamilyScheduler() {
         </div>
       </div>
 
-      <div className="max-w-6xl mx-auto mb-4 flex justify-end print:hidden">
+      <div className="max-w-6xl mx-auto mb-4 flex flex-col md:flex-row md:items-center md:justify-between gap-3 print:hidden">
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="text-xs font-semibold text-slate-500">סינון לפי ילד:</span>
+          <button
+            type="button"
+            onClick={() => setSelectedChildFilter('all')}
+            className={`px-3 py-1.5 rounded-xl border text-sm font-semibold transition ${selectedChildFilter === 'all' ? 'bg-slate-800 text-white border-slate-800' : 'bg-white text-slate-700 border-slate-300 hover:bg-slate-50'}`}
+          >
+            הכל
+          </button>
+          {(Object.keys(baseChildrenConfig) as BaseChildKey[]).map((childKey) => (
+            <button
+              key={`filter-${childKey}`}
+              type="button"
+              onClick={() => setSelectedChildFilter(childKey)}
+              className={`px-3 py-1.5 rounded-xl border text-sm font-semibold transition ${selectedChildFilter === childKey ? 'bg-slate-800 text-white border-slate-800' : 'bg-white text-slate-700 border-slate-300 hover:bg-slate-50'}`}
+            >
+              {baseChildrenConfig[childKey].name}
+            </button>
+          ))}
+        </div>
+
         <button
           type="button"
           onClick={() => setShowRecurringOnly((prev) => !prev)}
@@ -1688,11 +1770,19 @@ export default function FamilyScheduler() {
         </button>
       </div>
 
+      <div className="max-w-6xl mx-auto mb-3 print:hidden">
+        <h2 className="text-base font-bold text-slate-700">Weekly View</h2>
+      </div>
+
       <div id="schedule-table" className="printable-schedule max-w-6xl mx-auto grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
         {days.map((day, dayIndex) => {
           const currentCellDate = toEventDateKey(new Date(`${day.isoDate}T00:00:00`));
           const visibleEvents = day.events.filter((event) => {
             const isRecurringEvent = Boolean(event.isRecurring || event.recurringTemplateId);
+            const matchesChild = selectedChildFilter === 'all' || getChildKeys(event.child).includes(selectedChildFilter);
+            if (!matchesChild) {
+              return false;
+            }
             if (showRecurringOnly) {
               return isRecurringEvent;
             }

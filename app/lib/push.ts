@@ -23,6 +23,17 @@ type TaskRow = {
   is_weekly?: boolean;
 };
 
+const shouldSendReminderForTask = (task: TaskRow) => {
+  const type = (task.type || "").toLowerCase();
+  const title = (task.text || "").toLowerCase();
+
+  if (type === "lesson") {
+    return true;
+  }
+
+  return /שיעור|אנגלית|תגבור|lesson|english|tutoring/i.test(title);
+};
+
 const getEnv = () => ({
   vapidPublicKey: process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY?.trim() || "",
   vapidPrivateKey: process.env.VAPID_PRIVATE_KEY?.trim() || "",
@@ -245,6 +256,10 @@ export const sendUpcomingTaskReminders = async () => {
   let sent = 0;
 
   for (const task of tasksResult.rows) {
+    if (!shouldSendReminderForTask(task)) {
+      continue;
+    }
+
     const taskDate = parseTaskDate(task.day || "");
     if (!taskDate) {
       continue;

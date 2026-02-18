@@ -6,7 +6,36 @@ Create a `.env.local` file (you can copy from `.env.example`) and set:
 
 ```bash
 GEMINI_API_KEY=your_gemini_api_key_here
+POSTGRES_URL=your_neon_connection_string
+
+# Web Push (VAPID)
+NEXT_PUBLIC_VAPID_PUBLIC_KEY=your_public_vapid_key
+VAPID_PRIVATE_KEY=your_private_vapid_key
+VAPID_SUBJECT=mailto:you@example.com
+
+# Protect /api/push/remind cron endpoint (recommended)
+CRON_SECRET=your_random_secret
 ```
+
+## PWA + Install
+
+- The app includes `public/manifest.json` and `public/sw.js`.
+- Open the app in a supported browser and install it to home screen / desktop using the browser install prompt.
+- Push subscription is enabled from the "הפעל התראות" button in the app.
+
+## Push Reminders (15 minutes before)
+
+- New task notifications are sent to all subscribed clients.
+- Automatic reminders run for lesson-like tasks (for example English lessons) up to 15 minutes before start time.
+
+## Vercel Cron
+
+The project includes `vercel.json` with a cron job:
+
+- Path: `/api/push/remind`
+- Schedule: every minute (`* * * * *`)
+
+If you set `CRON_SECRET`, configure the same value in your Vercel cron call authorization header (`Bearer <CRON_SECRET>`).
 
 ## Getting Started
 
