@@ -134,11 +134,23 @@ const normalizeWeekEventsWithDate = (weeksData: Record<string, DaySchedule[]> | 
     nextData[key] = days.map((day) => ({
       ...day,
       events: Array.isArray(day.events)
-        ? day.events.map((event) => ({
-            ...event,
-            date: event.date || day.isoDate,
-            isRecurring: event.isRecurring ?? Boolean(event.recurringTemplateId),
-          }))
+        ? day.events
+            .map((event) => ({
+              ...event,
+              date: normalizeEventDateKey(event.date, parseEventDateKey(day.isoDate) ?? new Date(`${day.isoDate}T00:00:00`)),
+              isRecurring: event.isRecurring ?? Boolean(event.recurringTemplateId),
+            }))
+            .filter((event, idx, arr) => idx === arr.findIndex((candidate) => (
+              candidate.id === event.id ||
+              (
+                candidate.date === event.date &&
+                candidate.time === event.time &&
+                candidate.child === event.child &&
+                candidate.title === event.title &&
+                candidate.type === event.type &&
+                Boolean(candidate.isRecurring) === Boolean(event.isRecurring)
+              )
+            )))
         : [],
     }));
   });
@@ -165,6 +177,39 @@ const toIsoDate = (date: Date) => {
   const m = `${date.getMonth() + 1}`.padStart(2, '0');
   const d = `${date.getDate()}`.padStart(2, '0');
   return `${y}-${m}-${d}`;
+};
+
+const toEventDateKey = (date: Date) => {
+  const y = date.getFullYear();
+  const m = `${date.getMonth() + 1}`.padStart(2, '0');
+  const d = `${date.getDate()}`.padStart(2, '0');
+  return `${d}-${m}-${y}`;
+};
+
+const parseEventDateKey = (value: string) => {
+  const trimmed = value.trim();
+
+  const ddMmYyyy = trimmed.match(/^(\d{2})-(\d{2})-(\d{4})$/);
+  if (ddMmYyyy) {
+    const parsed = new Date(`${ddMmYyyy[3]}-${ddMmYyyy[2]}-${ddMmYyyy[1]}T00:00:00`);
+    return Number.isNaN(parsed.getTime()) ? null : parsed;
+  }
+
+  const yyyyMmDd = trimmed.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (yyyyMmDd) {
+    const parsed = new Date(`${yyyyMmDd[1]}-${yyyyMmDd[2]}-${yyyyMmDd[3]}T00:00:00`);
+    return Number.isNaN(parsed.getTime()) ? null : parsed;
+  }
+
+  return null;
+};
+
+const normalizeEventDateKey = (value: string | undefined, fallbackDate: Date) => {
+  if (!value) {
+    return toEventDateKey(fallbackDate);
+  }
+  const parsed = parseEventDateKey(value);
+  return parsed ? toEventDateKey(parsed) : toEventDateKey(fallbackDate);
 };
 
 const toDisplayDate = (date: Date) => {
@@ -499,7 +544,7 @@ const getSaturdayGroup = (weekStart: Date): ChildKey => {
 
 const buildJohnnyEvents = (weekStart: Date): Array<{ dayIndex: number; event: SchedulerEvent }> => {
   const saturdayGroup = getSaturdayGroup(weekStart);
-  const dateForDay = (dayIndex: number) => toIsoDate(addDays(weekStart, dayIndex));
+  const dateForDay = (dayIndex: number) => toEventDateKey(addDays(weekStart, dayIndex));
   return [
     {
       dayIndex: 0,
@@ -580,9 +625,10 @@ const createWeekDays = (weekStart: Date, includeDemo: boolean, recurringTemplate
   });
 
   const addEvent = (dayIndex: number, event: SchedulerEvent) => {
+    const fallbackDate = new Date(`${days[dayIndex].isoDate}T00:00:00`);
     days[dayIndex].events.push({
       ...event,
-      date: event.date || days[dayIndex].isoDate,
+      date: normalizeEventDateKey(event.date, fallbackDate),
       isRecurring: event.isRecurring ?? Boolean(event.recurringTemplateId),
     });
   };
@@ -594,7 +640,7 @@ const createWeekDays = (weekStart: Date, includeDemo: boolean, recurringTemplate
     .forEach((template) => {
     addEvent(template.dayIndex, {
       id: `${template.templateId}-${toIsoDate(weekStart)}`,
-      date: toIsoDate(addDays(weekStart, template.dayIndex)),
+      date: toEventDateKey(addDays(weekStart, template.dayIndex)),
       time: template.time,
       child: template.child,
       title: template.title,
@@ -605,11 +651,11 @@ const createWeekDays = (weekStart: Date, includeDemo: boolean, recurringTemplate
     });
 
   if (includeDemo) {
-    addEvent(0, createEvent({ date: days[0].isoDate, time: '14:45', child: 'alin', title: 'תגבור פלא', type: 'lesson' }));
-    addEvent(0, createEvent({ date: days[0].isoDate, time: '17:30', child: 'ravid', title: 'אימון', type: 'gym' }));
-    addEvent(0, createEvent({ date: days[0].isoDate, time: '18:00', child: 'amit', title: 'כדורסל', type: 'sport' }));
-    addEvent(1, createEvent({ date: days[1].isoDate, time: '15:00', child: 'amit', title: 'אנגלית: עמית (קארל)', type: 'lesson' }));
-    addEvent(1, createEvent({ date: days[1].isoDate, time: '17:00', child: 'alin', title: 'ריקוד אלין', type: 'dance' }));
+    addEvent(0, createEvent({ date: toEventDateKey(new Date(`${days[0].isoDate}T00:00:00`)), time: '14:45', child: 'alin', title: 'תגבור פלא', type: 'lesson' }));
+    addEvent(0, createEvent({ date: toEventDateKey(new Date(`${days[0].isoDate}T00:00:00`)), time: '17:30', child: 'ravid', title: 'אימון', type: 'gym' }));
+    addEvent(0, createEvent({ date: toEventDateKey(new Date(`${days[0].isoDate}T00:00:00`)), time: '18:00', child: 'amit', title: 'כדורסל', type: 'sport' }));
+    addEvent(1, createEvent({ date: toEventDateKey(new Date(`${days[1].isoDate}T00:00:00`)), time: '15:00', child: 'amit', title: 'אנגלית: עמית (קארל)', type: 'lesson' }));
+    addEvent(1, createEvent({ date: toEventDateKey(new Date(`${days[1].isoDate}T00:00:00`)), time: '17:00', child: 'alin', title: 'ריקוד אלין', type: 'dance' }));
   }
 
   days.forEach((day) => {
@@ -882,7 +928,7 @@ export default function FamilyScheduler() {
     }
 
     const eventType = normalizeTypeForStorage(String(eventData.type || ''), String(eventData.title || ''));
-    const eventDate = nextDays[eventData.dayIndex].isoDate;
+    const eventDate = toEventDateKey(new Date(`${nextDays[eventData.dayIndex].isoDate}T00:00:00`));
 
     const hasDuplicate = nextDays[eventData.dayIndex].events.some((existing) => {
       if (existing.time !== normalizedTime || existing.type !== eventType) {
@@ -966,7 +1012,7 @@ export default function FamilyScheduler() {
             if (!duplicate) {
               targetDay.events.push({
                 id: `${templateId}-${key}`,
-                date: toIsoDate(addDays(parseWeekKeyToDate(key) ?? targetWeekStart, template.dayIndex)),
+                date: toEventDateKey(addDays(parseWeekKeyToDate(key) ?? targetWeekStart, template.dayIndex)),
                 time: template.time,
                 child: template.child,
                 title: template.title,
@@ -1078,6 +1124,17 @@ export default function FamilyScheduler() {
 
   const shiftWeek = (offset: number) => {
     setWeekStart((prev) => addDays(prev, offset * 7));
+  };
+
+  const clearAllEvents = () => {
+    setRecurringTemplates([]);
+    setWeeksData({
+      [weekKey]: createWeekDays(weekStart, false, []),
+    });
+    setSuccessMessage('הנתונים נוקו. ניתן להתחיל הזנה מחדש ללא הכפילויות הישנות.');
+    if (apiError) {
+      setApiError('');
+    }
   };
 
   const sendMessageNow = async (text: string, imageFile: File | null) => {
@@ -1285,7 +1342,7 @@ export default function FamilyScheduler() {
     const targetWeekStart = getWeekStart(selectedDate);
     const targetWeekKey = toIsoDate(targetWeekStart);
     const targetDayIndex = selectedDate.getDay();
-    const targetDate = toIsoDate(selectedDate);
+    const targetDate = toEventDateKey(selectedDate);
 
     const time = normalizeTimeForPicker(editingEvent.data.time);
     const existingTemplateId = editingEvent.originalRecurringTemplateId;
@@ -1348,7 +1405,7 @@ export default function FamilyScheduler() {
             const targetDay = weekDays[targetDayIndex];
             const recurringEvent: SchedulerEvent = {
               id: `${templateId}-${key}`,
-              date: toIsoDate(addDays(parseWeekKeyToDate(key) ?? targetWeekStart, targetDayIndex)),
+              date: toEventDateKey(addDays(parseWeekKeyToDate(key) ?? targetWeekStart, targetDayIndex)),
               time,
               child: editingEvent.data.child,
               title: trimmedTitle,
@@ -1418,6 +1475,12 @@ export default function FamilyScheduler() {
     <div className="print-scheduler-shell h-screen overflow-y-auto bg-[#f8fafc] p-4 pb-28 md:p-8 md:pb-32 dir-rtl" dir="rtl">
       <div className="max-w-6xl mx-auto mb-8 print:mb-4">
         <div className="print-controls flex justify-end gap-3 print:hidden">
+          <button
+            onClick={clearAllEvents}
+            className="flex items-center gap-2 bg-red-50 text-red-700 border border-red-200 px-4 py-2 rounded-lg hover:bg-red-100 transition shadow-sm"
+          >
+            Clear All
+          </button>
           <button onClick={() => window.print()} className="flex items-center gap-2 bg-white border border-slate-200 px-4 py-2 rounded-lg hover:bg-slate-50 transition shadow-sm">
             <Printer size={18} /> הדפסה
           </button>
@@ -1455,6 +1518,7 @@ export default function FamilyScheduler() {
 
       <div id="schedule-table" className="printable-schedule max-w-6xl mx-auto grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
         {days.map((day, dayIndex) => {
+          const currentCellDate = toEventDateKey(new Date(`${day.isoDate}T00:00:00`));
           const visibleEvents = day.events.filter((event) => {
             const isRecurringEvent = Boolean(event.isRecurring || event.recurringTemplateId);
             if (showRecurringOnly) {
@@ -1463,7 +1527,7 @@ export default function FamilyScheduler() {
             if (isRecurringEvent) {
               return true;
             }
-            return event.date === day.isoDate;
+            return event.date === currentCellDate;
           });
 
           return (

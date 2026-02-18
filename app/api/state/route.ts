@@ -22,6 +22,73 @@ const ensureTable = async () => {
 const isObject = (value: unknown): value is Record<string, unknown> =>
   Boolean(value) && typeof value === "object" && !Array.isArray(value);
 
+const toDdMmYyyy = (date: Date) => {
+  const dd = `${date.getDate()}`.padStart(2, "0");
+  const mm = `${date.getMonth() + 1}`.padStart(2, "0");
+  const yyyy = `${date.getFullYear()}`;
+  return `${dd}-${mm}-${yyyy}`;
+};
+
+const parseDateCandidate = (value: unknown) => {
+  if (typeof value !== "string") {
+    return null;
+  }
+
+  const trimmed = value.trim();
+  const ddMmYyyy = trimmed.match(/^(\d{2})-(\d{2})-(\d{4})$/);
+  if (ddMmYyyy) {
+    const parsed = new Date(`${ddMmYyyy[3]}-${ddMmYyyy[2]}-${ddMmYyyy[1]}T00:00:00`);
+    return Number.isNaN(parsed.getTime()) ? null : parsed;
+  }
+
+  const yyyyMmDd = trimmed.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (yyyyMmDd) {
+    const parsed = new Date(`${yyyyMmDd[1]}-${yyyyMmDd[2]}-${yyyyMmDd[3]}T00:00:00`);
+    return Number.isNaN(parsed.getTime()) ? null : parsed;
+  }
+
+  return null;
+};
+
+const normalizeWeeksData = (weeksData: unknown) => {
+  if (!isObject(weeksData)) {
+    return {};
+  }
+
+  const normalized: Record<string, unknown> = {};
+  Object.entries(weeksData).forEach(([weekKey, value]) => {
+    if (!Array.isArray(value)) {
+      return;
+    }
+
+    normalized[weekKey] = value.map((day) => {
+      if (!isObject(day)) {
+        return day;
+      }
+
+      const dayIsoDate = typeof day.isoDate === "string" ? day.isoDate : "";
+      const fallbackDate = parseDateCandidate(dayIsoDate) ?? new Date();
+      const events = Array.isArray(day.events) ? day.events : [];
+
+      return {
+        ...day,
+        events: events
+          .filter((event) => isObject(event))
+          .map((event) => {
+            const eventDate = parseDateCandidate(event.date) ?? fallbackDate;
+            return {
+              ...event,
+              date: toDdMmYyyy(eventDate),
+              isRecurring: Boolean((event as Record<string, unknown>).isRecurring ?? (event as Record<string, unknown>).recurringTemplateId),
+            };
+          }),
+      };
+    });
+  });
+
+  return normalized;
+};
+
 const sanitizeState = (value: unknown): PersistedState => {
   if (!isObject(value)) {
     return {};
@@ -29,7 +96,7 @@ const sanitizeState = (value: unknown): PersistedState => {
 
   const weekStart = typeof value.weekStart === "string" ? value.weekStart : undefined;
   const recurringTemplates = Array.isArray(value.recurringTemplates) ? value.recurringTemplates : [];
-  const weeksData = isObject(value.weeksData) ? value.weeksData : {};
+  const weeksData = normalizeWeeksData(value.weeksData);
 
   return {
     weekStart,
