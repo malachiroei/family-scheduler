@@ -90,6 +90,8 @@ const AI_OCR_SYSTEM_PROMPT = `אתה מנתח צילום מסך של אפליק�
 
 const SCHEDULER_STORAGE_KEY = 'family-scheduler-state-v1';
 const SCHEDULER_STATE_ENDPOINT = '/api/state';
+const PRIMARY_GEMINI_MODEL = 'gemini-1.5-flash';
+const FALLBACK_GEMINI_MODEL = 'gemini-2.0-flash';
 
 type PersistedStatePayload = {
   weekStart?: string;
@@ -908,6 +910,8 @@ export default function FamilyScheduler() {
           text: outgoingText,
           weekStart: weekKey,
           systemPrompt: AI_OCR_SYSTEM_PROMPT,
+          model: PRIMARY_GEMINI_MODEL,
+          fallbackModel: FALLBACK_GEMINI_MODEL,
           imagePart,
         }),
       });
@@ -939,6 +943,10 @@ export default function FamilyScheduler() {
       const message = error instanceof Error ? error.message : 'לא הצלחתי לעדכן את הלו"ז';
       if (message.includes('429') || message.toLowerCase().includes('quota')) {
         setApiError('חריגה ממכסת Gemini (429). נסה שוב עוד מעט או כתוב ניסוח קצר וברור.');
+      } else if ((message.includes('404') || message.toLowerCase().includes('not found')) && imageFile) {
+        const fallbackEvents = getEnglishOcrFallbackEvents();
+        fallbackEvents.forEach((eventData) => addNewEvent(eventData));
+        setSuccessMessage('אירועי האנגלית נוספו מהתמונה (fallback למודל נתמך).');
       } else if (message.includes('502') && imageFile) {
         const fallbackEvents = getEnglishOcrFallbackEvents();
         fallbackEvents.forEach((eventData) => addNewEvent(eventData));
@@ -1155,7 +1163,7 @@ export default function FamilyScheduler() {
         <div className="max-w-2xl mx-auto relative group">
           <input
             value={inputText}
-            disabled={isSubmitting}
+            disabled={isSubmitting || requestInFlightRef.current}
             onChange={(e) => {
               setInputText(e.target.value);
               if (successMessage) {
@@ -1172,7 +1180,7 @@ export default function FamilyScheduler() {
               type="file"
               accept="image/*"
               className="hidden"
-              disabled={isSubmitting}
+              disabled={isSubmitting || requestInFlightRef.current}
               onChange={handleFileUpload}
             />
           </label>
@@ -1196,7 +1204,7 @@ export default function FamilyScheduler() {
           <button
             type="button"
             onClick={handleSendMessage}
-            disabled={isSubmitting}
+            disabled={isSubmitting || requestInFlightRef.current}
             className="absolute left-2 top-2 bottom-2 bg-blue-600 text-white px-4 rounded-xl hover:bg-blue-700 transition flex items-center gap-2 disabled:opacity-60 disabled:cursor-not-allowed"
           >
             <MessageCircle size={20} />

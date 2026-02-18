@@ -1,6 +1,13 @@
 import { NextRequest, NextResponse } from "next/server";
 
-const preferredModel = "gemini-1.5-flash-latest" as const;
+const allowedModels = ["gemini-1.5-flash", "gemini-2.0-flash"] as const;
+type SupportedModel = (typeof allowedModels)[number];
+const defaultModel: SupportedModel = "gemini-1.5-flash";
+const defaultFallbackModel: SupportedModel = "gemini-2.0-flash";
+const modelAliasMap: Record<string, SupportedModel> = {
+  "gemini-1.5-flash-latest": "gemini-1.5-flash",
+  "gemini-2.0-flash-exp": "gemini-2.0-flash",
+};
 const allowedChildren = ["ravid", "amit", "alin"] as const;
 const allowedTypes = ["dog", "gym", "sport", "lesson", "dance"] as const;
 
@@ -65,6 +72,22 @@ const sanitizeEvents = (events: unknown): AiEvent[] => {
     .filter((event): event is AiEvent => Boolean(event));
 };
 
+const isSupportedModel = (value: unknown): value is SupportedModel =>
+  typeof value === "string" && allowedModels.includes(value as SupportedModel);
+
+const normalizeModel = (value: unknown, fallback: SupportedModel): SupportedModel => {
+  if (typeof value !== "string") {
+    return fallback;
+  }
+
+  const normalized = value.trim();
+  if (isSupportedModel(normalized)) {
+    return normalized;
+  }
+
+  return modelAliasMap[normalized] ?? fallback;
+};
+
 export async function POST(request: NextRequest) {
   const apiKey = process.env.NEXT_PUBLIC_GEMINI_API_KEY;
   if (!apiKey) {
@@ -79,6 +102,8 @@ export async function POST(request: NextRequest) {
     const text = typeof body?.text === "string" ? body.text.trim() : "";
     const weekStart = typeof body?.weekStart === "string" ? body.weekStart.trim() : "";
     const systemPrompt = typeof body?.systemPrompt === "string" ? body.systemPrompt.trim() : "";
+    const requestedModel = normalizeModel(body?.model, defaultModel);
+    const fallbackModel = normalizeModel(body?.fallbackModel, defaultFallbackModel);
     const incomingInlineData = body?.imagePart?.inlineData;
     const imageBase64 = typeof incomingInlineData?.data === "string"
       ? incomingInlineData.data.trim()
@@ -142,9 +167,22 @@ ${text}`;
         }
       );
 
-    let response: Response | null = await callGemini("v1beta", preferredModel);
-    if (response.status === 404) {
-      response = await callGemini("v1", preferredModel);
+    const modelChain: SupportedModel[] = requestedModel === fallbackModel
+      ? [requestedModel]
+      : [requestedModel, fallbackModel];
+
+    let response: Response | null = null;
+
+    for (const model of modelChain) {
+      response = await callGemini("v1beta", model);
+      if (response.status !== 404) {
+        break;
+      }
+
+      response = await callGemini("v1", model);
+      if (response.status !== 404) {
+        break;
+      }
     }
 
     if (!response) {
