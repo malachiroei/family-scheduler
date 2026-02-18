@@ -1,7 +1,7 @@
 "use client";
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import Image from 'next/image';
-import { Dog, Dumbbell, Music, GraduationCap, Trophy, Printer, Image as ImageIcon, MessageCircle, ChevronRight, ChevronLeft, X } from 'lucide-react';
+import { Dog, Dumbbell, Music, GraduationCap, Trophy, Printer, Image as ImageIcon, MessageCircle, ChevronRight, ChevronLeft, X, Plus, Minimize2, Maximize2 } from 'lucide-react';
 import html2canvas from 'html2canvas';
 
 const baseChildrenConfig = {
@@ -48,6 +48,17 @@ type RecurringTemplate = {
   title: string;
   type: EventType;
   isRecurring?: boolean;
+};
+
+type NewEventDraft = {
+  dayIndex: number;
+  recurringWeekly: boolean;
+  data: {
+    time: string;
+    child: ChildKey;
+    title: string;
+    type: EventType;
+  };
 };
 
 const dayNames = ['יום ראשון', 'יום שני', 'יום שלישי', 'יום רביעי', 'יום חמישי', 'יום שישי', 'שבת'];
@@ -155,6 +166,27 @@ const normalizeClock = (value: string) => {
   return `${`${hours}`.padStart(2, '0')}:${`${minutes}`.padStart(2, '0')}`;
 };
 
+const normalizeLooseClock = (value: string) => {
+  const compactMatch = value.match(/^(\d{1,2})(\d{2})$/);
+  if (compactMatch) {
+    return normalizeClock(`${compactMatch[1]}:${compactMatch[2]}`);
+  }
+
+  if (/^\d{1,2}$/.test(value)) {
+    return normalizeClock(`${value}:00`);
+  }
+
+  return normalizeClock(value);
+};
+
+const extractTimesFromLine = (line: string) => {
+  const timeMatches = [...line.matchAll(/(\d{1,2}:\d{2}|\d{3,4}|\b\d{1,2}\b)/g)]
+    .map((match) => normalizeLooseClock(match[1]))
+    .filter(Boolean) as string[];
+
+  return [...new Set(timeMatches)];
+};
+
 const detectTypeAndTitle = (text: string): { type: EventType; title: string } => {
   if (/אימון\s*מצוינות/.test(text)) {
     return { type: 'אימון מצוינות', title: 'אימון מצוינות' };
@@ -240,8 +272,12 @@ const parseComplexWhatsAppMessage = (
   }
 
   const globalChild = detectChildFromText(text) || (/בית\s*דני/.test(text) ? 'amit' : null);
-  const lines = text
-    .split(/\r?\n|•|\u2022|\||;/)
+  const expandedText = text
+    .replace(/(ראשון|שני|שלישי|רביעי|חמישי|שישי|שבת)\s*[-:]/g, '\n$1 -')
+    .replace(/(?:^|\s)(יום\s+[א-ת"׳']+)\s*[-:]/g, '\n$1 -');
+
+  const lines = expandedText
+    .split(/\r?\n|•|\u2022|\||;|,/)
     .map((line) => line.trim())
     .filter(Boolean);
 
@@ -263,9 +299,9 @@ const parseComplexWhatsAppMessage = (
       continue;
     }
 
-    const timeMatches = [...line.matchAll(/(\d{1,2}:\d{2})/g)].map((match) => normalizeClock(match[1])).filter(Boolean) as string[];
-    const transportMatch = line.match(/(?:הסעה|יציאה|איסוף|אוספים)\s*(?:ב|בשעה)?\s*(\d{1,2}:\d{2})/);
-    const transportTime = transportMatch ? normalizeClock(transportMatch[1]) : null;
+    const timeMatches = extractTimesFromLine(line);
+    const transportMatch = line.match(/(?:הסעה|יציאה|איסוף|אוספים)\s*(?:ב|בשעה)?\s*(\d{1,2}:\d{2}|\d{3,4}|\d{1,2})/);
+    const transportTime = transportMatch ? normalizeLooseClock(transportMatch[1]) : null;
 
     const chosenTime =
       transportTime ||
@@ -551,6 +587,8 @@ export default function FamilyScheduler() {
     recurringWeekly: boolean;
     originalRecurringTemplateId?: string;
   } | null>(null);
+  const [creatingEvent, setCreatingEvent] = useState<NewEventDraft | null>(null);
+  const [isChatMinimized, setIsChatMinimized] = useState(false);
   const schedulerRef = useRef<HTMLDivElement>(null);
   const persistDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const requestInFlightRef = useRef(false);
@@ -658,7 +696,7 @@ export default function FamilyScheduler() {
       }).catch(() => {
         // keep UI responsive even if server persistence fails
       });
-    }, 450);
+    }, 120);
   }, [weekStart, recurringTemplates, weeksData]);
 
   useEffect(() => {
@@ -729,11 +767,12 @@ export default function FamilyScheduler() {
     return nextDays;
   };
 
-  const addNewEvent = (eventData: AiEvent) => {
+  const addNewEvent = (eventData: AiEvent, forceRecurring = false) => {
     writeQueueRef.current = writeQueueRef.current.then(async () => {
       console.log(eventData);
 
       const isRecurringFixed =
+        forceRecurring ||
         /קבוע|מצוינות/i.test(eventData.title) ||
         (eventData.dayIndex === 5 && normalizeTimeForPicker(eventData.time) === '15:30' && normalizeChildKey(String(eventData.child)) === 'ravid');
 
@@ -802,13 +841,13 @@ export default function FamilyScheduler() {
   };
 
   const parseInstructionFallback = (text: string): { targetWeekStart: Date; events: AiEvent[] } | null => {
-    const timeMatch = text.match(/(\d{1,2}:\d{2})/);
+    const timeMatch = extractTimesFromLine(text)[0];
     const child = detectChildFromText(text);
     if (!timeMatch || !child) {
       return null;
     }
 
-    const normalizedTime = normalizeClock(timeMatch[1]);
+    const normalizedTime = normalizeLooseClock(timeMatch);
     if (!normalizedTime) {
       return null;
     }
@@ -845,8 +884,38 @@ export default function FamilyScheduler() {
 
   const exportAsImage = async () => {
     if (schedulerRef.current) {
-      const canvas = await html2canvas(schedulerRef.current);
-      const image = canvas.toDataURL("image/png");
+      const sourceCanvas = await html2canvas(schedulerRef.current, {
+        backgroundColor: '#ffffff',
+        scale: 2,
+        useCORS: true,
+      });
+
+      const targetRatio = 16 / 9;
+      let outputWidth = sourceCanvas.width;
+      let outputHeight = Math.round(outputWidth / targetRatio);
+
+      if (outputHeight < sourceCanvas.height) {
+        outputHeight = sourceCanvas.height;
+        outputWidth = Math.round(outputHeight * targetRatio);
+      }
+
+      const exportCanvas = document.createElement('canvas');
+      exportCanvas.width = outputWidth;
+      exportCanvas.height = outputHeight;
+
+      const context = exportCanvas.getContext('2d');
+      if (!context) {
+        return;
+      }
+
+      context.fillStyle = '#f8fafc';
+      context.fillRect(0, 0, outputWidth, outputHeight);
+
+      const offsetX = Math.round((outputWidth - sourceCanvas.width) / 2);
+      const offsetY = Math.round((outputHeight - sourceCanvas.height) / 2);
+      context.drawImage(sourceCanvas, offsetX, offsetY);
+
+      const image = exportCanvas.toDataURL("image/png");
       const link = document.createElement('a');
       link.href = image;
       link.download = `family-schedule-${new Date().toLocaleDateString()}.png`;
@@ -985,6 +1054,48 @@ export default function FamilyScheduler() {
     }
   };
 
+  const openCreateEventModal = (dayIndex: number) => {
+    setCreatingEvent({
+      dayIndex,
+      recurringWeekly: false,
+      data: {
+        time: '08:00',
+        child: 'amit',
+        title: '',
+        type: 'lesson',
+      },
+    });
+  };
+
+  const saveCreatedEvent = () => {
+    if (!creatingEvent) {
+      return;
+    }
+
+    const title = creatingEvent.data.title.trim();
+    if (!title) {
+      setApiError('יש להזין כותרת למשימה לפני שמירה.');
+      return;
+    }
+
+    addNewEvent(
+      {
+        dayIndex: creatingEvent.dayIndex,
+        time: normalizeTimeForPicker(creatingEvent.data.time),
+        child: creatingEvent.data.child,
+        title,
+        type: creatingEvent.data.type || 'lesson',
+      },
+      creatingEvent.recurringWeekly
+    );
+
+    setCreatingEvent(null);
+    setSuccessMessage('המשימה נוספה בהצלחה ללו״ז.');
+    if (apiError) {
+      setApiError('');
+    }
+  };
+
   const saveEditedEvent = () => {
     if (!editingEvent) {
       return;
@@ -1065,12 +1176,12 @@ export default function FamilyScheduler() {
   };
 
   return (
-    <div className="h-screen overflow-y-auto bg-[#f8fafc] p-4 pb-44 md:p-8 md:pb-44 dir-rtl" dir="rtl">
-      <div className="max-w-6xl mx-auto flex justify-between items-center mb-8">
+    <div className="print-scheduler-shell h-screen overflow-y-auto bg-[#f8fafc] p-4 pb-28 md:p-8 md:pb-32 dir-rtl" dir="rtl">
+      <div className="max-w-6xl mx-auto flex justify-between items-center mb-8 print:mb-4">
         <h1 className="text-3xl font-extrabold text-slate-800 flex items-center gap-3">
           לו״ז משפחתי <span className="text-sm font-normal bg-blue-100 text-blue-600 px-3 py-1 rounded-full">2026</span>
         </h1>
-        <div className="flex gap-3">
+        <div className="flex gap-3 print:hidden">
           <button onClick={() => window.print()} className="flex items-center gap-2 bg-white border border-slate-200 px-4 py-2 rounded-lg hover:bg-slate-50 transition shadow-sm">
             <Printer size={18} /> הדפסה
           </button>
@@ -1080,7 +1191,7 @@ export default function FamilyScheduler() {
         </div>
       </div>
 
-      <div className="max-w-6xl mx-auto mb-6 flex items-center justify-between gap-3 bg-white border border-slate-200 rounded-2xl p-3 shadow-sm">
+      <div className="max-w-6xl mx-auto mb-6 flex items-center justify-between gap-3 bg-white border border-slate-200 rounded-2xl p-3 shadow-sm print:hidden">
         <button
           onClick={() => shiftWeek(1)}
           className="flex items-center gap-2 bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-xl transition"
@@ -1096,7 +1207,7 @@ export default function FamilyScheduler() {
         </button>
       </div>
 
-      <div className="max-w-6xl mx-auto mb-4 flex justify-end">
+      <div className="max-w-6xl mx-auto mb-4 flex justify-end print:hidden">
         <button
           type="button"
           onClick={() => setShowRecurringOnly((prev) => !prev)}
@@ -1106,7 +1217,7 @@ export default function FamilyScheduler() {
         </button>
       </div>
 
-      <div ref={schedulerRef} className="max-w-6xl mx-auto grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+      <div ref={schedulerRef} className="printable-schedule max-w-6xl mx-auto grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
         {days.map((day, dayIndex) => {
           const visibleEvents = showRecurringOnly
             ? day.events.filter((event) => event.isRecurring || event.recurringTemplateId)
@@ -1119,9 +1230,22 @@ export default function FamilyScheduler() {
               <span className="text-sm font-mono opacity-70">{day.date}</span>
             </div>
 
-            <div className="p-4 space-y-3">
+            <div
+              className="p-4 space-y-3 min-h-[220px]"
+              onClick={(event) => {
+                if (event.target === event.currentTarget) {
+                  openCreateEventModal(dayIndex);
+                }
+              }}
+            >
               {visibleEvents.length === 0 && (
-                <div className="text-sm text-slate-400 border border-dashed border-slate-200 rounded-2xl p-3 text-center">אין אירועים כרגע</div>
+                <button
+                  type="button"
+                  onClick={() => openCreateEventModal(dayIndex)}
+                  className="w-full text-sm text-slate-500 border border-dashed border-slate-300 rounded-2xl p-3 text-center hover:bg-slate-50 transition"
+                >
+                  אין אירועים כרגע — לחץ להוספת משימה
+                </button>
               )}
               {visibleEvents.map((event, idx) => {
                 const mainIconColor = baseChildrenConfig[getChildKeys(event.child)[0]].iconColor;
@@ -1136,7 +1260,7 @@ export default function FamilyScheduler() {
                       recurringWeekly: Boolean(event.recurringTemplateId),
                       originalRecurringTemplateId: event.recurringTemplateId,
                     })}
-                    className="w-full text-right flex items-center justify-between p-3 rounded-2xl bg-slate-50 border border-transparent hover:border-slate-200 transition"
+                    className="w-full text-right flex items-center justify-between p-3 rounded-2xl bg-slate-50 border border-transparent hover:border-slate-200 transition print:pointer-events-none"
                   >
                     <span className="text-slate-500 font-medium text-sm w-14">{event.time}</span>
                     <div className="flex-1 flex items-center gap-3">
@@ -1154,70 +1278,198 @@ export default function FamilyScheduler() {
                   </button>
                 );
               })}
+
+              <button
+                type="button"
+                onClick={() => openCreateEventModal(dayIndex)}
+                className="w-full mt-1 flex items-center justify-center gap-2 text-sm text-slate-600 border border-dashed border-slate-300 rounded-2xl p-2.5 hover:bg-slate-50 transition print:hidden"
+              >
+                <Plus size={16} /> הוסף משימה
+              </button>
             </div>
           </div>
         )})}
       </div>
 
-      <div className="fixed bottom-8 left-0 right-0 px-4">
-        <div className="max-w-2xl mx-auto relative group">
-          <input
-            value={inputText}
-            disabled={isSubmitting || requestInFlightRef.current}
-            onChange={(e) => {
-              setInputText(e.target.value);
-              if (successMessage) {
-                setSuccessMessage('');
-              }
-            }}
-            type="text"
-            placeholder="עדכן לו״ז בקול חופשי (למשל: אימון לרביד ביום שלישי ב-16:00)"
-            className="w-full pl-14 pr-6 py-4 rounded-2xl border-2 border-white bg-white shadow-2xl focus:border-blue-400 focus:ring-0 outline-none transition-all text-right"
-          />
-          <label className="absolute right-2 -top-10 text-xs bg-white border border-slate-200 rounded-lg px-2 py-1 cursor-pointer hover:bg-slate-50">
-            העלאת תמונה
-            <input
-              type="file"
-              accept="image/*"
-              className="hidden"
-              disabled={isSubmitting || requestInFlightRef.current}
-              onChange={handleFileUpload}
-            />
-          </label>
-          {selectedImage && (
-            <div className="mt-2 px-1 flex items-start justify-end gap-2">
-              <div className="text-xs text-slate-700 bg-slate-100 border border-slate-200 rounded-md px-2 py-1 text-right">
-                תמונה נבחרה: {selectedImage.name}
-              </div>
-              {selectedImagePreview && (
-                <Image
-                  src={selectedImagePreview}
-                  alt="תצוגה מקדימה"
-                  width={48}
-                  height={48}
-                  unoptimized
-                  className="h-12 w-12 rounded-lg border border-slate-200 object-cover"
+      <div className="fixed bottom-4 right-4 left-4 md:left-auto md:w-[430px] z-40 print:hidden">
+        <div className="bg-white border border-slate-200 rounded-2xl shadow-2xl overflow-hidden">
+          <div className="bg-slate-800 text-white px-4 py-3 flex items-center justify-between">
+            <span className="text-sm font-semibold">עדכון חכם לצ׳אט</span>
+            <button
+              type="button"
+              onClick={() => setIsChatMinimized((prev) => !prev)}
+              className="rounded-md bg-white/10 hover:bg-white/20 p-1 transition"
+              aria-label={isChatMinimized ? 'הרחב צ׳אט' : 'מזער צ׳אט'}
+            >
+              {isChatMinimized ? <Maximize2 size={16} /> : <Minimize2 size={16} />}
+            </button>
+          </div>
+
+          {!isChatMinimized && (
+            <div className="p-3">
+              <div className="relative">
+                <input
+                  value={inputText}
+                  disabled={isSubmitting || requestInFlightRef.current}
+                  onChange={(e) => {
+                    setInputText(e.target.value);
+                    if (successMessage) {
+                      setSuccessMessage('');
+                    }
+                  }}
+                  type="text"
+                  placeholder="עדכן לו״ז בקול חופשי (למשל: אימון לרביד ביום שלישי ב-16:00)"
+                  className="w-full pl-14 pr-6 py-4 rounded-2xl border border-slate-200 bg-white shadow-sm focus:border-blue-400 focus:ring-0 outline-none transition-all text-right"
                 />
-              )}
+                <button
+                  type="button"
+                  onClick={handleSendMessage}
+                  disabled={isSubmitting || requestInFlightRef.current}
+                  className="absolute left-2 top-2 bottom-2 bg-blue-600 text-white px-4 rounded-xl hover:bg-blue-700 transition flex items-center gap-2 disabled:opacity-60 disabled:cursor-not-allowed"
+                >
+                  <MessageCircle size={20} />
+                  <span>{isSubmitting ? 'מעדכן...' : 'עדכן'}</span>
+                </button>
+              </div>
+
+              <div className="mt-2 flex items-center justify-between gap-2">
+                <label className="text-xs bg-white border border-slate-200 rounded-lg px-2 py-1 cursor-pointer hover:bg-slate-50">
+                  העלאת תמונה
+                  <input
+                    type="file"
+                    accept="image/*"
+                    className="hidden"
+                    disabled={isSubmitting || requestInFlightRef.current}
+                    onChange={handleFileUpload}
+                  />
+                </label>
+
+                {selectedImage && (
+                  <div className="flex items-center gap-2">
+                    <div className="text-xs text-slate-700 bg-slate-100 border border-slate-200 rounded-md px-2 py-1 text-right">
+                      תמונה נבחרה: {selectedImage.name}
+                    </div>
+                    {selectedImagePreview && (
+                      <Image
+                        src={selectedImagePreview}
+                        alt="תצוגה מקדימה"
+                        width={40}
+                        height={40}
+                        unoptimized
+                        className="h-10 w-10 rounded-lg border border-slate-200 object-cover"
+                      />
+                    )}
+                  </div>
+                )}
+              </div>
+
+              {isSubmitting && <div className="text-slate-500 text-xs mt-2 text-right px-1">טוען...</div>}
+              {successMessage && <div className="text-emerald-600 text-sm mt-2 text-right px-1">{successMessage}</div>}
+              {apiError && <div className="text-red-500 text-sm mt-2 text-right px-1">{apiError}</div>}
             </div>
           )}
-          <button
-            type="button"
-            onClick={handleSendMessage}
-            disabled={isSubmitting || requestInFlightRef.current}
-            className="absolute left-2 top-2 bottom-2 bg-blue-600 text-white px-4 rounded-xl hover:bg-blue-700 transition flex items-center gap-2 disabled:opacity-60 disabled:cursor-not-allowed"
-          >
-            <MessageCircle size={20} />
-            <span>{isSubmitting ? 'מעדכן...' : 'עדכן'}</span>
-          </button>
-          {isSubmitting && <div className="text-slate-500 text-xs mt-2 text-right px-1">טוען...</div>}
-          {successMessage && <div className="text-emerald-600 text-sm mt-2 text-right px-1">{successMessage}</div>}
-          {apiError && <div className="text-red-500 text-sm mt-2 text-right px-1">{apiError}</div>}
         </div>
       </div>
 
+      {creatingEvent && (
+        <div className="fixed inset-0 bg-black/35 backdrop-blur-[1px] flex items-center justify-center p-4 z-50 print:hidden">
+          <div className="w-full max-w-lg bg-white rounded-2xl shadow-2xl border border-slate-200 p-5 space-y-4">
+            <div className="flex justify-between items-center">
+              <h2 className="text-lg font-bold text-slate-800">הוספת משימה חדשה</h2>
+              <button
+                type="button"
+                onClick={() => setCreatingEvent(null)}
+                className="text-slate-500 hover:text-slate-700"
+              >
+                <X size={20} />
+              </button>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <label className="text-sm text-slate-700 font-medium">
+                שעה
+                <input
+                  type="time"
+                  step={300}
+                  value={creatingEvent.data.time}
+                  onChange={(e) => setCreatingEvent((prev) => prev ? ({ ...prev, data: { ...prev.data, time: e.target.value } }) : prev)}
+                  className="mt-1 w-full border border-slate-300 rounded-xl px-3 py-2 outline-none focus:border-blue-400"
+                />
+              </label>
+
+              <label className="text-sm text-slate-700 font-medium">
+                ילד/ה
+                <select
+                  value={creatingEvent.data.child}
+                  onChange={(e) => setCreatingEvent((prev) => prev ? ({ ...prev, data: { ...prev.data, child: e.target.value as ChildKey } }) : prev)}
+                  className="mt-1 w-full border border-slate-300 rounded-xl px-3 py-2 outline-none focus:border-blue-400"
+                >
+                  {childOptions.map((option) => (
+                    <option key={option.key} value={option.key}>{option.label}</option>
+                  ))}
+                </select>
+                <div className="mt-2">{renderChildBadges(creatingEvent.data.child)}</div>
+              </label>
+            </div>
+
+            <label className="text-sm text-slate-700 font-medium block">
+              כותרת
+              <input
+                value={creatingEvent.data.title}
+                onChange={(e) => setCreatingEvent((prev) => prev ? ({ ...prev, data: { ...prev.data, title: e.target.value } }) : prev)}
+                className="mt-1 w-full border border-slate-300 rounded-xl px-3 py-2 outline-none focus:border-blue-400"
+                placeholder="לדוגמה: שיעור קבוע - Karl"
+              />
+            </label>
+
+            <label className="text-sm text-slate-700 font-medium block">
+              סוג פעילות
+              <input
+                list="activity-types-create"
+                value={creatingEvent.data.type}
+                onChange={(e) => setCreatingEvent((prev) => prev ? ({ ...prev, data: { ...prev.data, type: e.target.value as EventType } }) : prev)}
+                className="mt-1 w-full border border-slate-300 rounded-xl px-3 py-2 outline-none focus:border-blue-400"
+                placeholder="בחר או הקלד סוג פעילות"
+              />
+              <datalist id="activity-types-create">
+                {eventTypeOptions.map((type) => (
+                  <option key={type} value={type}>{eventTypeLabels[type]}</option>
+                ))}
+              </datalist>
+            </label>
+
+            <label className="flex items-center gap-2 text-sm text-slate-700 font-medium">
+              <input
+                type="checkbox"
+                checked={creatingEvent.recurringWeekly}
+                onChange={(e) => setCreatingEvent((prev) => prev ? ({ ...prev, recurringWeekly: e.target.checked }) : prev)}
+                className="h-4 w-4 rounded border-slate-300"
+              />
+              פעילות שבועית חוזרת
+            </label>
+
+            <div className="flex gap-2 justify-end pt-2">
+              <button
+                type="button"
+                onClick={() => setCreatingEvent(null)}
+                className="px-4 py-2 rounded-xl border border-slate-300 text-slate-700 hover:bg-slate-100"
+              >
+                ביטול
+              </button>
+              <button
+                type="button"
+                onClick={saveCreatedEvent}
+                className="px-4 py-2 rounded-xl bg-blue-600 text-white hover:bg-blue-700"
+              >
+                הוסף
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {editingEvent && (
-        <div className="fixed inset-0 bg-black/35 backdrop-blur-[1px] flex items-center justify-center p-4 z-50">
+        <div className="fixed inset-0 bg-black/35 backdrop-blur-[1px] flex items-center justify-center p-4 z-50 print:hidden">
           <div className="w-full max-w-lg bg-white rounded-2xl shadow-2xl border border-slate-200 p-5 space-y-4">
             <div className="flex justify-between items-center">
               <h2 className="text-lg font-bold text-slate-800">עריכת משימה</h2>
