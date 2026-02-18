@@ -17,6 +17,7 @@ type EventType = string;
 
 type SchedulerEvent = {
   id: string;
+  date: string;
   time: string;
   child: ChildKey;
   title: string;
@@ -117,6 +118,32 @@ type PersistedStatePayload = {
   weekStart?: string;
   recurringTemplates?: RecurringTemplate[];
   weeksData?: Record<string, DaySchedule[]>;
+};
+
+const normalizeWeekEventsWithDate = (weeksData: Record<string, DaySchedule[]> | undefined) => {
+  if (!weeksData || typeof weeksData !== 'object') {
+    return {} as Record<string, DaySchedule[]>;
+  }
+
+  const nextData: Record<string, DaySchedule[]> = {};
+  Object.entries(weeksData).forEach(([key, days]) => {
+    if (!Array.isArray(days)) {
+      return;
+    }
+
+    nextData[key] = days.map((day) => ({
+      ...day,
+      events: Array.isArray(day.events)
+        ? day.events.map((event) => ({
+            ...event,
+            date: event.date || day.isoDate,
+            isRecurring: event.isRecurring ?? Boolean(event.recurringTemplateId),
+          }))
+        : [],
+    }));
+  });
+
+  return nextData;
 };
 
 const addDays = (date: Date, days: number) => {
@@ -417,7 +444,7 @@ const normalizePersistedState = (
 
   const safeTemplates = Array.isArray(payload?.recurringTemplates) ? payload.recurringTemplates : [];
   const safeWeeksData = payload?.weeksData && typeof payload.weeksData === 'object'
-    ? payload.weeksData
+    ? normalizeWeekEventsWithDate(payload.weeksData)
     : { [toIsoDate(safeWeekStart)]: createWeekDays(safeWeekStart, false, safeTemplates) };
 
   return {
@@ -472,58 +499,59 @@ const getSaturdayGroup = (weekStart: Date): ChildKey => {
 
 const buildJohnnyEvents = (weekStart: Date): Array<{ dayIndex: number; event: SchedulerEvent }> => {
   const saturdayGroup = getSaturdayGroup(weekStart);
+  const dateForDay = (dayIndex: number) => toIsoDate(addDays(weekStart, dayIndex));
   return [
     {
       dayIndex: 0,
-      event: createEvent({ time: '08:00', child: 'amit', title: 'התור של ג׳וני (בוקר)', type: 'dog' }),
+      event: createEvent({ date: dateForDay(0), time: '08:00', child: 'amit', title: 'התור של ג׳וני (בוקר)', type: 'dog', isRecurring: true }),
     },
     {
       dayIndex: 0,
-      event: createEvent({ time: '13:00', child: 'amit', title: 'התור של ג׳וני (צהריים)', type: 'dog' }),
+      event: createEvent({ date: dateForDay(0), time: '13:00', child: 'amit', title: 'התור של ג׳וני (צהריים)', type: 'dog', isRecurring: true }),
     },
     {
       dayIndex: 1,
-      event: createEvent({ time: '08:00', child: 'alin', title: 'התור של ג׳וני (בוקר)', type: 'dog' }),
+      event: createEvent({ date: dateForDay(1), time: '08:00', child: 'alin', title: 'התור של ג׳וני (בוקר)', type: 'dog', isRecurring: true }),
     },
     {
       dayIndex: 1,
-      event: createEvent({ time: '13:00', child: 'ravid', title: 'התור של ג׳וני (צהריים)', type: 'dog' }),
+      event: createEvent({ date: dateForDay(1), time: '13:00', child: 'ravid', title: 'התור של ג׳וני (צהריים)', type: 'dog', isRecurring: true }),
     },
     {
       dayIndex: 2,
-      event: createEvent({ time: '08:00', child: 'amit', title: 'התור של ג׳וני (בוקר)', type: 'dog' }),
+      event: createEvent({ date: dateForDay(2), time: '08:00', child: 'amit', title: 'התור של ג׳וני (בוקר)', type: 'dog', isRecurring: true }),
     },
     {
       dayIndex: 2,
-      event: createEvent({ time: '13:00', child: 'amit', title: 'התור של ג׳וני (צהריים)', type: 'dog' }),
+      event: createEvent({ date: dateForDay(2), time: '13:00', child: 'amit', title: 'התור של ג׳וני (צהריים)', type: 'dog', isRecurring: true }),
     },
     {
       dayIndex: 3,
-      event: createEvent({ time: '08:00', child: 'alin', title: 'התור של ג׳וני (בוקר)', type: 'dog' }),
+      event: createEvent({ date: dateForDay(3), time: '08:00', child: 'alin', title: 'התור של ג׳וני (בוקר)', type: 'dog', isRecurring: true }),
     },
     {
       dayIndex: 3,
-      event: createEvent({ time: '13:00', child: 'ravid', title: 'התור של ג׳וני (צהריים)', type: 'dog' }),
+      event: createEvent({ date: dateForDay(3), time: '13:00', child: 'ravid', title: 'התור של ג׳וני (צהריים)', type: 'dog', isRecurring: true }),
     },
     {
       dayIndex: 4,
-      event: createEvent({ time: '08:00', child: 'amit', title: 'התור של ג׳וני (בוקר)', type: 'dog' }),
+      event: createEvent({ date: dateForDay(4), time: '08:00', child: 'amit', title: 'התור של ג׳וני (בוקר)', type: 'dog', isRecurring: true }),
     },
     {
       dayIndex: 4,
-      event: createEvent({ time: '13:00', child: 'ravid', title: 'התור של ג׳וני (צהריים)', type: 'dog' }),
+      event: createEvent({ date: dateForDay(4), time: '13:00', child: 'ravid', title: 'התור של ג׳וני (צהריים)', type: 'dog', isRecurring: true }),
     },
     {
       dayIndex: 5,
-      event: createEvent({ time: '08:00', child: 'alin', title: 'התור של ג׳וני (בוקר)', type: 'dog' }),
+      event: createEvent({ date: dateForDay(5), time: '08:00', child: 'alin', title: 'התור של ג׳וני (בוקר)', type: 'dog', isRecurring: true }),
     },
     {
       dayIndex: 5,
-      event: createEvent({ time: '13:00', child: 'ravid', title: 'התור של ג׳וני (צהריים)', type: 'dog' }),
+      event: createEvent({ date: dateForDay(5), time: '13:00', child: 'ravid', title: 'התור של ג׳וני (צהריים)', type: 'dog', isRecurring: true }),
     },
     {
       dayIndex: 6,
-      event: createEvent({ time: '13:00', child: saturdayGroup, title: 'הורדת ג׳וני', type: 'dog' }),
+      event: createEvent({ date: dateForDay(6), time: '13:00', child: saturdayGroup, title: 'הורדת ג׳וני', type: 'dog', isRecurring: true }),
     },
   ];
 };
@@ -552,7 +580,11 @@ const createWeekDays = (weekStart: Date, includeDemo: boolean, recurringTemplate
   });
 
   const addEvent = (dayIndex: number, event: SchedulerEvent) => {
-    days[dayIndex].events.push(event);
+    days[dayIndex].events.push({
+      ...event,
+      date: event.date || days[dayIndex].isoDate,
+      isRecurring: event.isRecurring ?? Boolean(event.recurringTemplateId),
+    });
   };
 
   buildJohnnyEvents(weekStart).forEach(({ dayIndex, event }) => addEvent(dayIndex, event));
@@ -562,6 +594,7 @@ const createWeekDays = (weekStart: Date, includeDemo: boolean, recurringTemplate
     .forEach((template) => {
     addEvent(template.dayIndex, {
       id: `${template.templateId}-${toIsoDate(weekStart)}`,
+      date: toIsoDate(addDays(weekStart, template.dayIndex)),
       time: template.time,
       child: template.child,
       title: template.title,
@@ -572,11 +605,11 @@ const createWeekDays = (weekStart: Date, includeDemo: boolean, recurringTemplate
     });
 
   if (includeDemo) {
-    addEvent(0, createEvent({ time: '14:45', child: 'alin', title: 'תגבור פלא', type: 'lesson' }));
-    addEvent(0, createEvent({ time: '17:30', child: 'ravid', title: 'אימון', type: 'gym' }));
-    addEvent(0, createEvent({ time: '18:00', child: 'amit', title: 'כדורסל', type: 'sport' }));
-    addEvent(1, createEvent({ time: '15:00', child: 'amit', title: 'אנגלית: עמית (קארל)', type: 'lesson' }));
-    addEvent(1, createEvent({ time: '17:00', child: 'alin', title: 'ריקוד אלין', type: 'dance' }));
+    addEvent(0, createEvent({ date: days[0].isoDate, time: '14:45', child: 'alin', title: 'תגבור פלא', type: 'lesson' }));
+    addEvent(0, createEvent({ date: days[0].isoDate, time: '17:30', child: 'ravid', title: 'אימון', type: 'gym' }));
+    addEvent(0, createEvent({ date: days[0].isoDate, time: '18:00', child: 'amit', title: 'כדורסל', type: 'sport' }));
+    addEvent(1, createEvent({ date: days[1].isoDate, time: '15:00', child: 'amit', title: 'אנגלית: עמית (קארל)', type: 'lesson' }));
+    addEvent(1, createEvent({ date: days[1].isoDate, time: '17:00', child: 'alin', title: 'ריקוד אלין', type: 'dance' }));
   }
 
   days.forEach((day) => {
@@ -622,14 +655,14 @@ const TimeWheelPicker = ({ value, onChange }: { value: string; onChange: (next: 
       <div className="grid grid-cols-3 gap-3 items-start">
         <div>
           <div className="text-xs text-slate-500 mb-1 text-center">שעה</div>
-          <div ref={hourListRef} className="h-36 overflow-y-auto rounded-lg border border-slate-200 p-1">
+          <div ref={hourListRef} className="h-36 overflow-y-auto rounded-lg border border-slate-200 p-1 snap-y snap-mandatory">
             {hourOptions.map((option) => (
               <button
                 key={`hour-${option}`}
                 data-hour={option}
                 type="button"
                 onClick={() => updateHour(option)}
-                className={`w-full rounded-md px-2 py-1.5 text-sm font-semibold transition ${hour12 === option ? 'bg-blue-600 text-white' : 'text-slate-700 hover:bg-slate-100'}`}
+                className={`w-full snap-center rounded-md px-2 py-1.5 text-sm font-semibold transition ${hour12 === option ? 'bg-blue-600 text-white' : 'text-slate-700 hover:bg-slate-100'}`}
               >
                 {`${option}`.padStart(2, '0')}
               </button>
@@ -639,14 +672,14 @@ const TimeWheelPicker = ({ value, onChange }: { value: string; onChange: (next: 
 
         <div>
           <div className="text-xs text-slate-500 mb-1 text-center">דקות</div>
-          <div ref={minuteListRef} className="h-36 overflow-y-auto rounded-lg border border-slate-200 p-1">
+          <div ref={minuteListRef} className="h-36 overflow-y-auto rounded-lg border border-slate-200 p-1 snap-y snap-mandatory">
             {minuteOptions.map((option) => (
               <button
                 key={`minute-${option}`}
                 data-minute={option}
                 type="button"
                 onClick={() => updateMinute(option)}
-                className={`w-full rounded-md px-2 py-1.5 text-sm font-semibold transition ${minute === option ? 'bg-blue-600 text-white' : 'text-slate-700 hover:bg-slate-100'}`}
+                className={`w-full snap-center rounded-md px-2 py-1.5 text-sm font-semibold transition ${minute === option ? 'bg-blue-600 text-white' : 'text-slate-700 hover:bg-slate-100'}`}
               >
                 {`${option}`.padStart(2, '0')}
               </button>
@@ -779,10 +812,12 @@ export default function FamilyScheduler() {
       return;
     }
 
+    const normalizedWeeksForPersist = normalizeWeekEventsWithDate(weeksData);
+
     const payload = {
       weekStart: weekStart.toISOString(),
       recurringTemplates,
-      weeksData,
+      weeksData: normalizedWeeksForPersist,
     };
 
     try {
@@ -847,6 +882,7 @@ export default function FamilyScheduler() {
     }
 
     const eventType = normalizeTypeForStorage(String(eventData.type || ''), String(eventData.title || ''));
+    const eventDate = nextDays[eventData.dayIndex].isoDate;
 
     const hasDuplicate = nextDays[eventData.dayIndex].events.some((existing) => {
       if (existing.time !== normalizedTime || existing.type !== eventType) {
@@ -860,10 +896,12 @@ export default function FamilyScheduler() {
     }
 
     nextDays[eventData.dayIndex].events.push(createEvent({
+      date: eventDate,
       time: normalizedTime,
       child: normalizedChild,
       title: eventData.title,
       type: eventType,
+      isRecurring: Boolean(eventData.recurringWeekly),
     }));
     nextDays[eventData.dayIndex].events = sortEvents(nextDays[eventData.dayIndex].events);
 
@@ -928,6 +966,7 @@ export default function FamilyScheduler() {
             if (!duplicate) {
               targetDay.events.push({
                 id: `${templateId}-${key}`,
+                date: toIsoDate(addDays(parseWeekKeyToDate(key) ?? targetWeekStart, template.dayIndex)),
                 time: template.time,
                 child: template.child,
                 title: template.title,
@@ -1246,6 +1285,7 @@ export default function FamilyScheduler() {
     const targetWeekStart = getWeekStart(selectedDate);
     const targetWeekKey = toIsoDate(targetWeekStart);
     const targetDayIndex = selectedDate.getDay();
+    const targetDate = toIsoDate(selectedDate);
 
     const time = normalizeTimeForPicker(editingEvent.data.time);
     const existingTemplateId = editingEvent.originalRecurringTemplateId;
@@ -1253,6 +1293,7 @@ export default function FamilyScheduler() {
 
     const updatedEvent: SchedulerEvent = {
       ...editingEvent.data,
+      date: targetDate,
       title: trimmedTitle,
       time,
       isRecurring: Boolean(templateId),
@@ -1307,6 +1348,7 @@ export default function FamilyScheduler() {
             const targetDay = weekDays[targetDayIndex];
             const recurringEvent: SchedulerEvent = {
               id: `${templateId}-${key}`,
+              date: toIsoDate(addDays(parseWeekKeyToDate(key) ?? targetWeekStart, targetDayIndex)),
               time,
               child: editingEvent.data.child,
               title: trimmedTitle,
@@ -1413,9 +1455,16 @@ export default function FamilyScheduler() {
 
       <div id="schedule-table" className="printable-schedule max-w-6xl mx-auto grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
         {days.map((day, dayIndex) => {
-          const visibleEvents = showRecurringOnly
-            ? day.events.filter((event) => event.isRecurring || event.recurringTemplateId)
-            : day.events;
+          const visibleEvents = day.events.filter((event) => {
+            const isRecurringEvent = Boolean(event.isRecurring || event.recurringTemplateId);
+            if (showRecurringOnly) {
+              return isRecurringEvent;
+            }
+            if (isRecurringEvent) {
+              return true;
+            }
+            return event.date === day.isoDate;
+          });
 
           return (
           <div key={day.isoDate} className="bg-white rounded-3xl shadow-xl overflow-hidden border border-slate-100 ring-1 ring-slate-200 print-day-card">
