@@ -915,9 +915,9 @@ export default function FamilyScheduler() {
 
   const upsertEventToDatabase = async (event: SchedulerEvent, dayIndex: number) => {
     try {
-      console.log('[API] PUT /api/schedule -> start', event);
+      console.log('[API] POST /api/schedule -> start', event);
       const response = await fetch('/api/schedule', {
-        method: 'PUT',
+        method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           event: {
@@ -927,12 +927,12 @@ export default function FamilyScheduler() {
         }),
       });
       const payload = await response.json();
-      console.log('[API] PUT /api/schedule ->', response.status, payload);
+      console.log('[API] POST /api/schedule ->', response.status, payload);
       if (!response.ok) {
         throw new Error(payload?.error || 'Failed saving event');
       }
     } catch (error) {
-      console.error('[API] PUT /api/schedule client failed', error);
+      console.error('[API] POST /api/schedule client failed', error);
       throw error;
     }
   };
@@ -967,6 +967,24 @@ export default function FamilyScheduler() {
     setDbSyncStatus({ state: 'saving', message: 'Saving to database...' });
     try {
       await upsertEventToDatabase(event, dayIndex);
+
+      const targetWeekKey = toIsoDate(targetWeekStart);
+      setWeeksData((prev) => {
+        const weekDays = prev[targetWeekKey] ? prev[targetWeekKey].map((day) => ({ ...day, events: [...day.events] })) : createWeekDays(targetWeekStart, false, recurringTemplates);
+        const existingDay = weekDays[dayIndex] || {
+          date: toDisplayDate(addDays(targetWeekStart, dayIndex)),
+          dayName: dayNames[dayIndex],
+          isoDate: toIsoDate(addDays(targetWeekStart, dayIndex)),
+          events: [],
+        };
+
+        const nextEvents = existingDay.events.filter((existingEvent) => existingEvent.id !== event.id);
+        nextEvents.push(event);
+        weekDays[dayIndex] = { ...existingDay, events: sortEvents(nextEvents) };
+
+        return { ...prev, [targetWeekKey]: weekDays };
+      });
+
       await refetchEventsFromDatabase(targetWeekStart);
       setDbSyncStatus({ state: 'saved', message: 'Saved' });
     } catch (error) {
@@ -981,6 +999,24 @@ export default function FamilyScheduler() {
     setDbSyncStatus({ state: 'saving', message: 'Deleting from database...' });
     try {
       await deleteEventFromDatabase(payload);
+
+      const targetWeekKey = toIsoDate(targetWeekStart);
+      setWeeksData((prev) => {
+        const weekDays = prev[targetWeekKey] ? prev[targetWeekKey].map((day) => ({ ...day, events: [...day.events] })) : createWeekDays(targetWeekStart, false, recurringTemplates);
+
+        const nextWeekDays = weekDays.map((day) => ({
+          ...day,
+          events: day.events.filter((event) => {
+            if (payload.recurringTemplateId) {
+              return event.recurringTemplateId !== payload.recurringTemplateId && event.id !== payload.eventId;
+            }
+            return event.id !== payload.eventId;
+          }),
+        }));
+
+        return { ...prev, [targetWeekKey]: nextWeekDays };
+      });
+
       await refetchEventsFromDatabase(targetWeekStart);
       setDbSyncStatus({ state: 'saved', message: 'Deleted' });
     } catch (error) {

@@ -142,6 +142,51 @@ const sanitizeDbEvent = (value: unknown) => {
   };
 };
 
+const upsertScheduleEvent = async (incoming: ReturnType<typeof sanitizeDbEvent>) => {
+  if (!incoming) {
+    throw new Error("Invalid event payload");
+  }
+
+  await ensureFamilyScheduleTable();
+  await sql`
+    INSERT INTO family_schedule (
+      event_id,
+      event_date,
+      day_index,
+      event_time,
+      child,
+      title,
+      event_type,
+      is_recurring,
+      recurring_template_id,
+      updated_at
+    )
+    VALUES (
+      ${incoming.eventId},
+      ${incoming.date},
+      ${incoming.dayIndex},
+      ${incoming.time},
+      ${incoming.child},
+      ${incoming.title},
+      ${incoming.type},
+      ${incoming.isRecurring},
+      ${incoming.recurringTemplateId},
+      NOW()
+    )
+    ON CONFLICT (event_id)
+    DO UPDATE SET
+      event_date = EXCLUDED.event_date,
+      day_index = EXCLUDED.day_index,
+      event_time = EXCLUDED.event_time,
+      child = EXCLUDED.child,
+      title = EXCLUDED.title,
+      event_type = EXCLUDED.event_type,
+      is_recurring = EXCLUDED.is_recurring,
+      recurring_template_id = EXCLUDED.recurring_template_id,
+      updated_at = NOW()
+  `;
+};
+
 export async function GET() {
   try {
     console.log('[API] GET /api/schedule');
@@ -194,44 +239,7 @@ export async function PUT(request: NextRequest) {
       return NextResponse.json({ error: "Invalid event payload" }, { status: 400 });
     }
 
-    await ensureFamilyScheduleTable();
-    await sql`
-      INSERT INTO family_schedule (
-        event_id,
-        event_date,
-        day_index,
-        event_time,
-        child,
-        title,
-        event_type,
-        is_recurring,
-        recurring_template_id,
-        updated_at
-      )
-      VALUES (
-        ${incoming.eventId},
-        ${incoming.date},
-        ${incoming.dayIndex},
-        ${incoming.time},
-        ${incoming.child},
-        ${incoming.title},
-        ${incoming.type},
-        ${incoming.isRecurring},
-        ${incoming.recurringTemplateId},
-        NOW()
-      )
-      ON CONFLICT (event_id)
-      DO UPDATE SET
-        event_date = EXCLUDED.event_date,
-        day_index = EXCLUDED.day_index,
-        event_time = EXCLUDED.event_time,
-        child = EXCLUDED.child,
-        title = EXCLUDED.title,
-        event_type = EXCLUDED.event_type,
-        is_recurring = EXCLUDED.is_recurring,
-        recurring_template_id = EXCLUDED.recurring_template_id,
-        updated_at = NOW()
-    `;
+    await upsertScheduleEvent(incoming);
 
     return NextResponse.json({ ok: true });
   } catch (error) {
@@ -357,13 +365,6 @@ const normalizeModel = (value: unknown, fallback: SupportedModel): SupportedMode
 
 export async function POST(request: NextRequest) {
   console.log('[API] POST /api/schedule');
-  const apiKey = process.env.GEMINI_API_KEY || process.env.NEXT_PUBLIC_GEMINI_API_KEY;
-  if (!apiKey) {
-    return NextResponse.json(
-      { error: "Missing GEMINI_API_KEY (or NEXT_PUBLIC_GEMINI_API_KEY) on server" },
-      { status: 500 }
-    );
-  }
 
   try {
     const parsedBody = await tryParseJsonBody(request);
@@ -372,6 +373,13 @@ export async function POST(request: NextRequest) {
     }
 
     const body = parsedBody.data as Record<string, unknown>;
+
+    const incoming = sanitizeDbEvent(body?.event);
+    if (incoming) {
+      await upsertScheduleEvent(incoming);
+      return NextResponse.json({ ok: true });
+    }
+
     const text = typeof body?.text === "string" ? body.text.trim() : "";
     const weekStart = typeof body?.weekStart === "string" ? body.weekStart.trim() : "";
     const systemPrompt = typeof body?.systemPrompt === "string" ? body.systemPrompt.trim() : "";
@@ -388,6 +396,14 @@ export async function POST(request: NextRequest) {
 
     if (!text && !imageBase64) {
       return NextResponse.json({ error: "Text or image is required" }, { status: 400 });
+    }
+
+    const apiKey = process.env.GEMINI_API_KEY || process.env.NEXT_PUBLIC_GEMINI_API_KEY;
+    if (!apiKey) {
+      return NextResponse.json(
+        { error: "Missing GEMINI_API_KEY (or NEXT_PUBLIC_GEMINI_API_KEY) on server" },
+        { status: 500 }
+      );
     }
 
     const basePrompt = `אתה עוזר לו"ז משפחתי. נתח את הטקסט והחזר רק JSON תקין של מערך אירועים.
