@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { sql } from "@vercel/postgres";
 
+console.log(Object.keys(process.env));
+
 const allowedModels = ["gemini-1.5-flash", "gemini-2.0-flash"] as const;
 type SupportedModel = (typeof allowedModels)[number];
 const defaultModel: SupportedModel = "gemini-1.5-flash";
@@ -41,43 +43,53 @@ const extractJsonArray = (text: string) => {
   return text.slice(start, end + 1);
 };
 
-const ensurePostgresEnv = () => {
-  const hasPostgresEnv = Boolean(
-    process.env.POSTGRES_URL ||
-    process.env.POSTGRES_URL_NON_POOLING ||
-    process.env.POSTGRES_PRISMA_URL ||
-    process.env.DATABASE_URL
-  );
-
-  if (!hasPostgresEnv) {
-    throw new Error("Missing Postgres environment variables (POSTGRES_URL / POSTGRES_URL_NON_POOLING / DATABASE_URL)");
-  }
-};
-
-const ensureFamilyScheduleTable = async () => {
-  ensurePostgresEnv();
-  await sql`
-    CREATE TABLE IF NOT EXISTS family_schedule (
-      event_id TEXT PRIMARY KEY,
-      event_date TEXT NOT NULL,
-      day_index INT NOT NULL,
-      event_time TEXT NOT NULL,
-      child TEXT NOT NULL,
-      title TEXT NOT NULL,
-      event_type TEXT NOT NULL,
-      is_recurring BOOLEAN NOT NULL DEFAULT FALSE,
-      recurring_template_id TEXT,
-      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-    )
-  `;
-};
-
 const getErrorMessage = (error: unknown) => {
   if (error instanceof Error) {
     return error.message;
   }
 
   return String(error);
+};
+
+const ensurePostgresEnv = () => {
+  const postgresUrl = process.env.POSTGRES_URL?.trim();
+  const databaseUrl = process.env.DATABASE_URL?.trim();
+  if (!postgresUrl && !databaseUrl) {
+    return "Missing Postgres environment variables: POSTGRES_URL or DATABASE_URL";
+  }
+
+  return null;
+};
+
+const ensureFamilyScheduleTable = async () => {
+  const envError = ensurePostgresEnv();
+  if (envError) {
+    return { ok: false as const, error: envError };
+  }
+
+  try {
+    await sql`
+      CREATE TABLE IF NOT EXISTS family_schedule (
+        event_id TEXT PRIMARY KEY,
+        event_date TEXT NOT NULL,
+        day_index INT NOT NULL,
+        event_time TEXT NOT NULL,
+        child TEXT NOT NULL,
+        title TEXT NOT NULL,
+        event_type TEXT NOT NULL,
+        is_recurring BOOLEAN NOT NULL DEFAULT FALSE,
+        recurring_template_id TEXT,
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    `;
+
+    return { ok: true as const };
+  } catch (error) {
+    return {
+      ok: false as const,
+      error: `Failed to ensure family_schedule table: ${getErrorMessage(error)}`,
+    };
+  }
 };
 
 const tryParseJsonBody = async (request: NextRequest) => {
@@ -144,53 +156,70 @@ const sanitizeDbEvent = (value: unknown) => {
 
 const upsertScheduleEvent = async (incoming: ReturnType<typeof sanitizeDbEvent>) => {
   if (!incoming) {
-    throw new Error("Invalid event payload");
+    return { ok: false as const, error: "Invalid event payload" };
   }
 
-  await ensureFamilyScheduleTable();
-  await sql`
-    INSERT INTO family_schedule (
-      event_id,
-      event_date,
-      day_index,
-      event_time,
-      child,
-      title,
-      event_type,
-      is_recurring,
-      recurring_template_id,
-      updated_at
-    )
-    VALUES (
-      ${incoming.eventId},
-      ${incoming.date},
-      ${incoming.dayIndex},
-      ${incoming.time},
-      ${incoming.child},
-      ${incoming.title},
-      ${incoming.type},
-      ${incoming.isRecurring},
-      ${incoming.recurringTemplateId},
-      NOW()
-    )
-    ON CONFLICT (event_id)
-    DO UPDATE SET
-      event_date = EXCLUDED.event_date,
-      day_index = EXCLUDED.day_index,
-      event_time = EXCLUDED.event_time,
-      child = EXCLUDED.child,
-      title = EXCLUDED.title,
-      event_type = EXCLUDED.event_type,
-      is_recurring = EXCLUDED.is_recurring,
-      recurring_template_id = EXCLUDED.recurring_template_id,
-      updated_at = NOW()
-  `;
+  const tableStatus = await ensureFamilyScheduleTable();
+  if (!tableStatus.ok) {
+    return tableStatus;
+  }
+
+  try {
+    await sql`
+      INSERT INTO family_schedule (
+        event_id,
+        event_date,
+        day_index,
+        event_time,
+        child,
+        title,
+        event_type,
+        is_recurring,
+        recurring_template_id,
+        updated_at
+      )
+      VALUES (
+        ${incoming.eventId},
+        ${incoming.date},
+        ${incoming.dayIndex},
+        ${incoming.time},
+        ${incoming.child},
+        ${incoming.title},
+        ${incoming.type},
+        ${incoming.isRecurring},
+        ${incoming.recurringTemplateId},
+        NOW()
+      )
+      ON CONFLICT (event_id)
+      DO UPDATE SET
+        event_date = EXCLUDED.event_date,
+        day_index = EXCLUDED.day_index,
+        event_time = EXCLUDED.event_time,
+        child = EXCLUDED.child,
+        title = EXCLUDED.title,
+        event_type = EXCLUDED.event_type,
+        is_recurring = EXCLUDED.is_recurring,
+        recurring_template_id = EXCLUDED.recurring_template_id,
+        updated_at = NOW()
+    `;
+
+    return { ok: true as const };
+  } catch (error) {
+    return {
+      ok: false as const,
+      error: `Failed to upsert event: ${getErrorMessage(error)}`,
+    };
+  }
 };
 
 export async function GET() {
   try {
     console.log('[API] GET /api/schedule');
-    await ensureFamilyScheduleTable();
+    const tableStatus = await ensureFamilyScheduleTable();
+    if (!tableStatus.ok) {
+      return NextResponse.json({ error: tableStatus.error }, { status: 500 });
+    }
+
     const result = await sql`
       SELECT
         event_id,
@@ -239,7 +268,10 @@ export async function PUT(request: NextRequest) {
       return NextResponse.json({ error: "Invalid event payload" }, { status: 400 });
     }
 
-    await upsertScheduleEvent(incoming);
+    const upsertResult = await upsertScheduleEvent(incoming);
+    if (!upsertResult.ok) {
+      return NextResponse.json({ error: upsertResult.error }, { status: 500 });
+    }
 
     return NextResponse.json({ ok: true });
   } catch (error) {
@@ -251,6 +283,11 @@ export async function PUT(request: NextRequest) {
 export async function DELETE(request: NextRequest) {
   try {
     console.log('[API] DELETE /api/schedule');
+    const tableStatus = await ensureFamilyScheduleTable();
+    if (!tableStatus.ok) {
+      return NextResponse.json({ error: tableStatus.error }, { status: 500 });
+    }
+
     const url = new URL(request.url);
     const queryId = url.searchParams.get("id")?.trim() || "";
     const queryRecurringTemplateId = url.searchParams.get("recurringTemplateId")?.trim() || "";
@@ -274,8 +311,6 @@ export async function DELETE(request: NextRequest) {
     if (!clearAll && !eventId && !recurringTemplateId) {
       return NextResponse.json({ error: "id (or eventId) or recurringTemplateId is required" }, { status: 400 });
     }
-
-    await ensureFamilyScheduleTable();
 
     if (clearAll) {
       await sql`DELETE FROM family_schedule`;
@@ -367,6 +402,11 @@ export async function POST(request: NextRequest) {
   console.log('[API] POST /api/schedule');
 
   try {
+    const tableStatus = await ensureFamilyScheduleTable();
+    if (!tableStatus.ok) {
+      return NextResponse.json({ error: tableStatus.error }, { status: 500 });
+    }
+
     const parsedBody = await tryParseJsonBody(request);
     if (!parsedBody.ok) {
       return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
@@ -376,7 +416,11 @@ export async function POST(request: NextRequest) {
 
     const incoming = sanitizeDbEvent(body?.event);
     if (incoming) {
-      await upsertScheduleEvent(incoming);
+      const upsertResult = await upsertScheduleEvent(incoming);
+      if (!upsertResult.ok) {
+        return NextResponse.json({ error: upsertResult.error }, { status: 500 });
+      }
+
       return NextResponse.json({ ok: true });
     }
 
