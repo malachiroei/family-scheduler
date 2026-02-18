@@ -1,7 +1,7 @@
 "use client";
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import Image from 'next/image';
-import { Dog, Dumbbell, Music, GraduationCap, Trophy, Printer, Image as ImageIcon, MessageCircle, ChevronRight, ChevronLeft, X, Plus, CalendarDays, Clock3 } from 'lucide-react';
+import { Dog, Dumbbell, Music, GraduationCap, Trophy, Printer, Image as ImageIcon, MessageCircle, ChevronRight, ChevronLeft, X, Plus, CalendarDays } from 'lucide-react';
 import html2canvas from 'html2canvas';
 
 const baseChildrenConfig = {
@@ -38,6 +38,7 @@ type AiEvent = {
   child: BaseChildKey | string;
   title: string;
   type: EventType;
+  recurringWeekly?: boolean;
 };
 
 type RecurringTemplate = {
@@ -159,6 +160,30 @@ const normalizeTimeForPicker = (value: string) => {
     return value;
   }
   return '08:00';
+};
+
+const parseWeekKeyToDate = (value: string) => {
+  const parsed = new Date(`${value}T00:00:00`);
+  if (Number.isNaN(parsed.getTime())) {
+    return null;
+  }
+  return getWeekStart(parsed);
+};
+
+type TimeMeridiem = 'AM' | 'PM';
+
+const toTwelveHourState = (value: string) => {
+  const normalized = normalizeTimeForPicker(value);
+  const [rawHour, rawMinute] = normalized.split(':').map(Number);
+  const meridiem: TimeMeridiem = rawHour >= 12 ? 'PM' : 'AM';
+  const hour12 = rawHour % 12 === 0 ? 12 : rawHour % 12;
+  return { hour12, minute: rawMinute, meridiem };
+};
+
+const toTwentyFourHourClock = (hour12: number, minute: number, meridiem: TimeMeridiem) => {
+  const normalizedHour = hour12 === 12 ? 0 : hour12;
+  const hour24 = meridiem === 'PM' ? normalizedHour + 12 : normalizedHour;
+  return `${`${hour24}`.padStart(2, '0')}:${`${minute}`.padStart(2, '0')}`;
 };
 
 const normalizeClock = (value: string) => {
@@ -573,6 +598,82 @@ const getEventIcon = (eventType: EventType, title?: string) => {
   return <Music size={18} />;
 };
 
+const TimeWheelPicker = ({ value, onChange }: { value: string; onChange: (next: string) => void }) => {
+  const { hour12, minute, meridiem } = toTwelveHourState(value);
+  const hourOptions = Array.from({ length: 12 }, (_, idx) => idx + 1);
+  const minuteOptions = Array.from({ length: 60 }, (_, idx) => idx);
+  const hourListRef = useRef<HTMLDivElement | null>(null);
+  const minuteListRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    const selectedHour = hourListRef.current?.querySelector<HTMLButtonElement>(`[data-hour="${hour12}"]`);
+    selectedHour?.scrollIntoView({ block: 'center' });
+
+    const selectedMinute = minuteListRef.current?.querySelector<HTMLButtonElement>(`[data-minute="${minute}"]`);
+    selectedMinute?.scrollIntoView({ block: 'center' });
+  }, [hour12, minute]);
+
+  const updateHour = (nextHour: number) => onChange(toTwentyFourHourClock(nextHour, minute, meridiem));
+  const updateMinute = (nextMinute: number) => onChange(toTwentyFourHourClock(hour12, nextMinute, meridiem));
+  const updateMeridiem = (nextMeridiem: TimeMeridiem) => onChange(toTwentyFourHourClock(hour12, minute, nextMeridiem));
+
+  return (
+    <div className="mt-1 rounded-xl border border-slate-300 p-3 bg-white">
+      <div className="grid grid-cols-3 gap-3 items-start">
+        <div>
+          <div className="text-xs text-slate-500 mb-1 text-center">שעה</div>
+          <div ref={hourListRef} className="h-36 overflow-y-auto rounded-lg border border-slate-200 p-1">
+            {hourOptions.map((option) => (
+              <button
+                key={`hour-${option}`}
+                data-hour={option}
+                type="button"
+                onClick={() => updateHour(option)}
+                className={`w-full rounded-md px-2 py-1.5 text-sm font-semibold transition ${hour12 === option ? 'bg-blue-600 text-white' : 'text-slate-700 hover:bg-slate-100'}`}
+              >
+                {`${option}`.padStart(2, '0')}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <div>
+          <div className="text-xs text-slate-500 mb-1 text-center">דקות</div>
+          <div ref={minuteListRef} className="h-36 overflow-y-auto rounded-lg border border-slate-200 p-1">
+            {minuteOptions.map((option) => (
+              <button
+                key={`minute-${option}`}
+                data-minute={option}
+                type="button"
+                onClick={() => updateMinute(option)}
+                className={`w-full rounded-md px-2 py-1.5 text-sm font-semibold transition ${minute === option ? 'bg-blue-600 text-white' : 'text-slate-700 hover:bg-slate-100'}`}
+              >
+                {`${option}`.padStart(2, '0')}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <div>
+          <div className="text-xs text-slate-500 mb-1 text-center">AM / PM</div>
+          <div className="flex flex-col gap-2">
+            {(['AM', 'PM'] as const).map((period) => (
+              <button
+                key={period}
+                type="button"
+                onClick={() => updateMeridiem(period)}
+                className={`h-[68px] rounded-xl text-base font-extrabold transition ${meridiem === period ? 'bg-slate-800 text-white' : 'bg-slate-100 text-slate-700 hover:bg-slate-200'}`}
+              >
+                {period}
+              </button>
+            ))}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+};
+
 export default function FamilyScheduler() {
   const initialWeekStart = useMemo(() => getWeekStart(new Date()), []);
   const initialWeekKey = useMemo(() => toIsoDate(initialWeekStart), [initialWeekStart]);
@@ -590,15 +691,15 @@ export default function FamilyScheduler() {
     [initialWeekKey]: createWeekDays(initialWeekStart, false, []),
   }));
   const [editingEvent, setEditingEvent] = useState<{
+    sourceWeekKey: string;
     dayIndex: number;
-    eventIndex: number;
+    selectedDate: string;
     data: SchedulerEvent;
     recurringWeekly: boolean;
     originalRecurringTemplateId?: string;
   } | null>(null);
   const [creatingEvent, setCreatingEvent] = useState<NewEventDraft | null>(null);
   const [isChatOpen, setIsChatOpen] = useState(false);
-  const schedulerRef = useRef<HTMLDivElement>(null);
   const persistDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const requestInFlightRef = useRef(false);
   const writeQueueRef = useRef<Promise<void>>(Promise.resolve());
@@ -776,10 +877,7 @@ export default function FamilyScheduler() {
       const targetWeekStart = targetWeekStartOverride ? getWeekStart(targetWeekStartOverride) : weekStart;
       const targetWeekKey = toIsoDate(targetWeekStart);
 
-      const isRecurringFixed =
-        forceRecurring ||
-        /קבוע|מצוינות/i.test(eventData.title) ||
-        (eventData.dayIndex === 5 && normalizeTimeForPicker(eventData.time) === '15:30' && normalizeChildKey(String(eventData.child)) === 'ravid');
+      const isRecurringFixed = forceRecurring;
 
       const normalizedType = normalizeTypeForStorage(String(eventData.type || ''), String(eventData.title || ''));
       setWeeksData((prev) => {
@@ -894,8 +992,9 @@ export default function FamilyScheduler() {
   );
 
   const exportAsImage = async () => {
-    if (schedulerRef.current) {
-      const sourceCanvas = await html2canvas(schedulerRef.current, {
+    const scheduleElement = document.getElementById('schedule-table');
+    if (scheduleElement) {
+      const sourceCanvas = await html2canvas(scheduleElement, {
         backgroundColor: '#ffffff',
         scale: Math.max(3, Math.min(4, window.devicePixelRatio * 2)),
         useCORS: true,
@@ -933,7 +1032,7 @@ export default function FamilyScheduler() {
       const image = exportCanvas.toDataURL("image/png");
       const link = document.createElement('a');
       link.href = image;
-      link.download = `family-schedule-${new Date().toLocaleDateString()}.png`;
+      link.download = 'family-schedule.png';
       link.click();
     }
   };
@@ -952,7 +1051,7 @@ export default function FamilyScheduler() {
 
     const parsedComplex = parseComplexWhatsAppMessage(text, weekStart);
     if (parsedComplex && !imageFile) {
-      parsedComplex.events.forEach((eventData) => addNewEvent(eventData));
+      parsedComplex.events.forEach((eventData) => addNewEvent(eventData, Boolean(eventData.recurringWeekly), parsedComplex.targetWeekStart));
 
       setInputText('');
       setSuccessMessage('האירועים נוספו בהצלחה ללו״ז.');
@@ -961,7 +1060,7 @@ export default function FamilyScheduler() {
 
     const parsedFallback = parseInstructionFallback(text);
     if (parsedFallback && !imageFile) {
-      parsedFallback.events.forEach((eventData) => addNewEvent(eventData));
+      parsedFallback.events.forEach((eventData) => addNewEvent(eventData, Boolean(eventData.recurringWeekly), parsedFallback.targetWeekStart));
 
       setInputText('');
       setSuccessMessage('האירוע נוסף בהצלחה ללו״ז.');
@@ -1008,12 +1107,12 @@ export default function FamilyScheduler() {
       const rawEvents = payload?.events ?? payload?.event ?? [];
       const events = (Array.isArray(rawEvents) ? rawEvents : [rawEvents]) as AiEvent[];
       if (events.length) {
-        events.forEach((eventData) => addNewEvent(eventData));
+        events.forEach((eventData) => addNewEvent(eventData, Boolean(eventData.recurringWeekly), weekStart));
         setSuccessMessage('האירועים נוספו בהצלחה ללו״ז.');
       } else {
         if (imageFile) {
           const fallbackEvents = getEnglishOcrFallbackEvents();
-          fallbackEvents.forEach((eventData) => addNewEvent(eventData));
+          fallbackEvents.forEach((eventData) => addNewEvent(eventData, false, weekStart));
           setSuccessMessage('אירועי האנגלית נוספו מהתמונה.');
         } else {
           setApiError('לא זוהו אירועים חדשים בטקסט. נסה ניסוח מפורט יותר.');
@@ -1029,11 +1128,11 @@ export default function FamilyScheduler() {
         setApiError('חריגה ממכסת Gemini (429). נסה שוב עוד מעט או כתוב ניסוח קצר וברור.');
       } else if ((message.includes('404') || message.toLowerCase().includes('not found')) && imageFile) {
         const fallbackEvents = getEnglishOcrFallbackEvents();
-        fallbackEvents.forEach((eventData) => addNewEvent(eventData));
+        fallbackEvents.forEach((eventData) => addNewEvent(eventData, false, weekStart));
         setSuccessMessage('אירועי האנגלית נוספו מהתמונה (fallback למודל נתמך).');
       } else if (message.includes('502') && imageFile) {
         const fallbackEvents = getEnglishOcrFallbackEvents();
-        fallbackEvents.forEach((eventData) => addNewEvent(eventData));
+        fallbackEvents.forEach((eventData) => addNewEvent(eventData, false, weekStart));
         setSuccessMessage('אירועי האנגלית נוספו מהתמונה (fallback).');
       } else {
         setApiError(message);
@@ -1132,12 +1231,29 @@ export default function FamilyScheduler() {
       return;
     }
 
+    const trimmedTitle = editingEvent.data.title.trim();
+    if (!trimmedTitle) {
+      setApiError('יש להזין כותרת למשימה לפני שמירה.');
+      return;
+    }
+
+    const selectedDate = new Date(`${editingEvent.selectedDate}T00:00:00`);
+    if (Number.isNaN(selectedDate.getTime())) {
+      setApiError('יש לבחור תאריך תקין לפני שמירה.');
+      return;
+    }
+
+    const targetWeekStart = getWeekStart(selectedDate);
+    const targetWeekKey = toIsoDate(targetWeekStart);
+    const targetDayIndex = selectedDate.getDay();
+
     const time = normalizeTimeForPicker(editingEvent.data.time);
     const existingTemplateId = editingEvent.originalRecurringTemplateId;
     const templateId = editingEvent.recurringWeekly ? (existingTemplateId ?? generateId()) : undefined;
 
     const updatedEvent: SchedulerEvent = {
       ...editingEvent.data,
+      title: trimmedTitle,
       time,
       isRecurring: Boolean(templateId),
       recurringTemplateId: templateId,
@@ -1148,10 +1264,10 @@ export default function FamilyScheduler() {
           ...recurringTemplates.filter((template) => template.templateId !== templateId),
           {
             templateId: templateId!,
-            dayIndex: editingEvent.dayIndex,
+            dayIndex: targetDayIndex,
             time,
             child: editingEvent.data.child,
-            title: editingEvent.data.title,
+            title: trimmedTitle,
             type: editingEvent.data.type,
             isRecurring: true,
           },
@@ -1163,38 +1279,87 @@ export default function FamilyScheduler() {
     setWeeksData((prev) => {
       const nextData: Record<string, DaySchedule[]> = {};
 
+      const allKeys = new Set([...Object.keys(prev), targetWeekKey]);
+      for (const key of allKeys) {
+        const existingWeek = prev[key];
+        const weekDate = parseWeekKeyToDate(key) ?? weekStart;
+        const baseWeek = existingWeek ?? createWeekDays(weekDate, false, nextTemplates);
+        nextData[key] = baseWeek.map((day) => ({ ...day, events: [...day.events] }));
+      }
+
+      if (nextData[editingEvent.sourceWeekKey]?.[editingEvent.dayIndex]) {
+        nextData[editingEvent.sourceWeekKey][editingEvent.dayIndex].events = nextData[editingEvent.sourceWeekKey][editingEvent.dayIndex].events
+          .filter((event) => event.id !== editingEvent.data.id);
+      }
+
+      if (existingTemplateId) {
+        Object.values(nextData).forEach((weekDays) => {
+          weekDays.forEach((day) => {
+            day.events = day.events.filter((event) => event.recurringTemplateId !== existingTemplateId);
+          });
+        });
+      }
+
+      if (editingEvent.recurringWeekly && templateId) {
+        Object.entries(nextData)
+          .filter(([key]) => key >= targetWeekKey)
+          .forEach(([key, weekDays]) => {
+            const targetDay = weekDays[targetDayIndex];
+            const recurringEvent: SchedulerEvent = {
+              id: `${templateId}-${key}`,
+              time,
+              child: editingEvent.data.child,
+              title: trimmedTitle,
+              type: editingEvent.data.type,
+              isRecurring: true,
+              recurringTemplateId: templateId,
+            };
+            targetDay.events.push(recurringEvent);
+            targetDay.events = sortEvents(
+              targetDay.events.filter((event, idx, arr) => idx === arr.findIndex((candidate) => candidate.id === event.id))
+            );
+          });
+      } else {
+        const targetDay = nextData[targetWeekKey][targetDayIndex];
+        targetDay.events.push({ ...updatedEvent, isRecurring: false, recurringTemplateId: undefined });
+        targetDay.events = sortEvents(targetDay.events);
+      }
+
+      return nextData;
+    });
+
+    if (targetWeekKey !== weekKey) {
+      setWeekStart(targetWeekStart);
+    }
+
+    setEditingEvent(null);
+  };
+
+  const deleteEditedEvent = () => {
+    if (!editingEvent) {
+      return;
+    }
+
+    const existingTemplateId = editingEvent.originalRecurringTemplateId;
+    if (existingTemplateId) {
+      setRecurringTemplates((prev) => prev.filter((template) => template.templateId !== existingTemplateId));
+    }
+
+    setWeeksData((prev) => {
+      const nextData: Record<string, DaySchedule[]> = {};
+
       Object.entries(prev).forEach(([key, value]) => {
         const nextDays = value.map((day) => ({ ...day, events: [...day.events] }));
 
-        if (key === weekKey) {
-          nextDays[editingEvent.dayIndex].events[editingEvent.eventIndex] = updatedEvent;
-          nextDays[editingEvent.dayIndex].events = sortEvents(nextDays[editingEvent.dayIndex].events);
+        if (key === editingEvent.sourceWeekKey && nextDays[editingEvent.dayIndex]) {
+          nextDays[editingEvent.dayIndex].events = nextDays[editingEvent.dayIndex].events
+            .filter((event) => event.id !== editingEvent.data.id);
         }
 
-        if (existingTemplateId && key > weekKey) {
+        if (existingTemplateId) {
           nextDays.forEach((day) => {
             day.events = day.events.filter((event) => event.recurringTemplateId !== existingTemplateId);
           });
-        }
-
-        if (editingEvent.recurringWeekly && templateId && key > weekKey) {
-          const targetDay = nextDays[editingEvent.dayIndex];
-          const recurringEvent: SchedulerEvent = {
-            id: `${templateId}-${key}`,
-            time,
-            child: editingEvent.data.child,
-            title: editingEvent.data.title,
-            type: editingEvent.data.type,
-            isRecurring: true,
-            recurringTemplateId: templateId,
-          };
-          const existingIndex = targetDay.events.findIndex((event) => event.recurringTemplateId === templateId);
-          if (existingIndex >= 0) {
-            targetDay.events[existingIndex] = { ...targetDay.events[existingIndex], ...recurringEvent };
-          } else {
-            targetDay.events.push(recurringEvent);
-          }
-          targetDay.events = sortEvents(targetDay.events);
         }
 
         nextData[key] = nextDays;
@@ -1204,26 +1369,13 @@ export default function FamilyScheduler() {
     });
 
     setEditingEvent(null);
+    setSuccessMessage('המשימה נמחקה מהלו״ז.');
   };
 
   return (
     <div className="print-scheduler-shell h-screen overflow-y-auto bg-[#f8fafc] p-4 pb-28 md:p-8 md:pb-32 dir-rtl" dir="rtl">
       <div className="max-w-6xl mx-auto mb-8 print:mb-4">
-        <div className="print-logo flex justify-center print:hidden">
-          <div className="bg-white border border-slate-200 rounded-2xl px-5 py-3 shadow-sm text-center">
-            <Image
-              src="/logo.png"
-              alt="MALACHI FAMILY TIME PLANNER"
-              width={260}
-              height={70}
-              priority
-              className="mx-auto h-auto w-[220px] sm:w-[260px]"
-            />
-            <div className="mt-1 text-[11px] sm:text-xs font-semibold tracking-[0.24em] text-slate-600">MALACHI FAMILY TIME PLANNER</div>
-          </div>
-        </div>
-
-        <div className="print-controls mt-4 flex justify-end gap-3 print:hidden">
+        <div className="print-controls flex justify-end gap-3 print:hidden">
           <button onClick={() => window.print()} className="flex items-center gap-2 bg-white border border-slate-200 px-4 py-2 rounded-lg hover:bg-slate-50 transition shadow-sm">
             <Printer size={18} /> הדפסה
           </button>
@@ -1259,7 +1411,7 @@ export default function FamilyScheduler() {
         </button>
       </div>
 
-      <div ref={schedulerRef} className="printable-schedule max-w-6xl mx-auto grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+      <div id="schedule-table" className="printable-schedule max-w-6xl mx-auto grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
         {days.map((day, dayIndex) => {
           const visibleEvents = showRecurringOnly
             ? day.events.filter((event) => event.isRecurring || event.recurringTemplateId)
@@ -1289,15 +1441,16 @@ export default function FamilyScheduler() {
                   אין אירועים כרגע — לחץ להוספת משימה
                 </button>
               )}
-              {visibleEvents.map((event, idx) => {
+              {visibleEvents.map((event) => {
                 const mainIconColor = baseChildrenConfig[getChildKeys(event.child)[0]].iconColor;
                 return (
                   <button
                     key={event.id}
                     type="button"
                     onClick={() => setEditingEvent({
+                      sourceWeekKey: weekKey,
                       dayIndex,
-                      eventIndex: idx,
+                      selectedDate: day.isoDate,
                       data: { ...event, time: normalizeTimeForPicker(event.time) },
                       recurringWeekly: Boolean(event.recurringTemplateId),
                       originalRecurringTemplateId: event.recurringTemplateId,
@@ -1451,22 +1604,6 @@ export default function FamilyScheduler() {
               </label>
 
               <label className="text-sm text-slate-700 font-medium">
-                שעה
-                <div className="relative mt-1">
-                  <Clock3 size={16} className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400" />
-                  <input
-                    type="time"
-                    step={300}
-                    value={creatingEvent.data.time}
-                    onChange={(e) => setCreatingEvent((prev) => prev ? ({ ...prev, data: { ...prev.data, time: e.target.value } }) : prev)}
-                    className="w-full border border-slate-300 rounded-xl pl-3 pr-9 py-2 outline-none focus:border-blue-400"
-                  />
-                </div>
-              </label>
-            </div>
-
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-              <label className="text-sm text-slate-700 font-medium">
                 ילד/ה
                 <select
                   value={creatingEvent.data.child}
@@ -1479,7 +1616,17 @@ export default function FamilyScheduler() {
                 </select>
                 <div className="mt-2">{renderChildBadges(creatingEvent.data.child)}</div>
               </label>
+            </div>
 
+            <label className="text-sm text-slate-700 font-medium block">
+              שעה
+              <TimeWheelPicker
+                value={creatingEvent.data.time}
+                onChange={(nextTime) => setCreatingEvent((prev) => prev ? ({ ...prev, data: { ...prev.data, time: nextTime } }) : prev)}
+              />
+            </label>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
               <div className="text-sm text-slate-700 font-medium">
                 סוג פעילות
                 <div className="mt-1 grid grid-cols-2 sm:grid-cols-3 gap-2">
@@ -1557,14 +1704,16 @@ export default function FamilyScheduler() {
 
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
               <label className="text-sm text-slate-700 font-medium">
-                שעה
-                <input
-                  type="time"
-                  step={300}
-                  value={editingEvent.data.time}
-                  onChange={(e) => setEditingEvent((prev) => prev ? ({ ...prev, data: { ...prev.data, time: e.target.value } }) : prev)}
-                  className="mt-1 w-full border border-slate-300 rounded-xl px-3 py-2 outline-none focus:border-blue-400"
-                />
+                תאריך
+                <div className="relative mt-1">
+                  <CalendarDays size={16} className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400" />
+                  <input
+                    type="date"
+                    value={editingEvent.selectedDate}
+                    onChange={(e) => setEditingEvent((prev) => prev ? ({ ...prev, selectedDate: e.target.value }) : prev)}
+                    className="w-full border border-slate-300 rounded-xl pl-3 pr-9 py-2 outline-none focus:border-blue-400"
+                  />
+                </div>
               </label>
 
               <label className="text-sm text-slate-700 font-medium">
@@ -1581,6 +1730,14 @@ export default function FamilyScheduler() {
                 <div className="mt-2">{renderChildBadges(editingEvent.data.child)}</div>
               </label>
             </div>
+
+            <label className="text-sm text-slate-700 font-medium block">
+              שעה
+              <TimeWheelPicker
+                value={editingEvent.data.time}
+                onChange={(nextTime) => setEditingEvent((prev) => prev ? ({ ...prev, data: { ...prev.data, time: nextTime } }) : prev)}
+              />
+            </label>
 
             <label className="text-sm text-slate-700 font-medium block">
               כותרת
@@ -1616,6 +1773,14 @@ export default function FamilyScheduler() {
               />
               פעילות שבועית חוזרת
             </label>
+
+            <button
+              type="button"
+              onClick={deleteEditedEvent}
+              className="w-full rounded-xl bg-red-600 text-white font-bold py-2.5 hover:bg-red-700 transition"
+            >
+              מחק משימה
+            </button>
 
             <div className="flex gap-2 justify-end pt-2">
               <button

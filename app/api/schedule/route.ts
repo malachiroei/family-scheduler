@@ -20,6 +20,7 @@ type AiEvent = {
   child: ChildKey;
   title: string;
   type: EventType;
+  recurringWeekly?: boolean;
 };
 
 const extractJsonArray = (text: string) => {
@@ -36,10 +37,9 @@ const sanitizeEvents = (events: unknown): AiEvent[] => {
     return [];
   }
 
-  return events
-    .map((item) => {
+  return events.reduce<AiEvent[]>((acc, item) => {
       if (!item || typeof item !== "object") {
-        return null;
+        return acc;
       }
 
       const candidate = item as Record<string, unknown>;
@@ -48,6 +48,9 @@ const sanitizeEvents = (events: unknown): AiEvent[] => {
       const child = typeof candidate.child === "string" ? candidate.child : "";
       const title = typeof candidate.title === "string" ? candidate.title.trim() : "";
       const type = typeof candidate.type === "string" ? candidate.type : "";
+      const recurringWeekly = typeof candidate.recurringWeekly === "boolean"
+        ? candidate.recurringWeekly
+        : (typeof candidate.isRecurring === "boolean" ? candidate.isRecurring : false);
 
       if (
         !Number.isInteger(dayIndex) ||
@@ -58,18 +61,20 @@ const sanitizeEvents = (events: unknown): AiEvent[] => {
         !allowedChildren.includes(child as ChildKey) ||
         !allowedTypes.includes(type as EventType)
       ) {
-        return null;
+        return acc;
       }
 
-      return {
+      acc.push({
         dayIndex,
         time,
         child: child as ChildKey,
         title,
         type: type as EventType,
-      };
-    })
-    .filter((event): event is AiEvent => Boolean(event));
+        recurringWeekly,
+      });
+
+      return acc;
+    }, []);
 };
 
 const isSupportedModel = (value: unknown): value is SupportedModel =>
