@@ -44,12 +44,13 @@ const extractJsonArray = (text: string) => {
 const ensurePostgresEnv = () => {
   const hasPostgresEnv = Boolean(
     process.env.POSTGRES_URL ||
+    process.env.POSTGRES_URL_NON_POOLING ||
     process.env.POSTGRES_PRISMA_URL ||
     process.env.DATABASE_URL
   );
 
   if (!hasPostgresEnv) {
-    throw new Error("Missing Postgres environment variables (POSTGRES_URL / DATABASE_URL)");
+    throw new Error("Missing Postgres environment variables (POSTGRES_URL / POSTGRES_URL_NON_POOLING / DATABASE_URL)");
   }
 };
 
@@ -69,6 +70,31 @@ const ensureFamilyScheduleTable = async () => {
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )
   `;
+};
+
+const getErrorMessage = (error: unknown) => {
+  if (error instanceof Error) {
+    return error.message;
+  }
+
+  return String(error);
+};
+
+const tryParseJsonBody = async (request: NextRequest) => {
+  const rawBody = await request.text();
+  if (!rawBody.trim()) {
+    return { ok: true as const, data: {} as Record<string, unknown> };
+  }
+
+  try {
+    const parsed = JSON.parse(rawBody);
+    if (!parsed || typeof parsed !== "object") {
+      return { ok: true as const, data: {} as Record<string, unknown> };
+    }
+    return { ok: true as const, data: parsed as Record<string, unknown> };
+  } catch (error) {
+    return { ok: false as const, error };
+  }
 };
 
 const sanitizeDbEvent = (value: unknown) => {
@@ -149,16 +175,20 @@ export async function GET() {
 
     return NextResponse.json({ events });
   } catch (error) {
-    const message = error instanceof Error ? error.message : "Failed to fetch events";
     console.error('[API] GET /api/schedule failed', error);
-    return NextResponse.json({ error: message }, { status: 500 });
+    return Response.json({ error: getErrorMessage(error) }, { status: 500 });
   }
 }
 
 export async function PUT(request: NextRequest) {
   try {
     console.log('[API] PUT /api/schedule');
-    const body = await request.json();
+    const parsedBody = await tryParseJsonBody(request);
+    if (!parsedBody.ok) {
+      return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
+    }
+
+    const body = parsedBody.data;
     const incoming = sanitizeDbEvent(body?.event);
     if (!incoming) {
       return NextResponse.json({ error: "Invalid event payload" }, { status: 400 });
@@ -205,22 +235,36 @@ export async function PUT(request: NextRequest) {
 
     return NextResponse.json({ ok: true });
   } catch (error) {
-    const message = error instanceof Error ? error.message : "Failed to save event";
     console.error('[API] PUT /api/schedule failed', error);
-    return NextResponse.json({ error: message }, { status: 500 });
+    return Response.json({ error: getErrorMessage(error) }, { status: 500 });
   }
 }
 
 export async function DELETE(request: NextRequest) {
   try {
     console.log('[API] DELETE /api/schedule');
-    const body = await request.json();
-    const clearAll = Boolean(body?.clearAll);
-    const eventId = typeof body?.eventId === "string" ? body.eventId.trim() : "";
-    const recurringTemplateId = typeof body?.recurringTemplateId === "string" ? body.recurringTemplateId.trim() : "";
+    const url = new URL(request.url);
+    const queryId = url.searchParams.get("id")?.trim() || "";
+    const queryRecurringTemplateId = url.searchParams.get("recurringTemplateId")?.trim() || "";
+    const queryClearAllRaw = url.searchParams.get("clearAll")?.trim().toLowerCase() || "";
+    const queryClearAll = queryClearAllRaw === "1" || queryClearAllRaw === "true";
+
+    const parsedBody = await tryParseJsonBody(request);
+    if (!parsedBody.ok && !queryId && !queryRecurringTemplateId && !queryClearAll) {
+      return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
+    }
+
+    const body = parsedBody.ok ? parsedBody.data : {};
+    const bodyClearAll = Boolean(body?.clearAll);
+    const bodyEventId = typeof body?.eventId === "string" ? body.eventId.trim() : "";
+    const bodyRecurringTemplateId = typeof body?.recurringTemplateId === "string" ? body.recurringTemplateId.trim() : "";
+
+    const clearAll = queryClearAll || bodyClearAll;
+    const eventId = queryId || bodyEventId;
+    const recurringTemplateId = queryRecurringTemplateId || bodyRecurringTemplateId;
 
     if (!clearAll && !eventId && !recurringTemplateId) {
-      return NextResponse.json({ error: "eventId or recurringTemplateId is required" }, { status: 400 });
+      return NextResponse.json({ error: "id (or eventId) or recurringTemplateId is required" }, { status: 400 });
     }
 
     await ensureFamilyScheduleTable();
@@ -245,9 +289,8 @@ export async function DELETE(request: NextRequest) {
 
     return NextResponse.json({ ok: true });
   } catch (error) {
-    const message = error instanceof Error ? error.message : "Failed to delete event";
     console.error('[API] DELETE /api/schedule failed', error);
-    return NextResponse.json({ error: message }, { status: 500 });
+    return Response.json({ error: getErrorMessage(error) }, { status: 500 });
   }
 }
 
@@ -323,13 +366,19 @@ export async function POST(request: NextRequest) {
   }
 
   try {
-    const body = await request.json();
+    const parsedBody = await tryParseJsonBody(request);
+    if (!parsedBody.ok) {
+      return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
+    }
+
+    const body = parsedBody.data as Record<string, unknown>;
     const text = typeof body?.text === "string" ? body.text.trim() : "";
     const weekStart = typeof body?.weekStart === "string" ? body.weekStart.trim() : "";
     const systemPrompt = typeof body?.systemPrompt === "string" ? body.systemPrompt.trim() : "";
     const requestedModel = normalizeModel(body?.model, defaultModel);
     const fallbackModel = normalizeModel(body?.fallbackModel, defaultFallbackModel);
-    const incomingInlineData = body?.imagePart?.inlineData;
+    const imagePart = body?.imagePart as Record<string, unknown> | undefined;
+    const incomingInlineData = imagePart?.inlineData as Record<string, unknown> | undefined;
     const imageBase64 = typeof incomingInlineData?.data === "string"
       ? incomingInlineData.data.trim()
       : (typeof body?.imageBase64 === "string" ? body.imageBase64.trim() : "");
@@ -441,8 +490,7 @@ ${text}`;
 
     return NextResponse.json({ events });
   } catch (error) {
-    const message = error instanceof Error ? error.message : "Unknown server error";
     console.error('[API] POST /api/schedule failed', error);
-    return NextResponse.json({ error: message }, { status: 500 });
+    return Response.json({ error: getErrorMessage(error) }, { status: 500 });
   }
 }

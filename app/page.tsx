@@ -709,6 +709,8 @@ export default function FamilyScheduler() {
   const requestInFlightRef = useRef(false);
   const lastApiRequestAtRef = useRef<number>(0);
   const hasLoadedStorageRef = useRef(false);
+  const autoRefetchInFlightRef = useRef(false);
+  const autoRefetchWeekKeyRef = useRef<string>('');
 
   const weekKey = toIsoDate(weekStart);
   const days = weeksData[weekKey] ?? [];
@@ -938,10 +940,16 @@ export default function FamilyScheduler() {
   const deleteEventFromDatabase = async (payload: { eventId: string; recurringTemplateId?: string }) => {
     try {
       console.log('[API] DELETE /api/schedule -> start', payload);
-      const response = await fetch('/api/schedule', {
+      const query = new URLSearchParams();
+      if (payload.eventId) {
+        query.set('id', payload.eventId);
+      }
+      if (payload.recurringTemplateId) {
+        query.set('recurringTemplateId', payload.recurringTemplateId);
+      }
+
+      const response = await fetch(`/api/schedule?${query.toString()}`, {
         method: 'DELETE',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
       });
       const body = await response.json();
       console.log('[API] DELETE /api/schedule ->', response.status, body);
@@ -955,6 +963,7 @@ export default function FamilyScheduler() {
   };
 
   const handleSubmit = async (event: SchedulerEvent, dayIndex: number, targetWeekStart: Date) => {
+    console.log('Action triggered:', 'add');
     setDbSyncStatus({ state: 'saving', message: 'Saving to database...' });
     try {
       await upsertEventToDatabase(event, dayIndex);
@@ -968,6 +977,7 @@ export default function FamilyScheduler() {
   };
 
   const handleDelete = async (payload: { eventId: string; recurringTemplateId?: string }, targetWeekStart: Date) => {
+    console.log('Action triggered:', 'delete');
     setDbSyncStatus({ state: 'saving', message: 'Deleting from database...' });
     try {
       await deleteEventFromDatabase(payload);
@@ -981,11 +991,27 @@ export default function FamilyScheduler() {
   };
 
   useEffect(() => {
-    void refetchEventsFromDatabase(weekStart).catch((error) => {
-      const message = error instanceof Error ? error.message : 'Failed to refetch events';
-      setApiError(message);
-    });
-  }, [weekStart]);
+    if (!hasLoadedStorageRef.current) {
+      return;
+    }
+
+    if (autoRefetchInFlightRef.current && autoRefetchWeekKeyRef.current === weekKey) {
+      return;
+    }
+
+    autoRefetchInFlightRef.current = true;
+    autoRefetchWeekKeyRef.current = weekKey;
+
+    const targetWeekStart = new Date(`${weekKey}T00:00:00`);
+    void refetchEventsFromDatabase(targetWeekStart)
+      .catch((error) => {
+        const message = error instanceof Error ? error.message : 'Failed to refetch events';
+        setApiError(message);
+      })
+      .finally(() => {
+        autoRefetchInFlightRef.current = false;
+      });
+  }, [weekKey]);
 
   const parseInstructionFallback = (text: string): { targetWeekStart: Date; events: AiEvent[] } | null => {
     const timeMatch = extractTimesFromLine(text)[0];
@@ -1081,12 +1107,11 @@ export default function FamilyScheduler() {
 
   const handleClearAll = async () => {
     try {
+      console.log('Action triggered:', 'delete');
       setDbSyncStatus({ state: 'saving', message: 'Clearing database...' });
       console.log('[API] DELETE /api/schedule -> start clearAll');
-      const response = await fetch('/api/schedule', {
+      const response = await fetch('/api/schedule?clearAll=true', {
         method: 'DELETE',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ clearAll: true }),
       });
       const payload = await response.json();
       console.log('[API] DELETE /api/schedule ->', response.status, payload);
@@ -1280,6 +1305,7 @@ export default function FamilyScheduler() {
   };
 
   const saveCreatedEvent = async () => {
+    console.log('Action triggered:', 'add');
     if (!creatingEvent) {
       return;
     }
@@ -1330,6 +1356,7 @@ export default function FamilyScheduler() {
   };
 
   const saveEditedEvent = async () => {
+    console.log('Action triggered:', 'add');
     if (!editingEvent) {
       return;
     }
@@ -1375,6 +1402,7 @@ export default function FamilyScheduler() {
   };
 
   const deleteEditedEvent = async () => {
+    console.log('Action triggered:', 'delete');
     if (!editingEvent) {
       return;
     }
