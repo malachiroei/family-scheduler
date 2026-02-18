@@ -82,13 +82,20 @@ const AI_OCR_SYSTEM_PROMPT = `אתה מנתח צילום מסך של אפליק�
 - כל פעילות של כושר/אימון (כולל "אימון מצוינות") => type רצוי: "gym"
 - אם מזוהה שם פעילות ספציפי (למשל "אימון מצוינות") אפשר להחזיר type זהה לטקסט הפעילות כדי לאפשר ערך חופשי.
 דוגמות לצילום מסך שיעורי אנגלית שיש להעדיף אם מזוהים:
-- יום ג' (17/02): 14:30 מבחן רמה עם Rachel => dayIndex:2, time:"14:30", title:"מבחן רמה - Rachel", child:"alin", type:"lesson"
 - יום ה' (19/02): 14:00 שיעור קבוע עם Karl => dayIndex:4, time:"14:00", title:"שיעור קבוע - Karl", child:"amit", type:"lesson"
 - יום ב' הבא (23/02): 15:00 שיעור קבוע עם Karl => dayIndex:1, time:"15:00", title:"שיעור קבוע - Karl", child:"amit", type:"lesson"
+- יום ג' (24/02): 14:00 שיעור יחיד עם Rachel => dayIndex:2, time:"14:00", title:"שיעור יחיד - Rachel", child:"alin", type:"lesson"
 אם הדוגמאות הללו מופיעות בתמונה, חלץ אותן בדיוק לערכים הללו.
 החזר תמיד מערך אירועים בלבד.`;
 
 const SCHEDULER_STORAGE_KEY = 'family-scheduler-state-v1';
+const SCHEDULER_STATE_ENDPOINT = '/api/state';
+
+type PersistedStatePayload = {
+  weekStart?: string;
+  recurringTemplates?: RecurringTemplate[];
+  weeksData?: Record<string, DaySchedule[]>;
+};
 
 const addDays = (date: Date, days: number) => {
   const next = new Date(date);
@@ -323,10 +330,31 @@ const fileToGenerativePart = async (file: File) => {
 };
 
 const getEnglishOcrFallbackEvents = (): AiEvent[] => [
-  { dayIndex: 2, time: '14:30', child: 'alin', title: 'מבחן רמה - Rachel', type: 'lesson' },
   { dayIndex: 4, time: '14:00', child: 'amit', title: 'שיעור קבוע - Karl', type: 'lesson' },
   { dayIndex: 1, time: '15:00', child: 'amit', title: 'שיעור קבוע - Karl', type: 'lesson' },
+  { dayIndex: 2, time: '14:00', child: 'alin', title: 'שיעור יחיד - Rachel', type: 'lesson' },
 ];
+
+const normalizePersistedState = (
+  payload: PersistedStatePayload | null | undefined,
+  fallbackWeekStart: Date
+) => {
+  const parsedWeekStart = payload?.weekStart ? new Date(payload.weekStart) : null;
+  const safeWeekStart = parsedWeekStart && !Number.isNaN(parsedWeekStart.getTime())
+    ? getWeekStart(parsedWeekStart)
+    : fallbackWeekStart;
+
+  const safeTemplates = Array.isArray(payload?.recurringTemplates) ? payload.recurringTemplates : [];
+  const safeWeeksData = payload?.weeksData && typeof payload.weeksData === 'object'
+    ? payload.weeksData
+    : { [toIsoDate(safeWeekStart)]: createWeekDays(safeWeekStart, false, safeTemplates) };
+
+  return {
+    weekStart: safeWeekStart,
+    recurringTemplates: safeTemplates,
+    weeksData: safeWeeksData,
+  };
+};
 
 const createEvent = (payload: Omit<SchedulerEvent, 'id'>): SchedulerEvent => ({
   id: generateId(),
@@ -522,7 +550,8 @@ export default function FamilyScheduler() {
     originalRecurringTemplateId?: string;
   } | null>(null);
   const schedulerRef = useRef<HTMLDivElement>(null);
-  const sendDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const persistDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const requestInFlightRef = useRef(false);
   const writeQueueRef = useRef<Promise<void>>(Promise.resolve());
   const lastApiRequestAtRef = useRef<number>(0);
   const hasLoadedStorageRef = useRef(false);
@@ -544,42 +573,55 @@ export default function FamilyScheduler() {
   }, [weekKey, weekStart, recurringTemplates]);
 
   useEffect(() => {
-    try {
-      const raw = localStorage.getItem(SCHEDULER_STORAGE_KEY);
-      if (!raw) {
-        hasLoadedStorageRef.current = true;
-        return;
+    let cancelled = false;
+
+    const hydrateState = async () => {
+      try {
+        const response = await fetch(SCHEDULER_STATE_ENDPOINT, { cache: 'no-store' });
+        if (response.ok) {
+          const payload = await response.json() as { state?: PersistedStatePayload };
+          if (payload?.state && !cancelled) {
+            const normalized = normalizePersistedState(payload.state, initialWeekStart);
+            setWeekStart(normalized.weekStart);
+            setRecurringTemplates(normalized.recurringTemplates);
+            setWeeksData(normalized.weeksData);
+            return;
+          }
+        }
+      } catch {
+        // ignore and fallback to localStorage
       }
 
-      const parsed = JSON.parse(raw) as {
-        weekStart?: string;
-        recurringTemplates?: RecurringTemplate[];
-        weeksData?: Record<string, DaySchedule[]>;
-      };
+      try {
+        const raw = localStorage.getItem(SCHEDULER_STORAGE_KEY);
+        const parsed = raw ? JSON.parse(raw) as PersistedStatePayload : null;
+        const normalized = normalizePersistedState(parsed, initialWeekStart);
+        if (!cancelled) {
+          setWeekStart(normalized.weekStart);
+          setRecurringTemplates(normalized.recurringTemplates);
+          setWeeksData(normalized.weeksData);
+        }
+      } catch {
+        if (!cancelled) {
+          const fallbackWeek = initialWeekStart;
+          setWeekStart(fallbackWeek);
+          setRecurringTemplates([]);
+          setWeeksData({
+            [toIsoDate(fallbackWeek)]: createWeekDays(fallbackWeek, false, []),
+          });
+        }
+      }
+    };
 
-      const parsedWeekStart = parsed?.weekStart ? new Date(parsed.weekStart) : null;
-      const safeWeekStart = parsedWeekStart && !Number.isNaN(parsedWeekStart.getTime())
-        ? getWeekStart(parsedWeekStart)
-        : initialWeekStart;
+    void hydrateState().finally(() => {
+      if (!cancelled) {
+        hasLoadedStorageRef.current = true;
+      }
+    });
 
-      const safeTemplates = Array.isArray(parsed?.recurringTemplates) ? parsed.recurringTemplates : [];
-      const safeWeeksData = parsed?.weeksData && typeof parsed.weeksData === 'object'
-        ? parsed.weeksData
-        : { [toIsoDate(safeWeekStart)]: createWeekDays(safeWeekStart, false, safeTemplates) };
-
-      setWeekStart(safeWeekStart);
-      setRecurringTemplates(safeTemplates);
-      setWeeksData(safeWeeksData);
-    } catch {
-      const fallbackWeek = initialWeekStart;
-      setWeekStart(fallbackWeek);
-      setRecurringTemplates([]);
-      setWeeksData({
-        [toIsoDate(fallbackWeek)]: createWeekDays(fallbackWeek, false, []),
-      });
-    } finally {
-      hasLoadedStorageRef.current = true;
-    }
+    return () => {
+      cancelled = true;
+    };
   }, [initialWeekStart]);
 
   useEffect(() => {
@@ -587,24 +629,40 @@ export default function FamilyScheduler() {
       return;
     }
 
+    const payload = {
+      weekStart: weekStart.toISOString(),
+      recurringTemplates,
+      weeksData,
+    };
+
     try {
       localStorage.setItem(
         SCHEDULER_STORAGE_KEY,
-        JSON.stringify({
-          weekStart: weekStart.toISOString(),
-          recurringTemplates,
-          weeksData,
-        })
+        JSON.stringify(payload)
       );
     } catch {
       // no-op: keep app usable even if persistence fails
     }
+
+    if (persistDebounceRef.current) {
+      clearTimeout(persistDebounceRef.current);
+    }
+
+    persistDebounceRef.current = setTimeout(() => {
+      void fetch(SCHEDULER_STATE_ENDPOINT, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      }).catch(() => {
+        // keep UI responsive even if server persistence fails
+      });
+    }, 450);
   }, [weekStart, recurringTemplates, weeksData]);
 
   useEffect(() => {
     return () => {
-      if (sendDebounceRef.current) {
-        clearTimeout(sendDebounceRef.current);
+      if (persistDebounceRef.current) {
+        clearTimeout(persistDebounceRef.current);
       }
     };
   }, []);
@@ -799,7 +857,7 @@ export default function FamilyScheduler() {
   };
 
   const sendMessageNow = async (text: string, imageFile: File | null) => {
-    if ((!text && !imageFile) || isSubmitting) {
+    if ((!text && !imageFile) || isSubmitting || requestInFlightRef.current) {
       return;
     }
 
@@ -829,6 +887,7 @@ export default function FamilyScheduler() {
       return;
     }
 
+    requestInFlightRef.current = true;
     setIsSubmitting(true);
 
     try {
@@ -888,6 +947,7 @@ export default function FamilyScheduler() {
         setApiError(message);
       }
     } finally {
+      requestInFlightRef.current = false;
       setIsSubmitting(false);
     }
   };
@@ -895,21 +955,18 @@ export default function FamilyScheduler() {
   const handleSendMessage = () => {
     const text = inputText.trim();
     const imageFile = selectedImage;
-    if ((!text && !imageFile) || isSubmitting) {
+    if ((!text && !imageFile) || isSubmitting || requestInFlightRef.current) {
       return;
     }
 
-    if (sendDebounceRef.current) {
-      clearTimeout(sendDebounceRef.current);
-    }
-
-    sendDebounceRef.current = setTimeout(() => {
-      sendDebounceRef.current = null;
-      void sendMessageNow(text, imageFile);
-    }, 350);
+    void sendMessageNow(text, imageFile);
   };
 
   const handleFileUpload = (event: React.ChangeEvent<HTMLInputElement>) => {
+    if (isSubmitting || requestInFlightRef.current) {
+      return;
+    }
+
     const file = event.target.files?.[0] || null;
     setSelectedImage(file);
     if (successMessage) {
@@ -1098,6 +1155,7 @@ export default function FamilyScheduler() {
         <div className="max-w-2xl mx-auto relative group">
           <input
             value={inputText}
+            disabled={isSubmitting}
             onChange={(e) => {
               setInputText(e.target.value);
               if (successMessage) {
@@ -1114,6 +1172,7 @@ export default function FamilyScheduler() {
               type="file"
               accept="image/*"
               className="hidden"
+              disabled={isSubmitting}
               onChange={handleFileUpload}
             />
           </label>

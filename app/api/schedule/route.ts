@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 
-const preferredModels = ["gemini-1.5-flash-latest", "gemini-1.5-flash", "gemini-2.0-flash"] as const;
+const preferredModel = "gemini-1.5-flash-latest" as const;
 const allowedChildren = ["ravid", "amit", "alin"] as const;
 const allowedTypes = ["dog", "gym", "sport", "lesson", "dance"] as const;
 
@@ -142,18 +142,9 @@ ${text}`;
         }
       );
 
-    let response: Response | null = null;
-
-    for (const model of preferredModels) {
-      response = await callGemini("v1beta", model);
-      if (response.status !== 404) {
-        break;
-      }
-
-      response = await callGemini("v1", model);
-      if (response.status !== 404) {
-        break;
-      }
+    let response: Response | null = await callGemini("v1beta", preferredModel);
+    if (response.status === 404) {
+      response = await callGemini("v1", preferredModel);
     }
 
     if (!response) {
