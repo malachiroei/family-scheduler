@@ -1,10 +1,10 @@
-const CACHE_NAME = 'family-scheduler-v8';
+const CACHE_NAME = 'family-scheduler-v9';
 const APP_SHELL_FILES = ['/manifest.json?v=5', '/icon-512.png'];
 const reminderLeadOptions = [5, 10, 15, 30];
-const pushSoundOptions = ['/sounds/notify-1.mp3', '/sounds/notify-2.mp3', '/sounds/notify-3.mp3'];
+const pushSoundOptions = ['/sounds/standard.mp3', '/sounds/bell.mp3', '/sounds/modern.mp3'];
 const defaultPushPreferences = {
   reminderLeadMinutes: 10,
-  sound: '/sounds/notify-1.mp3',
+  sound: '/sounds/standard.mp3',
 };
 
 let pushPreferences = { ...defaultPushPreferences };

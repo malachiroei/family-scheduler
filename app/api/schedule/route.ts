@@ -422,6 +422,11 @@ const upsertScheduleEvent = async (incoming: ReturnType<typeof sanitizeDbEvent>)
       },
     };
   } catch (error) {
+    console.error("[API] SQL upsert failed", {
+      error,
+      message: getErrorMessage(error),
+      incoming,
+    });
     return {
       ok: false as const,
       error: `Failed to upsert event: ${getErrorMessage(error)}`,
@@ -725,6 +730,10 @@ export async function POST(request: NextRequest) {
     if (flatIncoming) {
       const upsertResult = await upsertScheduleEvent(flatIncoming);
       if (!upsertResult.ok) {
+        console.error("[API] POST /api/schedule upsert failed (flatIncoming)", {
+          error: upsertResult.error,
+          flatIncoming,
+        });
         return NextResponse.json({ error: upsertResult.error }, { status: 500 });
       }
 
@@ -748,6 +757,10 @@ export async function POST(request: NextRequest) {
     if (incoming) {
       const upsertResult = await upsertScheduleEvent(incoming);
       if (!upsertResult.ok) {
+        console.error("[API] POST /api/schedule upsert failed (incoming)", {
+          error: upsertResult.error,
+          incoming,
+        });
         return NextResponse.json({ error: upsertResult.error }, { status: 500 });
       }
 

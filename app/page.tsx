@@ -142,7 +142,7 @@ type BeforeInstallPromptEvent = Event & {
 type PushUserName = 'רביד' | 'עמית' | 'אלין' | 'סיוון' | 'רועי';
 type PushChildName = 'רביד' | 'עמית' | 'אלין';
 type ReminderLeadMinutes = 5 | 10 | 15 | 30;
-type PushSoundOption = '/sounds/notify-1.mp3' | '/sounds/notify-2.mp3' | '/sounds/notify-3.mp3';
+type PushSoundOption = '/sounds/standard.mp3' | '/sounds/bell.mp3' | '/sounds/modern.mp3';
 
 const pushUserOptions: PushUserName[] = ['רביד', 'עמית', 'אלין', 'סיוון', 'רועי'];
 const pushChildOptions: PushChildName[] = ['רביד', 'עמית', 'אלין'];
@@ -151,13 +151,13 @@ const PUSH_MIGRATION_FLAG_KEY = 'family-scheduler-push-migrated-v1';
 const PUSH_PREFS_STORAGE_KEY = 'family-scheduler-push-preferences-v1';
 const reminderLeadOptions: ReminderLeadMinutes[] = [5, 10, 15, 30];
 const pushSoundOptions: Array<{ value: PushSoundOption; label: string }> = [
-  { value: '/sounds/notify-1.mp3', label: 'צליל 1' },
-  { value: '/sounds/notify-2.mp3', label: 'צליל 2' },
-  { value: '/sounds/notify-3.mp3', label: 'צליל 3' },
+  { value: '/sounds/standard.mp3', label: 'Standard' },
+  { value: '/sounds/bell.mp3', label: 'Bell' },
+  { value: '/sounds/modern.mp3', label: 'Modern' },
 ];
 const defaultPushLeadMinutes: ReminderLeadMinutes = 10;
-const defaultPushSound: PushSoundOption = '/sounds/notify-1.mp3';
-const SERVICE_WORKER_URL = '/sw.js?v=8';
+const defaultPushSound: PushSoundOption = '/sounds/standard.mp3';
+const SERVICE_WORKER_URL = '/sw.js?v=9';
 
 const sanitizeReminderLead = (value: unknown): ReminderLeadMinutes => {
   const numeric = Number(value);
@@ -2466,7 +2466,7 @@ export default function FamilyScheduler() {
                   }}
                   className="mt-2 text-xs font-semibold text-indigo-700 hover:text-indigo-800"
                 >
-                  השמע דוגמה
+                  Play Test
                 </button>
               </div>
             </div>
