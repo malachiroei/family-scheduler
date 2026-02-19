@@ -157,7 +157,7 @@ const pushSoundOptions: Array<{ value: PushSoundOption; label: string }> = [
 ];
 const defaultPushLeadMinutes: ReminderLeadMinutes = 10;
 const defaultPushSound: PushSoundOption = '/sounds/notify-1.mp3';
-const SERVICE_WORKER_URL = '/sw.js?v=7';
+const SERVICE_WORKER_URL = '/sw.js?v=8';
 
 const sanitizeReminderLead = (value: unknown): ReminderLeadMinutes => {
   const numeric = Number(value);
@@ -792,7 +792,6 @@ export default function FamilyScheduler() {
   const [parentWatchChildren, setParentWatchChildren] = useState<PushChildName[]>(['רביד', 'עמית', 'אלין']);
   const [reminderLeadMinutes, setReminderLeadMinutes] = useState<ReminderLeadMinutes>(defaultPushLeadMinutes);
   const [pushSound, setPushSound] = useState<PushSoundOption>(defaultPushSound);
-  const [showTemporarySoundPreviewButton, setShowTemporarySoundPreviewButton] = useState(false);
   const [installPromptEvent, setInstallPromptEvent] = useState<BeforeInstallPromptEvent | null>(null);
   const [isInstallReady, setIsInstallReady] = useState(false);
   const [, setSubscriptionEndpoint] = useState("");
@@ -805,7 +804,6 @@ export default function FamilyScheduler() {
   const autoRefetchWeekKeyRef = useRef<string>('');
   const dayCardRefs = useRef<Array<HTMLDivElement | null>>([]);
   const hasAutoScrolledToTodayRef = useRef(false);
-  const soundPreviewButtonTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const weekKey = toIsoDate(weekStart);
   const days = weeksData[weekKey] ?? [];
@@ -818,20 +816,6 @@ export default function FamilyScheduler() {
     const audio = new Audio(soundUrl);
     audio.volume = 0.85;
     void audio.play().catch(() => undefined);
-  };
-
-  const handlePushSoundChange = (value: string) => {
-    const nextSound = sanitizePushSound(value);
-    setPushSound(nextSound);
-    setShowTemporarySoundPreviewButton(true);
-
-    if (soundPreviewButtonTimerRef.current) {
-      clearTimeout(soundPreviewButtonTimerRef.current);
-    }
-
-    soundPreviewButtonTimerRef.current = setTimeout(() => {
-      setShowTemporarySoundPreviewButton(false);
-    }, 9000);
   };
 
   const ensureServiceWorkerRegistration = useCallback(async () => {
@@ -996,9 +980,6 @@ export default function FamilyScheduler() {
     return () => {
       if (persistDebounceRef.current) {
         clearTimeout(persistDebounceRef.current);
-      }
-      if (soundPreviewButtonTimerRef.current) {
-        clearTimeout(soundPreviewButtonTimerRef.current);
       }
     };
   }, []);
@@ -1522,9 +1503,9 @@ export default function FamilyScheduler() {
 
   const upsertEventToDatabase = async (event: SchedulerEvent, dayIndex: number) => {
     try {
-      console.log('[API] PUT /api/schedule -> start', event);
-      const response = await fetch('/api/schedule', {
-        method: 'PUT',
+      console.log('[API] POST /api/schedule -> start', event);
+      let response = await fetch('/api/schedule', {
+        method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           event: {
@@ -1533,15 +1514,29 @@ export default function FamilyScheduler() {
           },
         }),
       });
+
+      if (!response.ok && (response.status === 404 || response.status === 405)) {
+        response = await fetch('/api/schedule', {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            event: {
+              ...event,
+              dayIndex,
+            },
+          }),
+        });
+      }
+
       const payload = await response.json();
-      console.log('[API] PUT /api/schedule ->', response.status, payload);
+      console.log('[API] POST /api/schedule ->', response.status, payload);
       if (!response.ok) {
         throw new Error(payload?.error || 'Failed saving event');
       }
 
       return payload;
     } catch (error) {
-      console.error('[API] PUT /api/schedule client failed', error);
+      console.error('[API] POST /api/schedule client failed', error);
       throw error;
     }
   };
@@ -2457,25 +2452,22 @@ export default function FamilyScheduler() {
                 <div className="text-xs text-slate-500 mb-1">צליל התראה</div>
                 <select
                   value={pushSound}
-                  onChange={(event) => handlePushSoundChange(event.target.value)}
+                  onChange={(event) => setPushSound(sanitizePushSound(event.target.value))}
                   className="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm text-slate-700 outline-none focus:border-blue-400"
                 >
                   {pushSoundOptions.map((option) => (
                     <option key={option.value} value={option.value}>{option.label}</option>
                   ))}
                 </select>
-                {showTemporarySoundPreviewButton && (
-                  <button
-                    type="button"
-                    onClick={() => {
-                      playPushSound(pushSound);
-                      setShowTemporarySoundPreviewButton(false);
-                    }}
-                    className="mt-2 text-xs font-semibold text-indigo-700 hover:text-indigo-800"
-                  >
-                    נגן צליל לדוגמה
-                  </button>
-                )}
+                <button
+                  type="button"
+                  onClick={() => {
+                    playPushSound(pushSound);
+                  }}
+                  className="mt-2 text-xs font-semibold text-indigo-700 hover:text-indigo-800"
+                >
+                  השמע דוגמה
+                </button>
               </div>
             </div>
 

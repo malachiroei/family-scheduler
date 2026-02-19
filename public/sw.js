@@ -1,4 +1,4 @@
-const CACHE_NAME = 'family-scheduler-v7';
+const CACHE_NAME = 'family-scheduler-v8';
 const APP_SHELL_FILES = ['/manifest.json?v=5', '/icon-512.png'];
 const reminderLeadOptions = [5, 10, 15, 30];
 const pushSoundOptions = ['/sounds/notify-1.mp3', '/sounds/notify-2.mp3', '/sounds/notify-3.mp3'];
@@ -121,6 +121,7 @@ self.addEventListener('push', (event) => {
     body: payload.confirmTask ? `${payload.body} (${leadMinutes} דק׳ לפני)` : payload.body,
     icon: '/icon-512.png',
     badge: '/icon-512.png',
+    vibrate: [200, 100, 200],
     actions: payload.confirmTask
       ? [{ action: 'confirm-task', title: 'אישרתי' }]
       : [],

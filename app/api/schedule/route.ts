@@ -133,7 +133,14 @@ const ensureFamilyScheduleTable = async () => {
     await sql`ALTER TABLE family_schedule ADD COLUMN IF NOT EXISTS is_recurring BOOLEAN NOT NULL DEFAULT FALSE`;
     await sql`ALTER TABLE family_schedule ADD COLUMN IF NOT EXISTS recurring_template_id TEXT`;
     await sql`ALTER TABLE family_schedule ADD COLUMN IF NOT EXISTS completed BOOLEAN NOT NULL DEFAULT FALSE`;
+    await sql`ALTER TABLE family_schedule ADD COLUMN IF NOT EXISTS user_id TEXT`;
     await sql`ALTER TABLE family_schedule ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()`;
+    await sql`UPDATE family_schedule SET completed = FALSE WHERE completed IS NULL`;
+    await sql`ALTER TABLE family_schedule ALTER COLUMN completed SET DEFAULT FALSE`;
+    await sql`ALTER TABLE family_schedule ALTER COLUMN completed SET NOT NULL`;
+    await sql`UPDATE family_schedule SET user_id = 'system' WHERE user_id IS NULL OR BTRIM(user_id) = ''`;
+    await sql`ALTER TABLE family_schedule ALTER COLUMN user_id SET DEFAULT 'system'`;
+    await sql`ALTER TABLE family_schedule ALTER COLUMN user_id SET NOT NULL`;
     await sql`
       ALTER TABLE family_schedule
       ADD COLUMN IF NOT EXISTS is_weekly BOOLEAN NOT NULL DEFAULT FALSE
@@ -201,6 +208,9 @@ const sanitizeDbEvent = (value: unknown) => {
     ? payload.recurringTemplateId.trim()
     : null;
   const completed = parseBooleanValue(payload.completed);
+  const userId = typeof payload.userId === "string" && payload.userId.trim()
+    ? payload.userId.trim()
+    : "system";
 
   if (
     !eventId ||
@@ -227,6 +237,7 @@ const sanitizeDbEvent = (value: unknown) => {
     isRecurring,
     recurringTemplateId,
     completed,
+    userId,
   };
 };
 
@@ -317,6 +328,7 @@ const upsertScheduleEvent = async (incoming: ReturnType<typeof sanitizeDbEvent>)
       is_recurring: incoming.isRecurring ?? false,
       recurring_template_id: incoming.recurringTemplateId ?? null,
       completed: incoming.completed ?? false,
+      user_id: incoming.userId ?? "system",
     };
     console.log("Data to save:", data);
 
@@ -338,6 +350,7 @@ const upsertScheduleEvent = async (incoming: ReturnType<typeof sanitizeDbEvent>)
         is_recurring,
         recurring_template_id,
         completed,
+        user_id,
         updated_at
       )
       VALUES (
@@ -357,6 +370,7 @@ const upsertScheduleEvent = async (incoming: ReturnType<typeof sanitizeDbEvent>)
         ${data.is_recurring},
         ${data.recurring_template_id},
         ${data.completed},
+        ${data.user_id},
         NOW()
       )
       ON CONFLICT (id)
@@ -376,6 +390,7 @@ const upsertScheduleEvent = async (incoming: ReturnType<typeof sanitizeDbEvent>)
         is_recurring = EXCLUDED.is_recurring,
         recurring_template_id = EXCLUDED.recurring_template_id,
         completed = EXCLUDED.completed,
+        user_id = EXCLUDED.user_id,
         updated_at = NOW()
       RETURNING *
     `;
