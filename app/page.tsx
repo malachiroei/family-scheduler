@@ -2462,11 +2462,12 @@ export default function FamilyScheduler() {
                 <button
                   type="button"
                   onClick={() => {
-                    playPushSound(pushSound);
+                    const audio = new Audio(pushSound);
+                    void audio.play().catch(() => undefined);
                   }}
-                  className="mt-2 text-xs font-semibold text-indigo-700 hover:text-indigo-800"
+                  className="mt-3 w-full rounded-xl bg-indigo-600 px-3 py-2 text-sm font-bold text-white hover:bg-indigo-700 transition"
                 >
-                  Play Test
+                  בדוק צליל התראה
                 </button>
               </div>
             </div>
