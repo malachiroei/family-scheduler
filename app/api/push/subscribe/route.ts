@@ -12,7 +12,18 @@ export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
     const subscription = body?.subscription;
-    const saved = await savePushSubscription(subscription);
+    const userName = typeof body?.userName === "string" ? body.userName : "";
+    const receiveAll = Boolean(body?.receiveAll);
+    const watchChildren = Array.isArray(body?.watchChildren)
+      ? body.watchChildren.filter((value: unknown): value is string => typeof value === "string")
+      : [];
+
+    const saved = await savePushSubscription({
+      ...(subscription && typeof subscription === "object" ? subscription : {}),
+      userName,
+      receiveAll,
+      watchChildren,
+    });
     return NextResponse.json({ ok: true, endpoint: saved.endpoint });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Failed to subscribe";

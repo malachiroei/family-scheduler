@@ -137,6 +137,20 @@ type BeforeInstallPromptEvent = Event & {
   userChoice: Promise<{ outcome: 'accepted' | 'dismissed'; platform: string }>;
 };
 
+type PushUserName = 'רביד' | 'עמית' | 'אלין' | 'סיוון' | 'רועי';
+type PushChildName = 'רביד' | 'עמית' | 'אלין';
+
+const pushUserOptions: PushUserName[] = ['רביד', 'עמית', 'אלין', 'סיוון', 'רועי'];
+const pushChildOptions: PushChildName[] = ['רביד', 'עמית', 'אלין'];
+const PUSH_USER_STORAGE_KEY = 'family-scheduler-push-user';
+const PUSH_MIGRATION_FLAG_KEY = 'family-scheduler-push-migrated-v1';
+
+const isParentPushUser = (value: PushUserName | ''): value is 'סיוון' | 'רועי' =>
+  value === 'סיוון' || value === 'רועי';
+
+const isParentUserOption = (value: PushUserName): value is 'סיוון' | 'רועי' =>
+  value === 'סיוון' || value === 'רועי';
+
 const normalizeWeekEventsWithDate = (weeksData: Record<string, DaySchedule[]> | undefined) => {
   if (!weeksData || typeof weeksData !== 'object') {
     return {} as Record<string, DaySchedule[]>;
@@ -739,6 +753,12 @@ export default function FamilyScheduler() {
   const [pushSupported, setPushSupported] = useState(false);
   const [pushEnabled, setPushEnabled] = useState(false);
   const [pushBusy, setPushBusy] = useState(false);
+  const [pushTestBusy, setPushTestBusy] = useState(false);
+  const [showPushIdentityPrompt, setShowPushIdentityPrompt] = useState(false);
+  const [pushUserName, setPushUserName] = useState<PushUserName | ''>('');
+  const [hasConfirmedPushIdentitySelection, setHasConfirmedPushIdentitySelection] = useState(false);
+  const [parentReceiveAll, setParentReceiveAll] = useState(true);
+  const [parentWatchChildren, setParentWatchChildren] = useState<PushChildName[]>(['רביד', 'עמית', 'אלין']);
   const [installPromptEvent, setInstallPromptEvent] = useState<BeforeInstallPromptEvent | null>(null);
   const [isInstallReady, setIsInstallReady] = useState(false);
   const [subscriptionEndpoint, setSubscriptionEndpoint] = useState("");
@@ -752,6 +772,29 @@ export default function FamilyScheduler() {
 
   const weekKey = toIsoDate(weekStart);
   const days = weeksData[weekKey] ?? [];
+
+  const ensureServiceWorkerRegistration = async () => {
+    if (!("serviceWorker" in navigator)) {
+      return null;
+    }
+
+    const existing = await navigator.serviceWorker.getRegistration();
+    const activeScriptUrl = existing?.active?.scriptURL || existing?.waiting?.scriptURL || existing?.installing?.scriptURL || '';
+    if (existing && activeScriptUrl.includes('/sw.js')) {
+      await existing.update().catch(() => undefined);
+      if (existing.waiting) {
+        existing.waiting.postMessage({ type: 'SKIP_WAITING' });
+      }
+      return existing;
+    }
+
+    const registration = await navigator.serviceWorker.register('/sw.js');
+    if (registration.waiting) {
+      registration.waiting.postMessage({ type: 'SKIP_WAITING' });
+    }
+
+    return registration;
+  };
 
   useEffect(() => {
     setWeeksData((prev) => {
@@ -892,14 +935,54 @@ export default function FamilyScheduler() {
     let cancelled = false;
 
     const setupPush = async () => {
-      if (!("serviceWorker" in navigator) || !("PushManager" in window)) {
+      if (!("serviceWorker" in navigator)) {
         return;
       }
 
-      setPushSupported(true);
+      const supportsPush = "PushManager" in window && "Notification" in window;
+      setPushSupported(supportsPush);
 
       try {
-        const registration = await navigator.serviceWorker.register('/sw.js');
+        const migrationDone = localStorage.getItem(PUSH_MIGRATION_FLAG_KEY) === '1';
+        if (!migrationDone && supportsPush) {
+          const savedUser = localStorage.getItem(PUSH_USER_STORAGE_KEY) || '';
+          const hasKnownUser = pushUserOptions.includes(savedUser as PushUserName);
+          if (hasKnownUser) {
+            localStorage.setItem(PUSH_MIGRATION_FLAG_KEY, '1');
+          } else {
+            const migrationRegistration = await ensureServiceWorkerRegistration();
+            const oldSubscription = migrationRegistration
+              ? await migrationRegistration.pushManager.getSubscription()
+              : null;
+
+            if (oldSubscription) {
+              const serialized = oldSubscription.toJSON();
+              const endpoint = serialized.endpoint || oldSubscription.endpoint || '';
+              if (endpoint) {
+                await fetch('/api/push/subscribe', {
+                  method: 'DELETE',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ endpoint }),
+                }).catch(() => undefined);
+              }
+
+              await oldSubscription.unsubscribe().catch(() => undefined);
+              if (!cancelled) {
+                setPushEnabled(false);
+                setSubscriptionEndpoint('');
+                setSuccessMessage('בוצע רענון חד-פעמי להתראות. יש להפעיל מחדש ולבחור משתמש.');
+              }
+            }
+
+            localStorage.setItem(PUSH_MIGRATION_FLAG_KEY, '1');
+          }
+        }
+
+        const registration = await ensureServiceWorkerRegistration();
+        if (!registration || !supportsPush) {
+          return;
+        }
+
         const configResponse = await fetch('/api/push/subscribe', { cache: 'no-store' });
         const configPayload = await configResponse.json();
         if (!configResponse.ok || !configPayload?.enabled || !configPayload?.publicKey) {
@@ -912,12 +995,6 @@ export default function FamilyScheduler() {
         }
 
         const serialized = existing.toJSON();
-        await fetch('/api/push/subscribe', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ subscription: serialized }),
-        });
-
         if (!cancelled) {
           setPushEnabled(true);
           setSubscriptionEndpoint(serialized.endpoint || '');
@@ -978,8 +1055,166 @@ export default function FamilyScheduler() {
     }
   };
 
+  const toggleParentTrackedChild = (child: PushChildName) => {
+    setParentWatchChildren((prev) => {
+      if (prev.includes(child)) {
+        return prev.filter((value) => value !== child);
+      }
+      return [...prev, child];
+    });
+  };
+
+  const selectPushUser = (user: PushUserName) => {
+    setPushUserName(user);
+    setHasConfirmedPushIdentitySelection(true);
+    try {
+      localStorage.setItem(PUSH_USER_STORAGE_KEY, user);
+    } catch {
+      // no-op
+    }
+
+    if (isParentUserOption(user)) {
+      setParentReceiveAll(true);
+      setParentWatchChildren(['רביד', 'עמית', 'אלין']);
+    }
+  };
+
+  useEffect(() => {
+    try {
+      const savedUser = localStorage.getItem(PUSH_USER_STORAGE_KEY);
+      if (!savedUser) {
+        return;
+      }
+
+      if (pushUserOptions.includes(savedUser as PushUserName)) {
+        const user = savedUser as PushUserName;
+        setPushUserName(user);
+        if (isParentUserOption(user)) {
+          setParentReceiveAll(true);
+          setParentWatchChildren(['רביד', 'עמית', 'אלין']);
+        }
+      }
+    } catch {
+      // no-op
+    }
+  }, []);
+
+  const openPushIdentityPrompt = () => {
+    if (pushBusy) {
+      return;
+    }
+
+    setApiError('');
+    setHasConfirmedPushIdentitySelection(false);
+    setShowPushIdentityPrompt(true);
+  };
+
+  const savePushSubscriptionProfile = async (serialized: PushSubscriptionJSON) => {
+    const isParent = isParentPushUser(pushUserName);
+    const receiveAll = isParent ? parentReceiveAll : false;
+    const watchChildren = isParent && !receiveAll ? parentWatchChildren : [];
+
+    const saveResponse = await fetch('/api/push/subscribe', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        subscription: serialized,
+        userName: pushUserName,
+        receiveAll,
+        watchChildren,
+      }),
+    });
+
+    if (!saveResponse.ok) {
+      const body = await saveResponse.json().catch(() => ({}));
+      throw new Error(body?.error || 'Failed to save notification subscription');
+    }
+  };
+
+  const updatePushProfileForExistingSubscription = async () => {
+    if (pushBusy) {
+      return;
+    }
+
+    if (!pushSupported) {
+      setApiError('התראות אינן נתמכות כרגע בדפדפן במכשיר זה.');
+      return;
+    }
+
+    setPushBusy(true);
+    try {
+      const registration = await ensureServiceWorkerRegistration();
+      if (!registration) {
+        setApiError('Service Worker לא זמין בדפדפן זה.');
+        return;
+      }
+
+      let existing = await registration.pushManager.getSubscription();
+      if (!existing) {
+        const permission = await Notification.requestPermission();
+        if (permission !== 'granted') {
+          setApiError('לא אושרו התראות בדפדפן.');
+          return;
+        }
+
+        const configResponse = await fetch('/api/push/subscribe', { cache: 'no-store' });
+        const configPayload = await configResponse.json();
+        if (!configResponse.ok || !configPayload?.enabled || !configPayload?.publicKey) {
+          setApiError('התראות אינן זמינות כרגע בשרת.');
+          return;
+        }
+
+        existing = await registration.pushManager.subscribe({
+          userVisibleOnly: true,
+          applicationServerKey: urlBase64ToUint8Array(String(configPayload.publicKey)),
+        });
+      }
+
+      const serialized = existing.toJSON();
+      await savePushSubscriptionProfile(serialized);
+      setPushEnabled(true);
+      setSubscriptionEndpoint(serialized.endpoint || '');
+      setSuccessMessage('פרופיל ההתראות עודכן בהצלחה.');
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'עדכון פרופיל התראות נכשל';
+      setApiError(message);
+    } finally {
+      setPushBusy(false);
+    }
+  };
+
+  const confirmEnablePushNotifications = async () => {
+    if (!pushUserName || !hasConfirmedPushIdentitySelection) {
+      setApiError('בחר מי אתה כדי להפעיל התראות.');
+      return;
+    }
+
+    if (isParentPushUser(pushUserName) && !parentReceiveAll && parentWatchChildren.length === 0) {
+      setApiError('בחר לפחות ילד אחד למעקב או סמן קבלת התראות לכולם.');
+      return;
+    }
+
+    setShowPushIdentityPrompt(false);
+
+    if (pushEnabled) {
+      await updatePushProfileForExistingSubscription();
+    } else {
+      await enablePushNotifications();
+    }
+  };
+
   const enablePushNotifications = async () => {
-    if (!pushSupported || pushBusy) {
+    if (pushBusy) {
+      return;
+    }
+
+    if (!pushSupported) {
+      setApiError('התראות אינן נתמכות כרגע בדפדפן במכשיר זה.');
+      return;
+    }
+
+    if (!pushUserName) {
+      setShowPushIdentityPrompt(true);
       return;
     }
 
@@ -991,7 +1226,12 @@ export default function FamilyScheduler() {
         return;
       }
 
-      const registration = await navigator.serviceWorker.register('/sw.js');
+      const registration = await ensureServiceWorkerRegistration();
+      if (!registration) {
+        setApiError('Service Worker לא זמין בדפדפן זה.');
+        return;
+      }
+
       const configResponse = await fetch('/api/push/subscribe', { cache: 'no-store' });
       const configPayload = await configResponse.json();
       if (!configResponse.ok || !configPayload?.enabled || !configPayload?.publicKey) {
@@ -1008,16 +1248,7 @@ export default function FamilyScheduler() {
       }
 
       const serialized = subscription.toJSON();
-      const saveResponse = await fetch('/api/push/subscribe', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ subscription: serialized }),
-      });
-
-      if (!saveResponse.ok) {
-        const body = await saveResponse.json().catch(() => ({}));
-        throw new Error(body?.error || 'Failed to save notification subscription');
-      }
+      await savePushSubscriptionProfile(serialized);
 
       setPushEnabled(true);
       setSubscriptionEndpoint(serialized.endpoint || '');
@@ -1027,6 +1258,35 @@ export default function FamilyScheduler() {
       setApiError(message);
     } finally {
       setPushBusy(false);
+    }
+  };
+
+  const sendTestPushNotification = async () => {
+    if (!pushEnabled || pushTestBusy) {
+      return;
+    }
+
+    setPushTestBusy(true);
+    try {
+      const response = await fetch('/api/push/test', {
+        method: 'POST',
+      });
+      const payload = await response.json();
+      if (!response.ok) {
+        throw new Error(payload?.error || 'שליחת התראת ניסיון נכשלה');
+      }
+
+      if (Number(payload?.sent || 0) === 0) {
+        setApiError('לא נמצאו מנויים פעילים להתראות. הפעל התראות במכשיר ואז נסה שוב.');
+        return;
+      }
+
+      setSuccessMessage('התראת ניסיון נשלחה בהצלחה.');
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'שליחת התראת ניסיון נכשלה';
+      setApiError(message);
+    } finally {
+      setPushTestBusy(false);
     }
   };
 
@@ -1677,7 +1937,7 @@ export default function FamilyScheduler() {
   return (
     <div className="print-scheduler-shell h-screen overflow-y-auto bg-[#f8fafc] p-4 pb-28 md:p-8 md:pb-32 dir-rtl" dir="rtl">
       <div className="max-w-6xl mx-auto mb-8 print:mb-4">
-        <div className="print-controls flex justify-end gap-3 print:hidden">
+        <div className="print-controls flex flex-wrap justify-center sm:justify-end gap-3 print:hidden">
           {isInstallReady && (
             <button
               onClick={() => { void installApp(); }}
@@ -1687,11 +1947,23 @@ export default function FamilyScheduler() {
             </button>
           )}
           <button
-            onClick={() => { void enablePushNotifications(); }}
-            disabled={!pushSupported || pushEnabled || pushBusy}
+            onClick={() => { void openPushIdentityPrompt(); }}
+            disabled={pushBusy}
             className="flex items-center gap-2 bg-blue-50 text-blue-700 border border-blue-200 px-4 py-2 rounded-lg hover:bg-blue-100 transition shadow-sm disabled:opacity-60 disabled:cursor-not-allowed"
           >
             {pushEnabled ? 'התראות פעילות' : (pushBusy ? 'מפעיל התראות...' : 'הפעל התראות')}
+          </button>
+          {pushUserName && (
+            <span className="text-xs text-slate-600 bg-slate-100 border border-slate-200 rounded-lg px-2 py-1">
+              פרופיל התראות: {pushUserName}
+            </span>
+          )}
+          <button
+            onClick={() => { void sendTestPushNotification(); }}
+            disabled={!pushEnabled || pushBusy || pushTestBusy}
+            className="flex items-center gap-2 bg-indigo-50 text-indigo-700 border border-indigo-200 px-4 py-2 rounded-lg hover:bg-indigo-100 transition shadow-sm disabled:opacity-60 disabled:cursor-not-allowed"
+          >
+            {pushTestBusy ? 'שולח התראה...' : 'שלח התראת ניסיון'}
           </button>
           <button
             onClick={() => { void handleClearAll(); }}
@@ -1860,6 +2132,96 @@ export default function FamilyScheduler() {
           </div>
         )})}
       </div>
+
+      {showPushIdentityPrompt && (
+        <div className="fixed inset-0 z-50 bg-black/35 backdrop-blur-[1px] flex items-center justify-center p-4 print:hidden">
+          <div className="w-full max-w-md bg-white rounded-2xl shadow-2xl border border-slate-200 p-5 space-y-4">
+            <div className="flex justify-between items-center">
+              <h3 className="text-lg font-bold text-slate-800">מי משתמש במכשיר זה?</h3>
+              <button
+                type="button"
+                onClick={() => {
+                  setShowPushIdentityPrompt(false);
+                  setHasConfirmedPushIdentitySelection(false);
+                }}
+                className="text-slate-500 hover:text-slate-700"
+                aria-label="סגור"
+              >
+                <X size={18} />
+              </button>
+            </div>
+
+            <p className="text-xs text-slate-500">יש לבחור שם לפני המשך הפעלת התראות.</p>
+
+            <div className="grid grid-cols-2 gap-2">
+              {pushUserOptions.map((option) => (
+                <button
+                  key={`push-user-${option}`}
+                  type="button"
+                  onClick={() => selectPushUser(option)}
+                  className={`rounded-xl border px-3 py-2 text-sm font-semibold transition ${pushUserName === option ? 'bg-blue-50 border-blue-400 text-blue-700' : 'bg-white border-slate-300 text-slate-700 hover:bg-slate-50'}`}
+                >
+                  {option}
+                </button>
+              ))}
+            </div>
+
+            {isParentPushUser(pushUserName) && (
+              <div className="space-y-3 border border-slate-200 rounded-xl p-3 bg-slate-50">
+                <label className="flex items-center gap-2 text-sm font-semibold text-slate-700">
+                  <input
+                    type="checkbox"
+                    checked={parentReceiveAll}
+                    onChange={(event) => setParentReceiveAll(event.target.checked)}
+                  />
+                  קבל/י את כל ההתראות של כל הילדים
+                </label>
+
+                {!parentReceiveAll && (
+                  <div>
+                    <div className="text-xs text-slate-500 mb-2">בחר/י ילדים למעקב:</div>
+                    <div className="flex flex-wrap gap-2">
+                      {pushChildOptions.map((child) => {
+                        const checked = parentWatchChildren.includes(child);
+                        return (
+                          <button
+                            key={`watch-${child}`}
+                            type="button"
+                            onClick={() => toggleParentTrackedChild(child)}
+                            className={`rounded-lg border px-3 py-1.5 text-xs font-semibold transition ${checked ? 'bg-indigo-50 border-indigo-400 text-indigo-700' : 'bg-white border-slate-300 text-slate-700 hover:bg-slate-50'}`}
+                          >
+                            {child}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+
+            <div className="flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => {
+                  setShowPushIdentityPrompt(false);
+                  setHasConfirmedPushIdentitySelection(false);
+                }}
+                className="px-4 py-2 rounded-xl border border-slate-300 text-slate-700 hover:bg-slate-50 transition"
+              >
+                ביטול
+              </button>
+              <button
+                type="button"
+                onClick={() => { void confirmEnablePushNotifications(); }}
+                className="px-4 py-2 rounded-xl bg-blue-600 text-white hover:bg-blue-700 transition"
+              >
+                {pushEnabled ? 'שמור פרופיל' : 'הפעל התראות'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       <div className="print-chat fixed bottom-5 right-5 z-40 print:hidden">
         {isChatOpen && (

@@ -1,6 +1,5 @@
 import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
-import Image from "next/image";
 import "./globals.css";
 
 const geistSans = Geist({
@@ -16,7 +15,7 @@ const geistMono = Geist_Mono({
 export const metadata: Metadata = {
   title: "Malachi Family Time Planner",
   description: "לוח זמנים משפחתי חכם עם סנכרון בזמן אמת",
-  manifest: "/manifest.json",
+  manifest: "/manifest.json?v=4",
   applicationName: "Family Scheduler",
   appleWebApp: {
     capable: true,
@@ -24,9 +23,9 @@ export const metadata: Metadata = {
     title: "Family Scheduler",
   },
   icons: {
-    icon: "/logo.png",
-    shortcut: "/logo.png",
-    apple: "/logo.png",
+    icon: "/icon-512.png",
+    shortcut: "/icon-512.png",
+    apple: "/icon-512.png",
   },
 };
 
@@ -37,21 +36,13 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="en">
+      <head>
+        <meta name="apple-mobile-web-app-capable" content="yes" />
+        <link rel="apple-touch-icon" href="/logo.png" />
+      </head>
       <body
         className={`${geistSans.variable} ${geistMono.variable} antialiased`}
       >
-        <header className="app-global-logo print:hidden px-4 pt-4 md:pt-6">
-          <div className="max-w-6xl mx-auto flex justify-center">
-            <Image
-              src="/logo.png"
-              alt="MALACHI FAMILY TIME PLANNER"
-              width={260}
-              height={70}
-              priority
-              className="h-auto w-[220px] sm:w-[260px]"
-            />
-          </div>
-        </header>
         {children}
       </body>
     </html>
