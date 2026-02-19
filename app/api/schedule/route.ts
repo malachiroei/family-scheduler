@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { sql } from "@vercel/postgres";
-import { sendPushToAll } from "@/app/lib/push";
+import { sendPushToAll, sendPushToParents } from "@/app/lib/push";
 
 export const revalidate = 0;
 
@@ -34,6 +34,11 @@ const allowedScheduleChildren = [
   "alin_ravid",
   "amit_ravid",
 ] as const;
+const childLabelMap: Record<string, string> = {
+  ravid: "רביד",
+  amit: "עמית",
+  alin: "אלין",
+};
 
 type ChildKey = (typeof allowedChildren)[number];
 type EventType = (typeof allowedTypes)[number];
@@ -62,6 +67,28 @@ const getErrorMessage = (error: unknown) => {
   }
 
   return String(error);
+};
+
+const parseBooleanValue = (value: unknown) => {
+  if (typeof value === "boolean") {
+    return value;
+  }
+
+  if (typeof value === "string") {
+    const normalized = value.trim().toLowerCase();
+    if (normalized === "true" || normalized === "1") {
+      return true;
+    }
+    if (normalized === "false" || normalized === "0" || normalized === "") {
+      return false;
+    }
+  }
+
+  if (typeof value === "number") {
+    return value === 1;
+  }
+
+  return false;
 };
 
 const ensurePostgresEnv = () => {
@@ -105,6 +132,7 @@ const ensureFamilyScheduleTable = async () => {
     await sql`ALTER TABLE family_schedule ADD COLUMN IF NOT EXISTS event_type TEXT`;
     await sql`ALTER TABLE family_schedule ADD COLUMN IF NOT EXISTS is_recurring BOOLEAN NOT NULL DEFAULT FALSE`;
     await sql`ALTER TABLE family_schedule ADD COLUMN IF NOT EXISTS recurring_template_id TEXT`;
+    await sql`ALTER TABLE family_schedule ADD COLUMN IF NOT EXISTS completed BOOLEAN NOT NULL DEFAULT FALSE`;
     await sql`ALTER TABLE family_schedule ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()`;
     await sql`
       ALTER TABLE family_schedule
@@ -168,10 +196,11 @@ const sanitizeDbEvent = (value: unknown) => {
   const child = typeof payload.child === "string" ? payload.child : "";
   const title = typeof payload.title === "string" ? payload.title.trim() : "";
   const type = typeof payload.type === "string" ? payload.type.trim() : "";
-  const isRecurring = Boolean(payload.isRecurring);
+  const isRecurring = parseBooleanValue(payload.isRecurring);
   const recurringTemplateId = typeof payload.recurringTemplateId === "string"
     ? payload.recurringTemplateId.trim()
     : null;
+  const completed = parseBooleanValue(payload.completed);
 
   if (
     !eventId ||
@@ -197,6 +226,7 @@ const sanitizeDbEvent = (value: unknown) => {
     type,
     isRecurring,
     recurringTemplateId,
+    completed,
   };
 };
 
@@ -229,6 +259,7 @@ const createIncomingFromFlatBody = (body: Record<string, unknown>) => {
     title: text,
     type,
     isRecurring: false,
+    completed: false,
   });
 };
 
@@ -285,6 +316,7 @@ const upsertScheduleEvent = async (incoming: ReturnType<typeof sanitizeDbEvent>)
       event_type: incoming.type,
       is_recurring: incoming.isRecurring ?? false,
       recurring_template_id: incoming.recurringTemplateId ?? null,
+      completed: incoming.completed ?? false,
     };
     console.log("Data to save:", data);
 
@@ -305,6 +337,7 @@ const upsertScheduleEvent = async (incoming: ReturnType<typeof sanitizeDbEvent>)
         event_type,
         is_recurring,
         recurring_template_id,
+        completed,
         updated_at
       )
       VALUES (
@@ -323,6 +356,7 @@ const upsertScheduleEvent = async (incoming: ReturnType<typeof sanitizeDbEvent>)
         ${data.event_type},
         ${data.is_recurring},
         ${data.recurring_template_id},
+        ${data.completed},
         NOW()
       )
       ON CONFLICT (id)
@@ -341,6 +375,7 @@ const upsertScheduleEvent = async (incoming: ReturnType<typeof sanitizeDbEvent>)
         event_type = EXCLUDED.event_type,
         is_recurring = EXCLUDED.is_recurring,
         recurring_template_id = EXCLUDED.recurring_template_id,
+        completed = EXCLUDED.completed,
         updated_at = NOW()
       RETURNING *
     `;
@@ -364,8 +399,11 @@ const upsertScheduleEvent = async (incoming: ReturnType<typeof sanitizeDbEvent>)
         child: String(saved.child),
         title: String(saved.text),
         type: String(saved.type),
-        isRecurring: Boolean(saved.is_weekly),
-        recurringTemplateId: incoming.recurringTemplateId ?? undefined,
+        isRecurring: parseBooleanValue(saved.is_recurring ?? saved.is_weekly),
+        recurringTemplateId: typeof saved.recurring_template_id === "string" && saved.recurring_template_id.trim()
+          ? saved.recurring_template_id.trim()
+          : undefined,
+        completed: parseBooleanValue(saved.completed),
       },
     };
   } catch (error) {
@@ -388,9 +426,19 @@ export async function GET() {
     }
 
     const result = await sql`
-      SELECT *
+      SELECT
+        id,
+        COALESCE(event_date, day) AS event_date,
+        day_index,
+        COALESCE(event_time, time) AS event_time,
+        child,
+        COALESCE(title, text) AS title,
+        COALESCE(event_type, type) AS event_type,
+        COALESCE(is_recurring, is_weekly, FALSE) AS is_recurring,
+        recurring_template_id,
+        COALESCE(completed, FALSE) AS completed
       FROM family_schedule
-      ORDER BY time ASC
+      ORDER BY COALESCE(event_time, time) ASC
     `;
     console.log("DB Action Success:", result.rowCount);
 
@@ -399,14 +447,17 @@ export async function GET() {
 
     const events = rows.map((row) => ({
       id: row.id,
-      date: row.day,
-      dayIndex: toDayIndex(String(row.day ?? ""), 0),
-      time: row.time,
+      date: row.event_date,
+      dayIndex: toDayIndex(String(row.event_date ?? ""), Number.isInteger(Number(row.day_index)) ? Number(row.day_index) : 0),
+      time: row.event_time,
       child: row.child,
-      title: row.text,
-      type: row.type,
-      isRecurring: Boolean(row.is_weekly),
-      recurringTemplateId: undefined,
+      title: row.title,
+      type: row.event_type,
+      isRecurring: parseBooleanValue(row.is_recurring),
+      recurringTemplateId: typeof row.recurring_template_id === "string" && row.recurring_template_id.trim()
+        ? row.recurring_template_id.trim()
+        : undefined,
+      completed: parseBooleanValue(row.completed),
     }));
 
     return NextResponse.json({ events });
@@ -435,7 +486,7 @@ export async function PUT(request: NextRequest) {
       return NextResponse.json({ error: upsertResult.error }, { status: 500 });
     }
 
-    return NextResponse.json({ ok: true });
+    return NextResponse.json({ ok: true, event: upsertResult.event });
   } catch (error) {
     console.error('[API] PUT /api/schedule failed', error);
     return Response.json({ error: getErrorMessage(error) }, { status: 500 });
@@ -508,6 +559,67 @@ export async function DELETE(request: NextRequest) {
   } catch (error) {
     console.error('[API] DELETE /api/schedule failed', error);
     return Response.json({ error: getErrorMessage(error) }, { status: 500 });
+  }
+}
+
+export async function PATCH(request: NextRequest) {
+  try {
+    const tableStatus = await ensureFamilyScheduleTable();
+    if (!tableStatus.ok) {
+      if (tableStatus.code === "MISSING_POSTGRES_ENV") {
+        return NextResponse.json({ error: "Missing database configuration" }, { status: 500 });
+      }
+      return NextResponse.json({ error: tableStatus.error }, { status: 500 });
+    }
+
+    const parsedBody = await tryParseJsonBody(request);
+    if (!parsedBody.ok) {
+      return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
+    }
+
+    const body = parsedBody.data;
+    const action = typeof body?.action === "string" ? body.action.trim() : "";
+    if (action !== "confirm" && action !== "unconfirm") {
+      return NextResponse.json({ error: "Unsupported action" }, { status: 400 });
+    }
+
+    const eventId = typeof body?.eventId === "string" ? body.eventId.trim() : "";
+    if (!eventId) {
+      return NextResponse.json({ error: "eventId is required" }, { status: 400 });
+    }
+
+    const confirmedByRaw = typeof body?.confirmedBy === "string" ? body.confirmedBy.trim() : "";
+    const nextCompleted = action === "confirm";
+
+    const updated = await sql`
+      UPDATE family_schedule
+      SET completed = ${nextCompleted},
+          updated_at = NOW()
+      WHERE id = ${eventId}
+      RETURNING id, COALESCE(title, text) AS title, child, completed
+    `;
+
+    const row = updated.rows[0];
+    if (!row) {
+      return NextResponse.json({ error: "Task not found" }, { status: 404 });
+    }
+
+    const childKey = String(row.child || "").trim().toLowerCase();
+    const fallbackConfirmer = childLabelMap[childKey] || "הילד";
+    const confirmer = confirmedByRaw || fallbackConfirmer;
+    const taskTitle = String(row.title || "משימה").trim() || "משימה";
+
+    if (nextCompleted) {
+      await sendPushToParents({
+        title: "אישור משימה",
+        body: `${confirmer} אישר את המשימה: ${taskTitle}`,
+        url: "/",
+      });
+    }
+
+    return NextResponse.json({ ok: true, eventId, completed: nextCompleted, confirmedBy: confirmer, title: taskTitle });
+  } catch (error) {
+    return NextResponse.json({ error: getErrorMessage(error) }, { status: 500 });
   }
 }
 

@@ -1,5 +1,22 @@
-const CACHE_NAME = 'family-scheduler-v5';
+const CACHE_NAME = 'family-scheduler-v7';
 const APP_SHELL_FILES = ['/manifest.json?v=5', '/icon-512.png'];
+const reminderLeadOptions = [5, 10, 15, 30];
+const pushSoundOptions = ['/sounds/notify-1.mp3', '/sounds/notify-2.mp3', '/sounds/notify-3.mp3'];
+const defaultPushPreferences = {
+  reminderLeadMinutes: 10,
+  sound: '/sounds/notify-1.mp3',
+};
+
+let pushPreferences = { ...defaultPushPreferences };
+
+const sanitizeReminderLead = (value) => {
+  const numeric = Number(value);
+  return reminderLeadOptions.includes(numeric) ? numeric : defaultPushPreferences.reminderLeadMinutes;
+};
+
+const sanitizePushSound = (value) => {
+  return pushSoundOptions.includes(value) ? value : defaultPushPreferences.sound;
+};
 
 self.addEventListener('install', (event) => {
   event.waitUntil(
@@ -21,6 +38,15 @@ self.addEventListener('activate', (event) => {
 self.addEventListener('message', (event) => {
   if (event.data && event.data.type === 'SKIP_WAITING') {
     self.skipWaiting();
+    return;
+  }
+
+  if (event.data && event.data.type === 'PUSH_PREFERENCES') {
+    const payload = event.data.payload || {};
+    pushPreferences = {
+      reminderLeadMinutes: sanitizeReminderLead(payload.reminderLeadMinutes),
+      sound: sanitizePushSound(payload.sound),
+    };
   }
 });
 
@@ -88,21 +114,75 @@ self.addEventListener('push', (event) => {
     }
   }
 
+  const leadMinutes = sanitizeReminderLead(pushPreferences.reminderLeadMinutes);
+  const sound = sanitizePushSound(pushPreferences.sound);
+
   const options = {
-    body: payload.body,
+    body: payload.confirmTask ? `${payload.body} (${leadMinutes} דק׳ לפני)` : payload.body,
     icon: '/icon-512.png',
     badge: '/icon-512.png',
+    actions: payload.confirmTask
+      ? [{ action: 'confirm-task', title: 'אישרתי' }]
+      : [],
     data: {
       url: payload.url || '/',
+      sound,
+      reminderLeadMinutes: leadMinutes,
+      confirmTask: payload.confirmTask || null,
     },
   };
 
-  event.waitUntil(self.registration.showNotification(payload.title, options));
+  event.waitUntil((async () => {
+    await self.registration.showNotification(payload.title, options);
+    const openClients = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
+    openClients.forEach((client) => {
+      client.postMessage({
+        type: 'PLAY_PUSH_SOUND',
+        payload: {
+          sound,
+          reminderLeadMinutes: leadMinutes,
+        },
+      });
+    });
+  })());
 });
 
 self.addEventListener('notificationclick', (event) => {
   event.notification.close();
   const targetUrl = event.notification?.data?.url || '/';
+
+  if (event.action === 'confirm-task') {
+    const confirmTask = event.notification?.data?.confirmTask || null;
+    const eventId = typeof confirmTask?.eventId === 'string' ? confirmTask.eventId.trim() : '';
+    const confirmedBy = typeof confirmTask?.confirmedBy === 'string' ? confirmTask.confirmedBy.trim() : '';
+
+    if (!eventId) {
+      return;
+    }
+
+    event.waitUntil((async () => {
+      await fetch('/api/schedule', {
+        method: 'PATCH',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          action: 'confirm',
+          eventId,
+          confirmedBy,
+        }),
+      }).catch(() => undefined);
+
+      const openClients = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
+      openClients.forEach((client) => {
+        client.postMessage({
+          type: 'TASK_CONFIRMED',
+          payload: { eventId },
+        });
+      });
+    })());
+    return;
+  }
 
   event.waitUntil(
     self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then((clientsArr) => {

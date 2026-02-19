@@ -5,6 +5,11 @@ type PushPayload = {
   title: string;
   body: string;
   url?: string;
+  confirmTask?: {
+    eventId: string;
+    eventTitle: string;
+    confirmedBy: string;
+  };
 };
 
 type SubscriptionRow = {
@@ -24,6 +29,7 @@ type TaskRow = {
   child: string;
   type: string;
   is_weekly?: boolean;
+  completed?: boolean;
 };
 
 const childUserNames = ["רביד", "עמית", "אלין"] as const;
@@ -35,6 +41,9 @@ type AllowedUserName = ChildUserName | ParentUserName;
 
 const childNameSet = new Set<string>(childUserNames);
 const parentNameSet = new Set<string>(parentUserNames);
+
+const isChildUserName = (value: string): value is ChildUserName => childNameSet.has(value);
+const isParentUserName = (value: string): value is ParentUserName => parentNameSet.has(value);
 
 const childKeyToName: Record<string, ChildUserName> = {
   ravid: "רביד",
@@ -238,6 +247,38 @@ export const sendPushToAll = async (
   return { sent, skipped: (rowsResult.rowCount || 0) - targets.length };
 };
 
+export const sendPushToParents = async (
+  payload: PushPayload,
+  targetParents: ParentUserName[] = [...parentUserNames]
+) => {
+  await ensurePushTables();
+
+  const rowsResult = await sql<SubscriptionRow>`
+    SELECT endpoint, p256dh, auth, user_name, receive_all, watch_children
+    FROM push_subscriptions
+  `;
+
+  const targetSet = new Set<string>(targetParents);
+  const targets = rowsResult.rows.filter((row) => {
+    const userName = (row.user_name || "").trim();
+    return isParentUserName(userName) && targetSet.has(userName);
+  });
+
+  if (!targets.length) {
+    return { sent: 0, skipped: rowsResult.rowCount || 0 };
+  }
+
+  let sent = 0;
+  for (const row of targets) {
+    const result = await sendToSubscription(row, payload);
+    if (result.ok) {
+      sent += 1;
+    }
+  }
+
+  return { sent, skipped: (rowsResult.rowCount || 0) - targets.length };
+};
+
 const getTaskAudienceChildren = (task: TaskRow): ChildUserName[] => {
   const rawChild = (task.child || "").trim();
   if (!rawChild) {
@@ -356,6 +397,11 @@ const markReminderDispatched = async (dispatchKey: string) => {
 
 export const sendUpcomingTaskReminders = async () => {
   await ensurePushTables();
+  try {
+    await sql`ALTER TABLE family_schedule ADD COLUMN IF NOT EXISTS completed BOOLEAN NOT NULL DEFAULT FALSE`;
+  } catch {
+    // no-op: handled by schedule bootstrap route in normal flow
+  }
 
   const subscriptionsResult = await sql<SubscriptionRow>`
     SELECT endpoint, p256dh, auth, user_name, receive_all, watch_children
@@ -368,7 +414,7 @@ export const sendUpcomingTaskReminders = async () => {
   }
 
   const tasksResult = await sql<TaskRow>`
-    SELECT id, text, day, time, child, type, is_weekly
+    SELECT id, text, day, time, child, type, is_weekly, completed
     FROM family_schedule
   `;
 
@@ -379,6 +425,10 @@ export const sendUpcomingTaskReminders = async () => {
   let sent = 0;
 
   for (const task of tasksResult.rows) {
+    if (Boolean(task.completed)) {
+      continue;
+    }
+
     if (!shouldSendReminderForTask(task)) {
       continue;
     }
@@ -418,10 +468,19 @@ export const sendUpcomingTaskReminders = async () => {
 
     let deliveredForTask = 0;
     for (const subscription of targetSubscriptions) {
+      const childSubscriptionName = (subscription.user_name || "").trim();
+      const childDisplayName = isChildUserName(childSubscriptionName) ? childSubscriptionName : "";
       const sendResult = await sendToSubscription(subscription, {
         title: "תזכורת למשימה",
         body: `${task.text} מתחילה ב-${diffMinutes} דקות (${task.time})`,
         url: "/",
+        confirmTask: childDisplayName
+          ? {
+              eventId: String(task.id),
+              eventTitle: String(task.text || "משימה"),
+              confirmedBy: childDisplayName,
+            }
+          : undefined,
       });
 
       if (sendResult.ok) {

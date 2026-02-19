@@ -1,5 +1,5 @@
 "use client";
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import Image from 'next/image';
 import { Dog, Dumbbell, Music, GraduationCap, Trophy, Printer, Image as ImageIcon, MessageCircle, ChevronRight, ChevronLeft, X, Plus, CalendarDays } from 'lucide-react';
 import html2canvas from 'html2canvas';
@@ -24,6 +24,7 @@ type SchedulerEvent = {
   type: EventType;
   isRecurring?: boolean;
   recurringTemplateId?: string;
+  completed?: boolean;
 };
 
 type DaySchedule = {
@@ -130,6 +131,7 @@ type ScheduleApiEvent = {
   type: EventType;
   isRecurring?: boolean;
   recurringTemplateId?: string;
+  completed?: boolean;
 };
 
 type BeforeInstallPromptEvent = Event & {
@@ -139,12 +141,37 @@ type BeforeInstallPromptEvent = Event & {
 
 type PushUserName = 'רביד' | 'עמית' | 'אלין' | 'סיוון' | 'רועי';
 type PushChildName = 'רביד' | 'עמית' | 'אלין';
+type ReminderLeadMinutes = 5 | 10 | 15 | 30;
+type PushSoundOption = '/sounds/notify-1.mp3' | '/sounds/notify-2.mp3' | '/sounds/notify-3.mp3';
 
 const pushUserOptions: PushUserName[] = ['רביד', 'עמית', 'אלין', 'סיוון', 'רועי'];
 const pushChildOptions: PushChildName[] = ['רביד', 'עמית', 'אלין'];
 const PUSH_USER_STORAGE_KEY = 'family-scheduler-push-user';
 const PUSH_MIGRATION_FLAG_KEY = 'family-scheduler-push-migrated-v1';
-const SERVICE_WORKER_URL = '/sw.js?v=5';
+const PUSH_PREFS_STORAGE_KEY = 'family-scheduler-push-preferences-v1';
+const reminderLeadOptions: ReminderLeadMinutes[] = [5, 10, 15, 30];
+const pushSoundOptions: Array<{ value: PushSoundOption; label: string }> = [
+  { value: '/sounds/notify-1.mp3', label: 'צליל 1' },
+  { value: '/sounds/notify-2.mp3', label: 'צליל 2' },
+  { value: '/sounds/notify-3.mp3', label: 'צליל 3' },
+];
+const defaultPushLeadMinutes: ReminderLeadMinutes = 10;
+const defaultPushSound: PushSoundOption = '/sounds/notify-1.mp3';
+const SERVICE_WORKER_URL = '/sw.js?v=7';
+
+const sanitizeReminderLead = (value: unknown): ReminderLeadMinutes => {
+  const numeric = Number(value);
+  return reminderLeadOptions.includes(numeric as ReminderLeadMinutes)
+    ? (numeric as ReminderLeadMinutes)
+    : defaultPushLeadMinutes;
+};
+
+const sanitizePushSound = (value: unknown): PushSoundOption => {
+  const candidate = typeof value === 'string' ? value : '';
+  return pushSoundOptions.some((option) => option.value === candidate)
+    ? (candidate as PushSoundOption)
+    : defaultPushSound;
+};
 
 const isParentPushUser = (value: PushUserName | ''): value is 'סיוון' | 'רועי' =>
   value === 'סיוון' || value === 'רועי';
@@ -171,6 +198,7 @@ const normalizeWeekEventsWithDate = (weeksData: Record<string, DaySchedule[]> | 
               ...event,
               date: normalizeEventDateKey(event.date, parseEventDateKey(day.isoDate) ?? new Date(`${day.isoDate}T00:00:00`)),
               isRecurring: event.isRecurring ?? Boolean(event.recurringTemplateId),
+              completed: Boolean(event.completed),
             }))
             .filter((event, idx, arr) => idx === arr.findIndex((candidate) => (
               candidate.id === event.id ||
@@ -180,7 +208,8 @@ const normalizeWeekEventsWithDate = (weeksData: Record<string, DaySchedule[]> | 
                 candidate.child === event.child &&
                 candidate.title === event.title &&
                 candidate.type === event.type &&
-                Boolean(candidate.isRecurring) === Boolean(event.isRecurring)
+                Boolean(candidate.isRecurring) === Boolean(event.isRecurring) &&
+                Boolean(candidate.completed) === Boolean(event.completed)
               )
             )))
         : [],
@@ -673,6 +702,7 @@ const createWeekDays = (weekStart: Date, includeDemo: boolean, recurringTemplate
       ...event,
       date: normalizeEventDateKey(event.date, fallbackDate),
       isRecurring: event.isRecurring ?? Boolean(event.recurringTemplateId),
+      completed: Boolean(event.completed),
     });
   };
 
@@ -760,9 +790,12 @@ export default function FamilyScheduler() {
   const [hasConfirmedPushIdentitySelection, setHasConfirmedPushIdentitySelection] = useState(false);
   const [parentReceiveAll, setParentReceiveAll] = useState(true);
   const [parentWatchChildren, setParentWatchChildren] = useState<PushChildName[]>(['רביד', 'עמית', 'אלין']);
+  const [reminderLeadMinutes, setReminderLeadMinutes] = useState<ReminderLeadMinutes>(defaultPushLeadMinutes);
+  const [pushSound, setPushSound] = useState<PushSoundOption>(defaultPushSound);
+  const [showTemporarySoundPreviewButton, setShowTemporarySoundPreviewButton] = useState(false);
   const [installPromptEvent, setInstallPromptEvent] = useState<BeforeInstallPromptEvent | null>(null);
   const [isInstallReady, setIsInstallReady] = useState(false);
-  const [subscriptionEndpoint, setSubscriptionEndpoint] = useState("");
+  const [, setSubscriptionEndpoint] = useState("");
   const persistDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const requestInFlightRef = useRef(false);
   const lastApiRequestAtRef = useRef<number>(0);
@@ -770,11 +803,38 @@ export default function FamilyScheduler() {
   const [isHydrated, setIsHydrated] = useState(false);
   const autoRefetchInFlightRef = useRef(false);
   const autoRefetchWeekKeyRef = useRef<string>('');
+  const dayCardRefs = useRef<Array<HTMLDivElement | null>>([]);
+  const hasAutoScrolledToTodayRef = useRef(false);
+  const soundPreviewButtonTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const weekKey = toIsoDate(weekStart);
   const days = weeksData[weekKey] ?? [];
 
-  const ensureServiceWorkerRegistration = async () => {
+  const playPushSound = (soundUrl: PushSoundOption | string) => {
+    if (typeof window === 'undefined') {
+      return;
+    }
+
+    const audio = new Audio(soundUrl);
+    audio.volume = 0.85;
+    void audio.play().catch(() => undefined);
+  };
+
+  const handlePushSoundChange = (value: string) => {
+    const nextSound = sanitizePushSound(value);
+    setPushSound(nextSound);
+    setShowTemporarySoundPreviewButton(true);
+
+    if (soundPreviewButtonTimerRef.current) {
+      clearTimeout(soundPreviewButtonTimerRef.current);
+    }
+
+    soundPreviewButtonTimerRef.current = setTimeout(() => {
+      setShowTemporarySoundPreviewButton(false);
+    }, 9000);
+  };
+
+  const ensureServiceWorkerRegistration = useCallback(async () => {
     if (!("serviceWorker" in navigator)) {
       return null;
     }
@@ -795,7 +855,35 @@ export default function FamilyScheduler() {
     }
 
     return registration;
-  };
+  }, []);
+
+  const syncPushPreferencesToServiceWorker = useCallback(async () => {
+    if (!("serviceWorker" in navigator)) {
+      return;
+    }
+
+    const registration = await ensureServiceWorkerRegistration();
+    if (!registration) {
+      return;
+    }
+
+    const message = {
+      type: 'PUSH_PREFERENCES',
+      payload: {
+        reminderLeadMinutes,
+        sound: pushSound,
+      },
+    };
+
+    if (registration.active) {
+      registration.active.postMessage(message);
+      return;
+    }
+
+    if (navigator.serviceWorker.controller) {
+      navigator.serviceWorker.controller.postMessage(message);
+    }
+  }, [ensureServiceWorkerRegistration, reminderLeadMinutes, pushSound]);
 
   useEffect(() => {
     setWeeksData((prev) => {
@@ -819,10 +907,10 @@ export default function FamilyScheduler() {
           const payload = await response.json() as { state?: PersistedStatePayload };
           if (payload?.state && !cancelled) {
             const normalized = normalizePersistedState(payload.state, initialWeekStart);
-            setWeekStart(normalized.weekStart);
+            setWeekStart(initialWeekStart);
             setRecurringTemplates(normalized.recurringTemplates);
             setWeeksData({
-              [toIsoDate(normalized.weekStart)]: createWeekDays(normalized.weekStart, false, normalized.recurringTemplates),
+              [toIsoDate(initialWeekStart)]: createWeekDays(initialWeekStart, false, normalized.recurringTemplates),
             });
             return;
           }
@@ -836,10 +924,10 @@ export default function FamilyScheduler() {
         const parsed = raw ? JSON.parse(raw) as PersistedStatePayload : null;
         const normalized = normalizePersistedState(parsed, initialWeekStart);
         if (!cancelled) {
-          setWeekStart(normalized.weekStart);
+          setWeekStart(initialWeekStart);
           setRecurringTemplates(normalized.recurringTemplates);
           setWeeksData({
-            [toIsoDate(normalized.weekStart)]: createWeekDays(normalized.weekStart, false, normalized.recurringTemplates),
+            [toIsoDate(initialWeekStart)]: createWeekDays(initialWeekStart, false, normalized.recurringTemplates),
           });
         }
       } catch {
@@ -909,6 +997,9 @@ export default function FamilyScheduler() {
       if (persistDebounceRef.current) {
         clearTimeout(persistDebounceRef.current);
       }
+      if (soundPreviewButtonTimerRef.current) {
+        clearTimeout(soundPreviewButtonTimerRef.current);
+      }
     };
   }, []);
 
@@ -931,6 +1022,75 @@ export default function FamilyScheduler() {
       setDbSyncStatus({ state: 'idle', message: '' });
     }
   }, [creatingEvent, editingEvent]);
+
+  useEffect(() => {
+    try {
+      const rawPrefs = localStorage.getItem(PUSH_PREFS_STORAGE_KEY);
+      if (!rawPrefs) {
+        return;
+      }
+
+      const parsed = JSON.parse(rawPrefs) as { reminderLeadMinutes?: unknown; sound?: unknown };
+      setReminderLeadMinutes(sanitizeReminderLead(parsed?.reminderLeadMinutes));
+      setPushSound(sanitizePushSound(parsed?.sound));
+    } catch {
+      // no-op
+    }
+  }, []);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(PUSH_PREFS_STORAGE_KEY, JSON.stringify({
+        reminderLeadMinutes,
+        sound: pushSound,
+      }));
+    } catch {
+      // no-op
+    }
+
+    void syncPushPreferencesToServiceWorker().catch(() => undefined);
+  }, [reminderLeadMinutes, pushSound, syncPushPreferencesToServiceWorker]);
+
+  useEffect(() => {
+    if (!("serviceWorker" in navigator)) {
+      return;
+    }
+
+    const onWorkerMessage = (event: MessageEvent) => {
+      const data = event.data as { type?: string; payload?: { sound?: string; eventId?: string } } | undefined;
+
+      if (data?.type === 'PLAY_PUSH_SOUND') {
+        const selectedSound = sanitizePushSound(data?.payload?.sound ?? pushSound);
+        playPushSound(selectedSound);
+        return;
+      }
+
+      if (data?.type === 'TASK_CONFIRMED') {
+        const eventId = typeof data?.payload?.eventId === 'string' ? data.payload.eventId.trim() : '';
+        if (!eventId) {
+          return;
+        }
+
+        setWeeksData((prev) => {
+          const next: Record<string, DaySchedule[]> = {};
+          Object.entries(prev).forEach(([key, scheduleDays]) => {
+            next[key] = scheduleDays.map((day) => ({
+              ...day,
+              events: day.events.map((event) => (
+                event.id === eventId ? { ...event, completed: true } : event
+              )),
+            }));
+          });
+          return next;
+        });
+      }
+    };
+
+    navigator.serviceWorker.addEventListener('message', onWorkerMessage);
+    return () => {
+      navigator.serviceWorker.removeEventListener('message', onWorkerMessage);
+    };
+  }, [pushSound]);
 
   useEffect(() => {
     let cancelled = false;
@@ -1009,7 +1169,7 @@ export default function FamilyScheduler() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [ensureServiceWorkerRegistration]);
 
   useEffect(() => {
     const standalone = window.matchMedia('(display-mode: standalone)').matches || Boolean((window.navigator as Navigator & { standalone?: boolean }).standalone);
@@ -1347,6 +1507,7 @@ export default function FamilyScheduler() {
           type: event.type,
           isRecurring: false,
           recurringTemplateId: undefined,
+          completed: Boolean(event.completed),
         });
         weekDays[dayIndex].events = sortEvents(weekDays[dayIndex].events);
       });
@@ -1361,12 +1522,11 @@ export default function FamilyScheduler() {
 
   const upsertEventToDatabase = async (event: SchedulerEvent, dayIndex: number) => {
     try {
-      console.log('[API] POST /api/schedule -> start', event);
+      console.log('[API] PUT /api/schedule -> start', event);
       const response = await fetch('/api/schedule', {
-        method: 'POST',
+        method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          senderSubscriptionEndpoint: subscriptionEndpoint || undefined,
           event: {
             ...event,
             dayIndex,
@@ -1374,14 +1534,14 @@ export default function FamilyScheduler() {
         }),
       });
       const payload = await response.json();
-      console.log('[API] POST /api/schedule ->', response.status, payload);
+      console.log('[API] PUT /api/schedule ->', response.status, payload);
       if (!response.ok) {
         throw new Error(payload?.error || 'Failed saving event');
       }
 
       return payload;
     } catch (error) {
-      console.error('[API] POST /api/schedule client failed', error);
+      console.error('[API] PUT /api/schedule client failed', error);
       throw error;
     }
   };
@@ -1412,6 +1572,27 @@ export default function FamilyScheduler() {
       console.error('[API] DELETE /api/schedule client failed', error);
       throw error;
     }
+  };
+
+  const setEventCompletionInDatabase = async (eventId: string, completed: boolean) => {
+    const confirmer = !isParentPushUser(pushUserName) && pushUserName ? pushUserName : undefined;
+
+    const response = await fetch('/api/schedule', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        action: completed ? 'confirm' : 'unconfirm',
+        eventId,
+        confirmedBy: confirmer,
+      }),
+    });
+
+    const payload = await response.json();
+    if (!response.ok) {
+      throw new Error(payload?.error || 'Failed updating completion');
+    }
+
+    return payload;
   };
 
   const handleSubmit = async (event: SchedulerEvent, dayIndex: number, targetWeekStart: Date) => {
@@ -1505,6 +1686,26 @@ export default function FamilyScheduler() {
         autoRefetchInFlightRef.current = false;
       });
   }, [weekKey, isHydrated]);
+
+  useEffect(() => {
+    if (!isHydrated || hasAutoScrolledToTodayRef.current) {
+      return;
+    }
+
+    const today = new Date();
+    const currentWeekKey = toIsoDate(getWeekStart(today));
+    if (weekKey !== currentWeekKey) {
+      return;
+    }
+
+    const targetDayCard = dayCardRefs.current[today.getDay()] ?? null;
+    if (!targetDayCard) {
+      return;
+    }
+
+    targetDayCard.scrollIntoView({ behavior: 'auto', block: 'start', inline: 'nearest' });
+    hasAutoScrolledToTodayRef.current = true;
+  }, [isHydrated, weekKey, days.length]);
 
   const parseInstructionFallback = (text: string): { targetWeekStart: Date; events: AiEvent[] } | null => {
     const timeMatch = extractTimesFromLine(text)[0];
@@ -1664,6 +1865,7 @@ export default function FamilyScheduler() {
         type: normalizeTypeForStorage(eventData.type, eventData.title),
         isRecurring: Boolean(eventData.recurringWeekly),
         recurringTemplateId,
+        completed: false,
       };
 
       await upsertEventToDatabase(event, eventData.dayIndex);
@@ -1843,6 +2045,7 @@ export default function FamilyScheduler() {
       type: normalizeTypeForStorage(creatingEvent.data.type || 'lesson', title),
       isRecurring: creatingEvent.recurringWeekly,
       recurringTemplateId,
+      completed: false,
     };
 
     const targetWeekKey = toIsoDate(targetWeekStart);
@@ -1869,6 +2072,11 @@ export default function FamilyScheduler() {
     console.log('Action triggered:', 'add');
     if (!editingEvent) {
       console.warn('[UI] edit aborted: editingEvent is missing');
+      return;
+    }
+
+    if (editingEvent.data.completed) {
+      setApiError('לא ניתן לערוך משימה שסומנה כבוצעה. ניתן ללחוץ על "בטל אישור".');
       return;
     }
 
@@ -1913,6 +2121,27 @@ export default function FamilyScheduler() {
     }
 
     setEditingEvent(null);
+  };
+
+  const undoCompletedEvent = async () => {
+    if (!editingEvent) {
+      return;
+    }
+
+    const selectedDate = new Date(`${editingEvent.selectedDate}T00:00:00`);
+    const targetWeekStart = Number.isNaN(selectedDate.getTime()) ? weekStart : getWeekStart(selectedDate);
+
+    setDbSyncStatus({ state: 'saving', message: 'Updating completion...' });
+    try {
+      await setEventCompletionInDatabase(editingEvent.data.id, false);
+      await refetchEventsFromDatabase(targetWeekStart);
+      setEditingEvent((prev) => prev ? ({ ...prev, data: { ...prev.data, completed: false } }) : prev);
+      setDbSyncStatus({ state: 'saved', message: 'Updated' });
+      setSuccessMessage('אישור המשימה בוטל.');
+    } catch {
+      setDbSyncStatus({ state: 'error', message: 'Failed' });
+      setApiError('עדכון סטטוס משימה נכשל. נסה שוב.');
+    }
   };
 
   const deleteEditedEvent = async () => {
@@ -2066,7 +2295,13 @@ export default function FamilyScheduler() {
           });
 
           return (
-          <div key={day.isoDate} className="bg-white rounded-3xl shadow-xl overflow-hidden border border-slate-100 ring-1 ring-slate-200 print-day-card">
+          <div
+            key={day.isoDate}
+            ref={(element) => {
+              dayCardRefs.current[dayIndex] = element;
+            }}
+            className="bg-white rounded-3xl shadow-xl overflow-hidden border border-slate-100 ring-1 ring-slate-200 print-day-card"
+          >
             <div className="bg-[#1e293b] text-white p-4 flex justify-between items-center">
               <span className="font-bold text-lg">{day.dayName}</span>
               <span className="text-sm font-mono opacity-70">{day.date}</span>
@@ -2109,6 +2344,9 @@ export default function FamilyScheduler() {
                     <div className="flex-1 flex items-center gap-3">
                       {renderChildBadges(event.child)}
                       <div className="flex items-center gap-2">
+                        {event.completed && (
+                          <span className="text-[11px] font-bold text-emerald-700 bg-emerald-100 px-2 py-0.5 rounded-full">✓ בוצע</span>
+                        )}
                         <span className="text-slate-700 font-semibold text-sm">{event.title}</span>
                         {(event.isRecurring || event.recurringTemplateId) && (
                           <span className="text-[10px] font-bold text-blue-700 bg-blue-100 px-2 py-0.5 rounded-full">קבוע</span>
@@ -2200,6 +2438,46 @@ export default function FamilyScheduler() {
                 )}
               </div>
             )}
+
+            <div className="space-y-3 border border-slate-200 rounded-xl p-3 bg-slate-50">
+              <div>
+                <div className="text-xs text-slate-500 mb-1">זמן התראה לפני אירוע</div>
+                <select
+                  value={reminderLeadMinutes}
+                  onChange={(event) => setReminderLeadMinutes(sanitizeReminderLead(event.target.value))}
+                  className="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm text-slate-700 outline-none focus:border-blue-400"
+                >
+                  {reminderLeadOptions.map((minutes) => (
+                    <option key={`lead-${minutes}`} value={minutes}>{minutes} דקות לפני</option>
+                  ))}
+                </select>
+              </div>
+
+              <div>
+                <div className="text-xs text-slate-500 mb-1">צליל התראה</div>
+                <select
+                  value={pushSound}
+                  onChange={(event) => handlePushSoundChange(event.target.value)}
+                  className="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm text-slate-700 outline-none focus:border-blue-400"
+                >
+                  {pushSoundOptions.map((option) => (
+                    <option key={option.value} value={option.value}>{option.label}</option>
+                  ))}
+                </select>
+                {showTemporarySoundPreviewButton && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      playPushSound(pushSound);
+                      setShowTemporarySoundPreviewButton(false);
+                    }}
+                    className="mt-2 text-xs font-semibold text-indigo-700 hover:text-indigo-800"
+                  >
+                    נגן צליל לדוגמה
+                  </button>
+                )}
+              </div>
+            </div>
 
             <div className="flex justify-end gap-2">
               <button
@@ -2463,6 +2741,12 @@ export default function FamilyScheduler() {
               </button>
             </div>
 
+            {editingEvent.data.completed && (
+              <div className="rounded-xl border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm font-semibold text-emerald-700">
+                המשימה סומנה כבוצעה — עריכה נעולה עד לביטול אישור.
+              </div>
+            )}
+
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
               <label className="text-sm text-slate-700 font-medium">
                 תאריך
@@ -2472,6 +2756,7 @@ export default function FamilyScheduler() {
                     type="date"
                     value={editingEvent.selectedDate}
                     onChange={(e) => setEditingEvent((prev) => prev ? ({ ...prev, selectedDate: e.target.value }) : prev)}
+                    disabled={Boolean(editingEvent.data.completed)}
                     className="w-full border border-slate-300 rounded-xl pl-3 pr-9 py-2 outline-none focus:border-blue-400"
                   />
                 </div>
@@ -2482,6 +2767,7 @@ export default function FamilyScheduler() {
                 <select
                   value={editingEvent.data.child}
                   onChange={(e) => setEditingEvent((prev) => prev ? ({ ...prev, data: { ...prev.data, child: e.target.value as ChildKey } }) : prev)}
+                  disabled={Boolean(editingEvent.data.completed)}
                   className="mt-1 w-full border border-slate-300 rounded-xl px-3 py-2 outline-none focus:border-blue-400"
                 >
                   {childOptions.map((option) => (
@@ -2498,6 +2784,7 @@ export default function FamilyScheduler() {
                 <select
                   value={getDropdownTimeValue(editingEvent.data.time)}
                   onChange={(e) => setEditingEvent((prev) => prev ? ({ ...prev, data: { ...prev.data, time: e.target.value || prev.data.time } }) : prev)}
+                  disabled={Boolean(editingEvent.data.completed)}
                   className="flex-1 border border-slate-300 rounded-xl px-3 py-2 outline-none focus:border-blue-400"
                 >
                   <option value="">בחר שעה</option>
@@ -2512,6 +2799,7 @@ export default function FamilyScheduler() {
                     const normalized = normalizeManualTimeInput(e.target.value);
                     setEditingEvent((prev) => prev ? ({ ...prev, data: { ...prev.data, time: normalized } }) : prev);
                   }}
+                  disabled={Boolean(editingEvent.data.completed)}
                   className="w-24 border border-slate-300 rounded-xl px-2 py-2 text-center outline-none focus:border-blue-400"
                   placeholder="14:25"
                 />
@@ -2523,6 +2811,7 @@ export default function FamilyScheduler() {
               <input
                 value={editingEvent.data.title}
                 onChange={(e) => setEditingEvent((prev) => prev ? ({ ...prev, data: { ...prev.data, title: e.target.value } }) : prev)}
+                disabled={Boolean(editingEvent.data.completed)}
                 className="mt-1 w-full border border-slate-300 rounded-xl px-3 py-2 outline-none focus:border-blue-400"
               />
             </label>
@@ -2533,6 +2822,7 @@ export default function FamilyScheduler() {
                 list="activity-types"
                 value={editingEvent.data.type}
                 onChange={(e) => setEditingEvent((prev) => prev ? ({ ...prev, data: { ...prev.data, type: e.target.value as EventType } }) : prev)}
+                disabled={Boolean(editingEvent.data.completed)}
                 className="mt-1 w-full border border-slate-300 rounded-xl px-3 py-2 outline-none focus:border-blue-400"
                 placeholder="בחר או הקלד סוג פעילות"
               />
@@ -2548,10 +2838,21 @@ export default function FamilyScheduler() {
                 type="checkbox"
                 checked={editingEvent.recurringWeekly}
                 onChange={(e) => setEditingEvent((prev) => prev ? ({ ...prev, recurringWeekly: e.target.checked }) : prev)}
+                disabled={Boolean(editingEvent.data.completed)}
                 className="h-4 w-4 rounded border-slate-300"
               />
               פעילות שבועית חוזרת
             </label>
+
+            {editingEvent.data.completed && (
+              <button
+                type="button"
+                onClick={() => { void undoCompletedEvent(); }}
+                className="w-full rounded-xl bg-emerald-600 text-white font-bold py-2.5 hover:bg-emerald-700 transition"
+              >
+                בטל אישור
+              </button>
+            )}
 
             <button
               type="button"
@@ -2577,7 +2878,8 @@ export default function FamilyScheduler() {
               <button
                 type="button"
                 onClick={() => { void saveEditedEvent(); }}
-                className="px-4 py-2 rounded-xl bg-blue-600 text-white hover:bg-blue-700"
+                disabled={Boolean(editingEvent.data.completed)}
+                className="px-4 py-2 rounded-xl bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-60 disabled:cursor-not-allowed"
               >
                 שמירה
               </button>
