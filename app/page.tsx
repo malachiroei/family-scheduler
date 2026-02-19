@@ -1,7 +1,7 @@
 "use client";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import Image from 'next/image';
-import { Dog, Dumbbell, Music, GraduationCap, Trophy, Printer, Image as ImageIcon, MessageCircle, ChevronRight, ChevronLeft, X, Plus, CalendarDays } from 'lucide-react';
+import { Dog, Dumbbell, Music, GraduationCap, Trophy, Printer, Image as ImageIcon, MessageCircle, ChevronRight, ChevronLeft, X, Plus, CalendarDays, Settings } from 'lucide-react';
 import html2canvas from 'html2canvas';
 
 const baseChildrenConfig = {
@@ -142,21 +142,22 @@ type BeforeInstallPromptEvent = Event & {
 type PushUserName = 'רביד' | 'עמית' | 'אלין' | 'סיוון' | 'רועי';
 type PushChildName = 'רביד' | 'עמית' | 'אלין';
 type ReminderLeadMinutes = 5 | 10 | 15 | 30;
-type PushSoundOption = '/sounds/standard.mp3' | '/sounds/bell.mp3' | '/sounds/modern.mp3';
+type PushSoundPreset = '/sounds/standard.mp3' | '/sounds/bell.mp3' | '/sounds/modern.mp3';
 
 const pushUserOptions: PushUserName[] = ['רביד', 'עמית', 'אלין', 'סיוון', 'רועי'];
 const pushChildOptions: PushChildName[] = ['רביד', 'עמית', 'אלין'];
 const PUSH_USER_STORAGE_KEY = 'family-scheduler-push-user';
 const PUSH_MIGRATION_FLAG_KEY = 'family-scheduler-push-migrated-v1';
 const PUSH_PREFS_STORAGE_KEY = 'family-scheduler-push-preferences-v1';
+const PUSH_CUSTOM_SOUND_SOURCE_KEY = 'family-scheduler-custom-sound-source-v1';
 const reminderLeadOptions: ReminderLeadMinutes[] = [5, 10, 15, 30];
-const pushSoundOptions: Array<{ value: PushSoundOption; label: string }> = [
+const pushSoundOptions: Array<{ value: PushSoundPreset; label: string }> = [
   { value: '/sounds/standard.mp3', label: 'Standard' },
   { value: '/sounds/bell.mp3', label: 'Bell' },
   { value: '/sounds/modern.mp3', label: 'Modern' },
 ];
 const defaultPushLeadMinutes: ReminderLeadMinutes = 10;
-const defaultPushSound: PushSoundOption = '/sounds/standard.mp3';
+const defaultPushSound: PushSoundPreset = '/sounds/standard.mp3';
 const SERVICE_WORKER_URL = '/sw.js?v=9';
 
 const sanitizeReminderLead = (value: unknown): ReminderLeadMinutes => {
@@ -166,10 +167,10 @@ const sanitizeReminderLead = (value: unknown): ReminderLeadMinutes => {
     : defaultPushLeadMinutes;
 };
 
-const sanitizePushSound = (value: unknown): PushSoundOption => {
+const sanitizePushSound = (value: unknown): PushSoundPreset => {
   const candidate = typeof value === 'string' ? value : '';
   return pushSoundOptions.some((option) => option.value === candidate)
-    ? (candidate as PushSoundOption)
+    ? (candidate as PushSoundPreset)
     : defaultPushSound;
 };
 
@@ -781,6 +782,7 @@ export default function FamilyScheduler() {
   } | null>(null);
   const [creatingEvent, setCreatingEvent] = useState<NewEventDraft | null>(null);
   const [isChatOpen, setIsChatOpen] = useState(false);
+  const [showSettingsModal, setShowSettingsModal] = useState(false);
   const [pushSupported, setPushSupported] = useState(false);
   const [pushEnabled, setPushEnabled] = useState(false);
   const [pushBusy, setPushBusy] = useState(false);
@@ -791,7 +793,9 @@ export default function FamilyScheduler() {
   const [parentReceiveAll, setParentReceiveAll] = useState(true);
   const [parentWatchChildren, setParentWatchChildren] = useState<PushChildName[]>(['רביד', 'עמית', 'אלין']);
   const [reminderLeadMinutes, setReminderLeadMinutes] = useState<ReminderLeadMinutes>(defaultPushLeadMinutes);
-  const [pushSound, setPushSound] = useState<PushSoundOption>(defaultPushSound);
+  const [pushSound, setPushSound] = useState<PushSoundPreset>(defaultPushSound);
+  const [customSoundUrl, setCustomSoundUrl] = useState('');
+  const [customSoundData, setCustomSoundData] = useState('');
   const [installPromptEvent, setInstallPromptEvent] = useState<BeforeInstallPromptEvent | null>(null);
   const [isInstallReady, setIsInstallReady] = useState(false);
   const [, setSubscriptionEndpoint] = useState("");
@@ -807,8 +811,9 @@ export default function FamilyScheduler() {
 
   const weekKey = toIsoDate(weekStart);
   const days = weeksData[weekKey] ?? [];
+  const selectedSoundPath = customSoundData || customSoundUrl.trim() || pushSound;
 
-  const playPushSound = (soundUrl: PushSoundOption | string) => {
+  const playPushSound = (soundUrl: string) => {
     if (typeof window === 'undefined') {
       return;
     }
@@ -816,6 +821,54 @@ export default function FamilyScheduler() {
     const audio = new Audio(soundUrl);
     audio.volume = 0.85;
     void audio.play().catch(() => undefined);
+  };
+
+  const saveAndPlayCustomSound = () => {
+    const source = selectedSoundPath;
+    if (!source) {
+      setApiError('יש לבחור או להזין צליל לפני שמירה.');
+      return;
+    }
+
+    try {
+      localStorage.setItem(PUSH_PREFS_STORAGE_KEY, JSON.stringify({
+        reminderLeadMinutes,
+        sound: pushSound,
+      }));
+      localStorage.setItem(PUSH_CUSTOM_SOUND_SOURCE_KEY, JSON.stringify({
+        customSoundUrl: customSoundUrl.trim(),
+        customSoundData,
+      }));
+    } catch {
+      // no-op
+    }
+
+    playPushSound(source);
+    setSuccessMessage('הצליל נשמר והושמע בהצלחה.');
+  };
+
+  const handleCustomSoundFileSelect = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0] || null;
+    if (!file) {
+      return;
+    }
+
+    const reader = new FileReader();
+    reader.onload = () => {
+      const result = typeof reader.result === 'string' ? reader.result : '';
+      if (!result) {
+        setApiError('לא ניתן לקרוא את קובץ האודיו שנבחר.');
+        return;
+      }
+
+      setCustomSoundData(result);
+      setCustomSoundUrl('');
+      setSuccessMessage(`נבחר קובץ צליל: ${file.name}`);
+    };
+    reader.onerror = () => {
+      setApiError('טעינת קובץ האודיו נכשלה.');
+    };
+    reader.readAsDataURL(file);
   };
 
   const ensureServiceWorkerRegistration = useCallback(async () => {
@@ -855,7 +908,7 @@ export default function FamilyScheduler() {
       type: 'PUSH_PREFERENCES',
       payload: {
         reminderLeadMinutes,
-        sound: pushSound,
+        sound: sanitizePushSound(selectedSoundPath),
       },
     };
 
@@ -867,7 +920,7 @@ export default function FamilyScheduler() {
     if (navigator.serviceWorker.controller) {
       navigator.serviceWorker.controller.postMessage(message);
     }
-  }, [ensureServiceWorkerRegistration, reminderLeadMinutes, pushSound]);
+  }, [ensureServiceWorkerRegistration, reminderLeadMinutes, selectedSoundPath]);
 
   useEffect(() => {
     setWeeksData((prev) => {
@@ -1014,6 +1067,13 @@ export default function FamilyScheduler() {
       const parsed = JSON.parse(rawPrefs) as { reminderLeadMinutes?: unknown; sound?: unknown };
       setReminderLeadMinutes(sanitizeReminderLead(parsed?.reminderLeadMinutes));
       setPushSound(sanitizePushSound(parsed?.sound));
+
+      const rawCustomSource = localStorage.getItem(PUSH_CUSTOM_SOUND_SOURCE_KEY);
+      if (rawCustomSource) {
+        const parsedCustom = JSON.parse(rawCustomSource) as { customSoundUrl?: unknown; customSoundData?: unknown };
+        setCustomSoundUrl(typeof parsedCustom?.customSoundUrl === 'string' ? parsedCustom.customSoundUrl : '');
+        setCustomSoundData(typeof parsedCustom?.customSoundData === 'string' ? parsedCustom.customSoundData : '');
+      }
     } catch {
       // no-op
     }
@@ -1025,12 +1085,16 @@ export default function FamilyScheduler() {
         reminderLeadMinutes,
         sound: pushSound,
       }));
+      localStorage.setItem(PUSH_CUSTOM_SOUND_SOURCE_KEY, JSON.stringify({
+        customSoundUrl: customSoundUrl.trim(),
+        customSoundData,
+      }));
     } catch {
       // no-op
     }
 
     void syncPushPreferencesToServiceWorker().catch(() => undefined);
-  }, [reminderLeadMinutes, pushSound, syncPushPreferencesToServiceWorker]);
+  }, [reminderLeadMinutes, pushSound, customSoundUrl, customSoundData, syncPushPreferencesToServiceWorker]);
 
   useEffect(() => {
     if (!("serviceWorker" in navigator)) {
@@ -1041,7 +1105,9 @@ export default function FamilyScheduler() {
       const data = event.data as { type?: string; payload?: { sound?: string; eventId?: string } } | undefined;
 
       if (data?.type === 'PLAY_PUSH_SOUND') {
-        const selectedSound = sanitizePushSound(data?.payload?.sound ?? pushSound);
+        const selectedSound = (typeof data?.payload?.sound === 'string' && data.payload.sound)
+          ? data.payload.sound
+          : selectedSoundPath;
         playPushSound(selectedSound);
         return;
       }
@@ -1071,7 +1137,7 @@ export default function FamilyScheduler() {
     return () => {
       navigator.serviceWorker.removeEventListener('message', onWorkerMessage);
     };
-  }, [pushSound]);
+  }, [selectedSoundPath]);
 
   useEffect(() => {
     let cancelled = false;
@@ -1620,6 +1686,47 @@ export default function FamilyScheduler() {
     return trimmed;
   };
 
+  const verifySettingsResetPassword = () => {
+    const entered = window.prompt('הקלידי סיסמה לאיפוס הגדרות');
+    if (entered === null) {
+      return false;
+    }
+
+    const trimmed = entered.trim();
+    if (trimmed !== '2101') {
+      setApiError('סיסמה שגויה. איפוס הגדרות בוטל.');
+      return false;
+    }
+
+    return true;
+  };
+
+  const resetSettingsWithPassword = () => {
+    if (!verifySettingsResetPassword()) {
+      return;
+    }
+
+    try {
+      localStorage.removeItem(PUSH_PREFS_STORAGE_KEY);
+      localStorage.removeItem(PUSH_CUSTOM_SOUND_SOURCE_KEY);
+      localStorage.removeItem(PUSH_USER_STORAGE_KEY);
+    } catch {
+      // no-op
+    }
+
+    setPushUserName('');
+    setParentReceiveAll(true);
+    setParentWatchChildren(['רביד', 'עמית', 'אלין']);
+    setReminderLeadMinutes(defaultPushLeadMinutes);
+    setPushSound(defaultPushSound);
+    setCustomSoundUrl('');
+    setCustomSoundData('');
+    setSuccessMessage('ההגדרות אופסו בהצלחה.');
+    if (apiError) {
+      setApiError('');
+    }
+  };
+
   const handleDelete = async (payload: { eventId: string; recurringTemplateId?: string }, targetWeekStart: Date) => {
     console.log('Action triggered:', 'delete');
     const deletePassword = verifyDeletePassword();
@@ -2161,49 +2268,14 @@ export default function FamilyScheduler() {
 
   return (
     <div className="print-scheduler-shell h-screen overflow-y-auto bg-[#f8fafc] p-4 pb-28 md:p-8 md:pb-32 dir-rtl" dir="rtl">
-      <div className="max-w-6xl mx-auto mb-4 md:mb-6 print:mb-4 sticky top-0 z-30 bg-[#f8fafc]/95 backdrop-blur-sm py-2">
-        <div className="print-controls flex flex-wrap justify-center sm:justify-end gap-3 print:hidden">
-          {isInstallReady && (
-            <button
-              onClick={() => { void installApp(); }}
-              className="flex items-center gap-2 bg-amber-50 text-amber-800 border border-amber-200 px-4 py-2 rounded-lg hover:bg-amber-100 transition shadow-sm"
-            >
-              התקן אפליקציה
-            </button>
-          )}
-          <button
-            onClick={() => { void openPushIdentityPrompt(); }}
-            disabled={pushBusy}
-            className="flex items-center gap-2 bg-blue-50 text-blue-700 border border-blue-200 px-4 py-2 rounded-lg hover:bg-blue-100 transition shadow-sm disabled:opacity-60 disabled:cursor-not-allowed"
-          >
-            {pushEnabled ? 'התראות פעילות' : (pushBusy ? 'מפעיל התראות...' : 'הפעל התראות')}
-          </button>
-          {pushUserName && (
-            <span className="text-xs text-slate-600 bg-slate-100 border border-slate-200 rounded-lg px-2 py-1">
-              פרופיל התראות: {pushUserName}
-            </span>
-          )}
-          <button
-            onClick={() => { void sendTestPushNotification(); }}
-            disabled={!pushEnabled || pushBusy || pushTestBusy}
-            className="flex items-center gap-2 bg-indigo-50 text-indigo-700 border border-indigo-200 px-4 py-2 rounded-lg hover:bg-indigo-100 transition shadow-sm disabled:opacity-60 disabled:cursor-not-allowed"
-          >
-            {pushTestBusy ? 'שולח התראה...' : 'שלח התראת ניסיון'}
-          </button>
-          <button
-            onClick={() => { void handleClearAll(); }}
-            className="flex items-center gap-2 bg-red-50 text-red-700 border border-red-200 px-4 py-2 rounded-lg hover:bg-red-100 transition shadow-sm"
-          >
-            Clear All
-          </button>
-          <button onClick={() => window.print()} className="flex items-center gap-2 bg-white border border-slate-200 px-4 py-2 rounded-lg hover:bg-slate-50 transition shadow-sm">
-            <Printer size={18} /> הדפסה
-          </button>
-          <button onClick={exportAsImage} className="flex items-center gap-2 bg-slate-800 text-white px-4 py-2 rounded-lg hover:bg-slate-700 transition shadow-md">
-            <ImageIcon size={18} /> תמונה לוואטסאפ
-          </button>
-        </div>
-      </div>
+      <button
+        type="button"
+        onClick={() => setShowSettingsModal(true)}
+        className="fixed top-4 left-4 z-40 h-12 w-12 rounded-full bg-slate-800 text-white shadow-lg hover:bg-slate-700 transition print:hidden flex items-center justify-center"
+        aria-label="פתח הגדרות"
+      >
+        <Settings size={20} />
+      </button>
 
       <div className="max-w-6xl mx-auto mb-6 flex items-center justify-between gap-3 bg-white border border-slate-200 rounded-2xl p-3 shadow-sm print:hidden">
         <button
@@ -2367,6 +2439,153 @@ export default function FamilyScheduler() {
         )})}
       </div>
 
+      {showSettingsModal && (
+        <div className="fixed inset-0 z-50 bg-black/35 backdrop-blur-[1px] flex items-center justify-center p-4 print:hidden">
+          <div className="w-full max-w-lg bg-white rounded-2xl shadow-2xl border border-slate-200 p-5 space-y-4">
+            <div className="flex justify-between items-center">
+              <h3 className="text-lg font-bold text-slate-800">הגדרות</h3>
+              <button
+                type="button"
+                onClick={() => setShowSettingsModal(false)}
+                className="text-slate-500 hover:text-slate-700"
+                aria-label="סגור"
+              >
+                <X size={18} />
+              </button>
+            </div>
+
+            <div className="space-y-2">
+              {isInstallReady && (
+                <button
+                  type="button"
+                  onClick={() => { void installApp(); }}
+                  className="w-full flex items-center justify-center gap-2 bg-amber-50 text-amber-800 border border-amber-200 px-4 py-2 rounded-lg hover:bg-amber-100 transition"
+                >
+                  התקן אפליקציה
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={() => {
+                  setShowSettingsModal(false);
+                  void openPushIdentityPrompt();
+                }}
+                disabled={pushBusy}
+                className="w-full flex items-center justify-center gap-2 bg-blue-50 text-blue-700 border border-blue-200 px-4 py-2 rounded-lg hover:bg-blue-100 transition disabled:opacity-60 disabled:cursor-not-allowed"
+              >
+                {pushEnabled ? 'התראות פעילות' : (pushBusy ? 'מפעיל התראות...' : 'הפעל התראות')}
+              </button>
+              <button
+                type="button"
+                onClick={() => { void sendTestPushNotification(); }}
+                disabled={!pushEnabled || pushBusy || pushTestBusy}
+                className="w-full flex items-center justify-center gap-2 bg-indigo-50 text-indigo-700 border border-indigo-200 px-4 py-2 rounded-lg hover:bg-indigo-100 transition disabled:opacity-60 disabled:cursor-not-allowed"
+              >
+                {pushTestBusy ? 'שולח התראה...' : 'שלח התראת ניסיון'}
+              </button>
+              <button
+                type="button"
+                onClick={() => { void handleClearAll(); }}
+                className="w-full flex items-center justify-center gap-2 bg-red-50 text-red-700 border border-red-200 px-4 py-2 rounded-lg hover:bg-red-100 transition"
+              >
+                Clear All
+              </button>
+              <button
+                type="button"
+                onClick={() => window.print()}
+                className="w-full flex items-center justify-center gap-2 bg-white border border-slate-200 px-4 py-2 rounded-lg hover:bg-slate-50 transition"
+              >
+                <Printer size={18} /> הדפסה
+              </button>
+              <button
+                type="button"
+                onClick={exportAsImage}
+                className="w-full flex items-center justify-center gap-2 bg-slate-800 text-white px-4 py-2 rounded-lg hover:bg-slate-700 transition"
+              >
+                <ImageIcon size={18} /> תמונה לוואטסאפ
+              </button>
+              {pushUserName && (
+                <div className="text-xs text-slate-600 bg-slate-100 border border-slate-200 rounded-lg px-2 py-2 text-center">
+                  פרופיל התראות: {pushUserName}
+                </div>
+              )}
+            </div>
+
+            <div className="space-y-3 border border-slate-200 rounded-xl p-3 bg-slate-50">
+              <div>
+                <div className="text-xs text-slate-500 mb-1">זמן התראה לפני אירוע</div>
+                <select
+                  value={reminderLeadMinutes}
+                  onChange={(event) => setReminderLeadMinutes(sanitizeReminderLead(event.target.value))}
+                  className="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm text-slate-700 outline-none focus:border-blue-400"
+                >
+                  {reminderLeadOptions.map((minutes) => (
+                    <option key={`settings-lead-${minutes}`} value={minutes}>{minutes} דקות לפני</option>
+                  ))}
+                </select>
+              </div>
+
+              <div>
+                <div className="text-xs text-slate-500 mb-1">צליל מובנה</div>
+                <select
+                  value={pushSound}
+                  onChange={(event) => {
+                    setPushSound(sanitizePushSound(event.target.value));
+                    setCustomSoundData('');
+                  }}
+                  className="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm text-slate-700 outline-none focus:border-blue-400"
+                >
+                  {pushSoundOptions.map((option) => (
+                    <option key={`settings-sound-${option.value}`} value={option.value}>{option.label}</option>
+                  ))}
+                </select>
+              </div>
+
+              <div>
+                <div className="text-xs text-slate-500 mb-1">קישור מותאם ל-mp3</div>
+                <input
+                  value={customSoundUrl}
+                  onChange={(event) => {
+                    setCustomSoundUrl(event.target.value);
+                    if (event.target.value.trim()) {
+                      setCustomSoundData('');
+                    }
+                  }}
+                  className="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm text-slate-700 outline-none focus:border-blue-400"
+                  placeholder="https://example.com/alert.mp3"
+                />
+              </div>
+
+              <div>
+                <div className="text-xs text-slate-500 mb-1">או בחר קובץ אודיו מהמכשיר</div>
+                <input
+                  type="file"
+                  accept="audio/*"
+                  onChange={handleCustomSoundFileSelect}
+                  className="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm text-slate-700"
+                />
+              </div>
+
+              <button
+                type="button"
+                onClick={saveAndPlayCustomSound}
+                className="w-full rounded-xl bg-indigo-600 px-3 py-2 text-sm font-bold text-white hover:bg-indigo-700 transition"
+              >
+                שמור והשמע דוגמה
+              </button>
+
+              <button
+                type="button"
+                onClick={resetSettingsWithPassword}
+                className="w-full rounded-xl bg-rose-600 px-3 py-2 text-sm font-bold text-white hover:bg-rose-700 transition"
+              >
+                איפוס הגדרות (עם סיסמה)
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {showPushIdentityPrompt && (
         <div className="fixed inset-0 z-50 bg-black/35 backdrop-blur-[1px] flex items-center justify-center p-4 print:hidden">
           <div className="w-full max-w-md bg-white rounded-2xl shadow-2xl border border-slate-200 p-5 space-y-4">
@@ -2433,44 +2652,6 @@ export default function FamilyScheduler() {
                 )}
               </div>
             )}
-
-            <div className="space-y-3 border border-slate-200 rounded-xl p-3 bg-slate-50">
-              <div>
-                <div className="text-xs text-slate-500 mb-1">זמן התראה לפני אירוע</div>
-                <select
-                  value={reminderLeadMinutes}
-                  onChange={(event) => setReminderLeadMinutes(sanitizeReminderLead(event.target.value))}
-                  className="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm text-slate-700 outline-none focus:border-blue-400"
-                >
-                  {reminderLeadOptions.map((minutes) => (
-                    <option key={`lead-${minutes}`} value={minutes}>{minutes} דקות לפני</option>
-                  ))}
-                </select>
-              </div>
-
-              <div>
-                <div className="text-xs text-slate-500 mb-1">צליל התראה</div>
-                <select
-                  value={pushSound}
-                  onChange={(event) => setPushSound(sanitizePushSound(event.target.value))}
-                  className="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm text-slate-700 outline-none focus:border-blue-400"
-                >
-                  {pushSoundOptions.map((option) => (
-                    <option key={option.value} value={option.value}>{option.label}</option>
-                  ))}
-                </select>
-                <button
-                  type="button"
-                  onClick={() => {
-                    const audio = new Audio(pushSound);
-                    void audio.play().catch(() => undefined);
-                  }}
-                  className="mt-3 w-full rounded-xl bg-indigo-600 px-3 py-2 text-sm font-bold text-white hover:bg-indigo-700 transition"
-                >
-                  בדוק צליל התראה
-                </button>
-              </div>
-            </div>
 
             <div className="flex justify-end gap-2">
               <button
