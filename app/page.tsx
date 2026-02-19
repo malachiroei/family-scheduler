@@ -1215,7 +1215,7 @@ export default function FamilyScheduler() {
     }
 
     if (!pushUserName) {
-      setShowPushIdentityPrompt(true);
+      openPushIdentityPrompt();
       return;
     }
 
@@ -1937,7 +1937,7 @@ export default function FamilyScheduler() {
 
   return (
     <div className="print-scheduler-shell h-screen overflow-y-auto bg-[#f8fafc] p-4 pb-28 md:p-8 md:pb-32 dir-rtl" dir="rtl">
-      <div className="max-w-6xl mx-auto mb-8 print:mb-4">
+      <div className="max-w-6xl mx-auto mb-4 md:mb-6 print:mb-4 sticky top-0 z-30 bg-[#f8fafc]/95 backdrop-blur-sm py-2">
         <div className="print-controls flex flex-wrap justify-center sm:justify-end gap-3 print:hidden">
           {isInstallReady && (
             <button
