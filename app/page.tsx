@@ -144,6 +144,7 @@ const pushUserOptions: PushUserName[] = ['רביד', 'עמית', 'אלין', 'ס
 const pushChildOptions: PushChildName[] = ['רביד', 'עמית', 'אלין'];
 const PUSH_USER_STORAGE_KEY = 'family-scheduler-push-user';
 const PUSH_MIGRATION_FLAG_KEY = 'family-scheduler-push-migrated-v1';
+const SERVICE_WORKER_URL = '/sw.js?v=5';
 
 const isParentPushUser = (value: PushUserName | ''): value is 'סיוון' | 'רועי' =>
   value === 'סיוון' || value === 'רועי';
@@ -780,7 +781,7 @@ export default function FamilyScheduler() {
 
     const existing = await navigator.serviceWorker.getRegistration();
     const activeScriptUrl = existing?.active?.scriptURL || existing?.waiting?.scriptURL || existing?.installing?.scriptURL || '';
-    if (existing && activeScriptUrl.includes('/sw.js')) {
+    if (existing && activeScriptUrl.includes(SERVICE_WORKER_URL)) {
       await existing.update().catch(() => undefined);
       if (existing.waiting) {
         existing.waiting.postMessage({ type: 'SKIP_WAITING' });
@@ -788,7 +789,7 @@ export default function FamilyScheduler() {
       return existing;
     }
 
-    const registration = await navigator.serviceWorker.register('/sw.js');
+    const registration = await navigator.serviceWorker.register(SERVICE_WORKER_URL);
     if (registration.waiting) {
       registration.waiting.postMessage({ type: 'SKIP_WAITING' });
     }

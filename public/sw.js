@@ -1,5 +1,5 @@
-const CACHE_NAME = 'family-scheduler-v4';
-const APP_SHELL_FILES = ['/', '/manifest.json?v=4', '/icon-512.png'];
+const CACHE_NAME = 'family-scheduler-v5';
+const APP_SHELL_FILES = ['/manifest.json?v=5', '/icon-512.png'];
 
 self.addEventListener('install', (event) => {
   event.waitUntil(
@@ -34,14 +34,15 @@ self.addEventListener('fetch', (event) => {
     return;
   }
 
+  if (url.pathname === '/sw.js' || url.pathname === '/manifest.json') {
+    event.respondWith(fetch(event.request));
+    return;
+  }
+
   if (event.request.mode === 'navigate') {
     event.respondWith(
       fetch(event.request)
-        .then((response) => {
-          const cloned = response.clone();
-          caches.open(CACHE_NAME).then((cache) => cache.put('/', cloned)).catch(() => undefined);
-          return response;
-        })
+        .then((response) => response)
         .catch(() => caches.match('/') || caches.match('/index.html'))
     );
     return;
