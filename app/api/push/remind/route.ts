@@ -12,7 +12,7 @@ const isAuthorizedCron = (request: NextRequest) => {
   return token === expected;
 };
 
-export async function GET(request: NextRequest) {
+const runReminders = async (request: NextRequest) => {
   if (!isAuthorizedCron(request)) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
@@ -24,4 +24,12 @@ export async function GET(request: NextRequest) {
     const message = error instanceof Error ? error.message : "Failed to send reminders";
     return NextResponse.json({ error: message }, { status: 500 });
   }
+};
+
+export async function GET(request: NextRequest) {
+  return runReminders(request);
+}
+
+export async function POST(request: NextRequest) {
+  return runReminders(request);
 }
