@@ -15,7 +15,7 @@ const geistMono = Geist_Mono({
 export const metadata: Metadata = {
   title: "Malachi Family Time Planner",
   description: "לוח זמנים משפחתי חכם עם סנכרון בזמן אמת",
-  manifest: "/manifest.json?v=5",
+  <link rel="manifest" href="/site.webmanifest?v=10" />
   applicationName: "Family Scheduler",
   appleWebApp: {
     capable: true,
