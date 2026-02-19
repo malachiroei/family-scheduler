@@ -2267,54 +2267,52 @@ export default function FamilyScheduler() {
   };
 
   return (
-    <div className="print-scheduler-shell h-screen overflow-y-auto bg-[#f8fafc] p-4 pb-28 md:p-8 md:pb-32 dir-rtl" dir="rtl">
+    <div className="print-scheduler-shell h-screen overflow-y-auto bg-[#f8fafc] p-3 pb-20 md:p-4 md:pb-24 dir-rtl" dir="rtl">
       <button
         type="button"
         onClick={() => setShowSettingsModal(true)}
-        className="fixed top-4 left-4 z-40 h-12 w-12 rounded-full bg-slate-800 text-white shadow-lg hover:bg-slate-700 transition print:hidden flex items-center justify-center"
+        className="fixed top-2 left-2 md:top-3 md:left-3 z-40 h-10 w-10 rounded-full bg-slate-800 text-white shadow-lg hover:bg-slate-700 transition print:hidden flex items-center justify-center"
         aria-label="פתח הגדרות"
       >
-        <Settings size={20} />
+        <Settings size={18} />
       </button>
 
-      <div className="max-w-6xl mx-auto mb-6 flex items-center justify-between gap-3 bg-white border border-slate-200 rounded-2xl p-3 shadow-sm print:hidden">
+      <div className="max-w-6xl mx-auto mb-2 flex items-center justify-between gap-2 bg-white border border-slate-200 rounded-2xl p-2 shadow-sm print:hidden">
         <button
           onClick={() => shiftWeek(1)}
-          className="flex items-center gap-2 bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-xl transition"
+          className="flex items-center gap-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 px-3 py-1.5 rounded-xl transition text-sm"
         >
           <ChevronRight size={18} /> שבוע הבא
         </button>
         <div className="text-slate-800 font-bold">{weekRangeLabel}</div>
         <button
           onClick={() => shiftWeek(-1)}
-          className="flex items-center gap-2 bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-xl transition"
+          className="flex items-center gap-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 px-3 py-1.5 rounded-xl transition text-sm"
         >
           שבוע קודם <ChevronLeft size={18} />
         </button>
       </div>
 
-      <div className="max-w-6xl mx-auto mb-4 bg-white border border-slate-200 rounded-2xl p-3 shadow-sm print:hidden">
-        <div className="text-sm font-bold text-slate-700 mb-2">תרשים ילדים וצבעים</div>
-        <div className="flex flex-wrap items-center gap-2">
+      <div className="max-w-6xl mx-auto mb-2 bg-white border border-slate-200 rounded-2xl p-2 shadow-sm print:hidden space-y-2">
+        <div className="flex flex-wrap items-center gap-1.5">
+          <span className="text-xs font-semibold text-slate-500">תרשים:</span>
           {(Object.keys(baseChildrenConfig) as BaseChildKey[]).map((childKey) => {
             const config = baseChildrenConfig[childKey];
             return (
-              <div key={childKey} className="flex items-center gap-2 bg-slate-50 border border-slate-200 rounded-xl px-3 py-2">
+              <div key={childKey} className="flex items-center gap-1.5 bg-slate-50 border border-slate-200 rounded-xl px-2.5 py-1.5">
                 <span className={`w-3 h-3 rounded-full ${config.color}`} />
                 <span className="text-sm font-bold text-slate-700">{config.name}</span>
               </div>
             );
           })}
         </div>
-      </div>
 
-      <div className="max-w-6xl mx-auto mb-4 flex flex-col md:flex-row md:items-center md:justify-between gap-3 print:hidden">
-        <div className="flex flex-wrap items-center gap-2">
+        <div className="flex flex-wrap items-center gap-1.5">
           <span className="text-xs font-semibold text-slate-500">סינון לפי ילד:</span>
           <button
             type="button"
             onClick={() => setSelectedChildFilter('all')}
-            className={`px-3 py-1.5 rounded-xl border text-sm font-semibold transition ${selectedChildFilter === 'all' ? 'bg-slate-800 text-white border-slate-800' : 'bg-white text-slate-700 border-slate-300 hover:bg-slate-50'}`}
+            className={`px-3 py-1 rounded-xl border text-sm font-semibold transition ${selectedChildFilter === 'all' ? 'bg-slate-800 text-white border-slate-800' : 'bg-white text-slate-700 border-slate-300 hover:bg-slate-50'}`}
           >
             הכל
           </button>
@@ -2323,23 +2321,22 @@ export default function FamilyScheduler() {
               key={`filter-${childKey}`}
               type="button"
               onClick={() => setSelectedChildFilter(childKey)}
-              className={`px-3 py-1.5 rounded-xl border text-sm font-semibold transition ${selectedChildFilter === childKey ? 'bg-slate-800 text-white border-slate-800' : 'bg-white text-slate-700 border-slate-300 hover:bg-slate-50'}`}
+              className={`px-3 py-1 rounded-xl border text-sm font-semibold transition ${selectedChildFilter === childKey ? 'bg-slate-800 text-white border-slate-800' : 'bg-white text-slate-700 border-slate-300 hover:bg-slate-50'}`}
             >
               {baseChildrenConfig[childKey].name}
             </button>
           ))}
+          <button
+            type="button"
+            onClick={() => setShowRecurringOnly((prev) => !prev)}
+            className={`px-3 py-1 rounded-xl border text-sm font-semibold transition ${showRecurringOnly ? 'bg-blue-600 text-white border-blue-600' : 'bg-white text-slate-700 border-slate-300 hover:bg-slate-50'}`}
+          >
+            {showRecurringOnly ? 'מציג רק קבועים' : 'הצג רק קבועים'}
+          </button>
         </div>
-
-        <button
-          type="button"
-          onClick={() => setShowRecurringOnly((prev) => !prev)}
-          className={`px-4 py-2 rounded-xl border text-sm font-semibold transition ${showRecurringOnly ? 'bg-blue-600 text-white border-blue-600' : 'bg-white text-slate-700 border-slate-300 hover:bg-slate-50'}`}
-        >
-          {showRecurringOnly ? 'מציג רק קבועים' : 'הצג רק קבועים'}
-        </button>
       </div>
 
-      <div className="max-w-6xl mx-auto mb-3 print:hidden">
+      <div className="max-w-6xl mx-auto mb-1 print:hidden">
         <h2 className="text-base font-bold text-slate-700">Weekly View</h2>
       </div>
 
@@ -2440,26 +2437,26 @@ export default function FamilyScheduler() {
       </div>
 
       {showSettingsModal && (
-        <div className="fixed inset-0 z-50 bg-black/35 backdrop-blur-[1px] flex items-center justify-center p-4 print:hidden">
-          <div className="w-full max-w-lg bg-white rounded-2xl shadow-2xl border border-slate-200 p-5 space-y-4">
-            <div className="flex justify-between items-center">
+        <div className="fixed inset-0 z-50 bg-black/35 backdrop-blur-[1px] flex items-start sm:items-center justify-center p-3 pt-6 print:hidden">
+          <div className="w-full max-w-lg max-h-[90vh] overflow-y-auto bg-white rounded-2xl shadow-2xl border border-slate-200 p-4 space-y-3">
+            <div className="sticky top-0 z-10 bg-white flex justify-between items-center border-b border-slate-200 pb-2">
               <h3 className="text-lg font-bold text-slate-800">הגדרות</h3>
               <button
                 type="button"
                 onClick={() => setShowSettingsModal(false)}
-                className="text-slate-500 hover:text-slate-700"
+                className="h-8 w-8 rounded-full bg-slate-100 text-slate-700 hover:bg-slate-200 flex items-center justify-center"
                 aria-label="סגור"
               >
                 <X size={18} />
               </button>
             </div>
 
-            <div className="space-y-2">
+            <div className="space-y-1.5">
               {isInstallReady && (
                 <button
                   type="button"
                   onClick={() => { void installApp(); }}
-                  className="w-full flex items-center justify-center gap-2 bg-amber-50 text-amber-800 border border-amber-200 px-4 py-2 rounded-lg hover:bg-amber-100 transition"
+                  className="w-full flex items-center justify-center gap-2 bg-amber-50 text-amber-800 border border-amber-200 px-4 py-1.5 rounded-lg hover:bg-amber-100 transition"
                 >
                   התקן אפליקציה
                 </button>
@@ -2471,7 +2468,7 @@ export default function FamilyScheduler() {
                   void openPushIdentityPrompt();
                 }}
                 disabled={pushBusy}
-                className="w-full flex items-center justify-center gap-2 bg-blue-50 text-blue-700 border border-blue-200 px-4 py-2 rounded-lg hover:bg-blue-100 transition disabled:opacity-60 disabled:cursor-not-allowed"
+                className="w-full flex items-center justify-center gap-2 bg-blue-50 text-blue-700 border border-blue-200 px-4 py-1.5 rounded-lg hover:bg-blue-100 transition disabled:opacity-60 disabled:cursor-not-allowed"
               >
                 {pushEnabled ? 'התראות פעילות' : (pushBusy ? 'מפעיל התראות...' : 'הפעל התראות')}
               </button>
@@ -2479,28 +2476,28 @@ export default function FamilyScheduler() {
                 type="button"
                 onClick={() => { void sendTestPushNotification(); }}
                 disabled={!pushEnabled || pushBusy || pushTestBusy}
-                className="w-full flex items-center justify-center gap-2 bg-indigo-50 text-indigo-700 border border-indigo-200 px-4 py-2 rounded-lg hover:bg-indigo-100 transition disabled:opacity-60 disabled:cursor-not-allowed"
+                className="w-full flex items-center justify-center gap-2 bg-indigo-50 text-indigo-700 border border-indigo-200 px-4 py-1.5 rounded-lg hover:bg-indigo-100 transition disabled:opacity-60 disabled:cursor-not-allowed"
               >
                 {pushTestBusy ? 'שולח התראה...' : 'שלח התראת ניסיון'}
               </button>
               <button
                 type="button"
                 onClick={() => { void handleClearAll(); }}
-                className="w-full flex items-center justify-center gap-2 bg-red-50 text-red-700 border border-red-200 px-4 py-2 rounded-lg hover:bg-red-100 transition"
+                className="w-full flex items-center justify-center gap-2 bg-red-50 text-red-700 border border-red-200 px-4 py-1.5 rounded-lg hover:bg-red-100 transition"
               >
                 Clear All
               </button>
               <button
                 type="button"
                 onClick={() => window.print()}
-                className="w-full flex items-center justify-center gap-2 bg-white border border-slate-200 px-4 py-2 rounded-lg hover:bg-slate-50 transition"
+                className="w-full flex items-center justify-center gap-2 bg-white border border-slate-200 px-4 py-1.5 rounded-lg hover:bg-slate-50 transition"
               >
                 <Printer size={18} /> הדפסה
               </button>
               <button
                 type="button"
                 onClick={exportAsImage}
-                className="w-full flex items-center justify-center gap-2 bg-slate-800 text-white px-4 py-2 rounded-lg hover:bg-slate-700 transition"
+                className="w-full flex items-center justify-center gap-2 bg-slate-800 text-white px-4 py-1.5 rounded-lg hover:bg-slate-700 transition"
               >
                 <ImageIcon size={18} /> תמונה לוואטסאפ
               </button>
@@ -2511,13 +2508,13 @@ export default function FamilyScheduler() {
               )}
             </div>
 
-            <div className="space-y-3 border border-slate-200 rounded-xl p-3 bg-slate-50">
+            <div className="space-y-2 border border-slate-200 rounded-xl p-2.5 bg-slate-50">
               <div>
                 <div className="text-xs text-slate-500 mb-1">זמן התראה לפני אירוע</div>
                 <select
                   value={reminderLeadMinutes}
                   onChange={(event) => setReminderLeadMinutes(sanitizeReminderLead(event.target.value))}
-                  className="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm text-slate-700 outline-none focus:border-blue-400"
+                  className="w-full rounded-xl border border-slate-300 px-3 py-1.5 text-sm text-slate-700 outline-none focus:border-blue-400"
                 >
                   {reminderLeadOptions.map((minutes) => (
                     <option key={`settings-lead-${minutes}`} value={minutes}>{minutes} דקות לפני</option>
@@ -2533,7 +2530,7 @@ export default function FamilyScheduler() {
                     setPushSound(sanitizePushSound(event.target.value));
                     setCustomSoundData('');
                   }}
-                  className="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm text-slate-700 outline-none focus:border-blue-400"
+                  className="w-full rounded-xl border border-slate-300 px-3 py-1.5 text-sm text-slate-700 outline-none focus:border-blue-400"
                 >
                   {pushSoundOptions.map((option) => (
                     <option key={`settings-sound-${option.value}`} value={option.value}>{option.label}</option>
@@ -2551,7 +2548,7 @@ export default function FamilyScheduler() {
                       setCustomSoundData('');
                     }
                   }}
-                  className="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm text-slate-700 outline-none focus:border-blue-400"
+                  className="w-full rounded-xl border border-slate-300 px-3 py-1.5 text-sm text-slate-700 outline-none focus:border-blue-400"
                   placeholder="https://example.com/alert.mp3"
                 />
               </div>
@@ -2562,7 +2559,7 @@ export default function FamilyScheduler() {
                   type="file"
                   accept="audio/*"
                   onChange={handleCustomSoundFileSelect}
-                  className="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm text-slate-700"
+                  className="w-full rounded-xl border border-slate-300 px-3 py-1.5 text-sm text-slate-700"
                 />
               </div>
 
