@@ -14,6 +14,7 @@ export async function POST(request: NextRequest) {
     const subscription = body?.subscription;
     const userName = typeof body?.userName === "string" ? body.userName : "";
     const receiveAll = Boolean(body?.receiveAll);
+    const reminderLeadMinutes = Number(body?.reminderLeadMinutes);
     const watchChildren = Array.isArray(body?.watchChildren)
       ? body.watchChildren.filter((value: unknown): value is string => typeof value === "string")
       : [];
@@ -23,6 +24,7 @@ export async function POST(request: NextRequest) {
       userName,
       receiveAll,
       watchChildren,
+      reminderLeadMinutes,
     });
     return NextResponse.json({ ok: true, endpoint: saved.endpoint });
   } catch (error) {

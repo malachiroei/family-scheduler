@@ -19,6 +19,7 @@ type SubscriptionRow = {
   user_name: string | null;
   receive_all: boolean | null;
   watch_children: string | null;
+  reminder_lead_minutes: number | null;
 };
 
 type TaskRow = {
@@ -55,6 +56,17 @@ const childKeyToName: Record<string, ChildUserName> = {
   "רביד": "רביד",
   "עמית": "עמית",
   "אלין": "אלין",
+};
+
+const reminderLeadOptions = [5, 10, 15, 30] as const;
+type ReminderLeadMinutes = (typeof reminderLeadOptions)[number];
+const defaultReminderLeadMinutes: ReminderLeadMinutes = 10;
+
+const normalizeReminderLeadMinutes = (value: unknown): ReminderLeadMinutes => {
+  const numeric = Number(value);
+  return reminderLeadOptions.includes(numeric as ReminderLeadMinutes)
+    ? (numeric as ReminderLeadMinutes)
+    : defaultReminderLeadMinutes;
 };
 
 const isVerboseReminderLogs = process.env.PUSH_REMINDER_VERBOSE === "1";
@@ -111,6 +123,7 @@ export const ensurePushTables = async () => {
   await sql`ALTER TABLE push_subscriptions ADD COLUMN IF NOT EXISTS user_name TEXT`;
   await sql`ALTER TABLE push_subscriptions ADD COLUMN IF NOT EXISTS receive_all BOOLEAN NOT NULL DEFAULT FALSE`;
   await sql`ALTER TABLE push_subscriptions ADD COLUMN IF NOT EXISTS watch_children TEXT`;
+  await sql`ALTER TABLE push_subscriptions ADD COLUMN IF NOT EXISTS reminder_lead_minutes INT NOT NULL DEFAULT 10`;
 
   await sql`
     CREATE TABLE IF NOT EXISTS push_reminder_dispatches (
@@ -154,14 +167,15 @@ export const savePushSubscription = async (subscription: unknown) => {
 
   const isParent = userName ? parentNameSet.has(userName) : false;
   const receiveAll = isParent ? receiveAllRaw : false;
+  const reminderLeadMinutes = normalizeReminderLeadMinutes(meta.reminderLeadMinutes);
   const normalizedWatchChildren = isParent && !receiveAll
     ? [...new Set(watchChildren)]
     : null;
   const watchChildrenValue = normalizedWatchChildren ? normalizedWatchChildren.join(",") : null;
 
   await sql`
-    INSERT INTO push_subscriptions (endpoint, p256dh, auth, user_name, receive_all, watch_children, created_at, updated_at)
-    VALUES (${endpoint}, ${p256dh}, ${auth}, ${userName}, ${receiveAll}, ${watchChildrenValue}, NOW(), NOW())
+    INSERT INTO push_subscriptions (endpoint, p256dh, auth, user_name, receive_all, watch_children, reminder_lead_minutes, created_at, updated_at)
+    VALUES (${endpoint}, ${p256dh}, ${auth}, ${userName}, ${receiveAll}, ${watchChildrenValue}, ${reminderLeadMinutes}, NOW(), NOW())
     ON CONFLICT (endpoint)
     DO UPDATE SET
       p256dh = EXCLUDED.p256dh,
@@ -169,6 +183,7 @@ export const savePushSubscription = async (subscription: unknown) => {
       user_name = EXCLUDED.user_name,
       receive_all = EXCLUDED.receive_all,
       watch_children = EXCLUDED.watch_children,
+      reminder_lead_minutes = EXCLUDED.reminder_lead_minutes,
       updated_at = NOW()
   `;
 
@@ -236,7 +251,7 @@ export const sendPushToAll = async (
   await ensurePushTables();
 
   const rowsResult = await sql<SubscriptionRow>`
-    SELECT endpoint, p256dh, auth, user_name, receive_all, watch_children
+    SELECT endpoint, p256dh, auth, user_name, receive_all, watch_children, reminder_lead_minutes
     FROM push_subscriptions
   `;
 
@@ -265,7 +280,7 @@ export const sendPushToParents = async (
   await ensurePushTables();
 
   const rowsResult = await sql<SubscriptionRow>`
-    SELECT endpoint, p256dh, auth, user_name, receive_all, watch_children
+    SELECT endpoint, p256dh, auth, user_name, receive_all, watch_children, reminder_lead_minutes
     FROM push_subscriptions
   `;
 
@@ -454,7 +469,7 @@ export const sendUpcomingTaskReminders = async () => {
   }
 
   const subscriptionsResult = await sql<SubscriptionRow>`
-    SELECT endpoint, p256dh, auth, user_name, receive_all, watch_children
+    SELECT endpoint, p256dh, auth, user_name, receive_all, watch_children, reminder_lead_minutes
     FROM push_subscriptions
   `;
 
@@ -491,6 +506,7 @@ export const sendUpcomingTaskReminders = async () => {
     date_mismatch: 0,
     invalid_time: 0,
     outside_window: 0,
+    offset_not_due: 0,
     already_dispatched: 0,
     no_audience_subscriptions: 0,
     delivery_failed: 0,
@@ -530,16 +546,9 @@ export const sendUpcomingTaskReminders = async () => {
     }
 
     const diffMinutes = taskMinutes - nowMinutes;
-    if (diffMinutes < 0 || diffMinutes > 15) {
+    if (diffMinutes < 0 || diffMinutes > 30) {
       skippedByReason.outside_window += 1;
       debugReminderLog("skip outside_window", { taskId: task.id, diffMinutes, taskTime: task.time, nowMinutes });
-      continue;
-    }
-
-    const dispatchKey = `${task.id}:${toDateKey(taskDate)}:${task.time}`;
-    if (await wasReminderDispatched(dispatchKey)) {
-      skippedByReason.already_dispatched += 1;
-      debugReminderLog("skip already_dispatched", { taskId: task.id, dispatchKey });
       continue;
     }
 
@@ -555,29 +564,48 @@ export const sendUpcomingTaskReminders = async () => {
     }
 
     let deliveredForTask = 0;
+    let hadDueByOffset = false;
+    const defaultChildName = audienceChildren[0] || "הילד";
     for (const subscription of targetSubscriptions) {
+      const reminderLeadMinutes = normalizeReminderLeadMinutes(subscription.reminder_lead_minutes);
+      if (diffMinutes !== reminderLeadMinutes) {
+        continue;
+      }
+
+      hadDueByOffset = true;
+      const dispatchKey = `${task.id}:${toDateKey(taskDate)}:${task.time}:${reminderLeadMinutes}:${subscription.endpoint}`;
+      if (await wasReminderDispatched(dispatchKey)) {
+        skippedByReason.already_dispatched += 1;
+        debugReminderLog("skip already_dispatched", { taskId: task.id, dispatchKey });
+        continue;
+      }
+
       const childSubscriptionName = (subscription.user_name || "").trim();
-      const childDisplayName = isChildUserName(childSubscriptionName) ? childSubscriptionName : "";
+      const childDisplayName = isChildUserName(childSubscriptionName) ? childSubscriptionName : defaultChildName;
       const sendResult = await sendToSubscription(subscription, {
         title: "תזכורת למשימה",
         body: `${task.text} מתחילה ב-${diffMinutes} דקות (${task.time})`,
         url: "/",
-        confirmTask: childDisplayName && Boolean(task.needs_ack ?? task.require_confirmation)
-          ? {
-              eventId: String(task.id),
-              eventTitle: String(task.text || "משימה"),
-              childName: childDisplayName,
-            }
-          : undefined,
+        confirmTask: {
+          eventId: String(task.id),
+          eventTitle: String(task.text || "משימה"),
+          childName: childDisplayName,
+        },
       });
 
       if (sendResult.ok) {
+        await markReminderDispatched(dispatchKey);
         deliveredForTask += 1;
       }
     }
 
+    if (!hadDueByOffset) {
+      skippedByReason.offset_not_due += 1;
+      debugReminderLog("skip offset_not_due", { taskId: task.id, diffMinutes, audienceSubscriptions: targetSubscriptions.length });
+      continue;
+    }
+
     if (deliveredForTask > 0) {
-      await markReminderDispatched(dispatchKey);
       sent += deliveredForTask;
       debugReminderLog("sent", { taskId: task.id, deliveredForTask, diffMinutes, audienceChildren });
     } else {

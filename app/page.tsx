@@ -1491,6 +1491,7 @@ export default function FamilyScheduler() {
         userName: pushUserName,
         receiveAll,
         watchChildren,
+        reminderLeadMinutes,
       }),
     });
 
