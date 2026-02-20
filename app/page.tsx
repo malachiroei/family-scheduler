@@ -481,7 +481,7 @@ const parseComplexWhatsAppMessage = (
   }
 
   const parseBulkScheduleLines = (rawText: string): { targetWeekStart: Date; events: AiEvent[] } | null => {
-    const nextWeekStart = addDays(getWeekStart(new Date()), 7);
+    const targetWeekStart = getWeekStart(weekStart);
     const lines = rawText
       .split(/\r?\n|•|\u2022|\||;|,/)
       .map((line) => line.trim())
@@ -511,7 +511,7 @@ const parseComplexWhatsAppMessage = (
           return;
         }
 
-        const targetDate = addDays(nextWeekStart, dayIndex);
+        const targetDate = addDays(targetWeekStart, dayIndex);
         const key = `${dayIndex}|${normalizedTime}|אימון`;
         if (seen.has(key)) {
           return;
@@ -530,7 +530,7 @@ const parseComplexWhatsAppMessage = (
     }
 
     if (events.length >= 2) {
-      return { targetWeekStart: nextWeekStart, events };
+      return { targetWeekStart, events };
     }
 
     for (const line of lines) {
@@ -551,7 +551,7 @@ const parseComplexWhatsAppMessage = (
         ? 'אימון'
         : (/^אימון\b/.test(titleTail) ? titleTail : `אימון ${titleTail}`);
 
-      const targetDate = addDays(nextWeekStart, dayIndex);
+      const targetDate = addDays(targetWeekStart, dayIndex);
       const key = `${dayIndex}|${normalizedTime}|${resolvedTitle}`;
       if (seen.has(key)) {
         continue;
@@ -572,7 +572,7 @@ const parseComplexWhatsAppMessage = (
       return null;
     }
 
-    return { targetWeekStart: nextWeekStart, events };
+    return { targetWeekStart, events };
   };
 
   const bulkResult = parseBulkScheduleLines(text);
@@ -636,9 +636,10 @@ const parseComplexWhatsAppMessage = (
     }
     seen.add(key);
 
+    const activeWeekStart = getWeekStart(weekStart);
     events.push({
       dayIndex: currentDayIndex,
-      date: toIsoDate(hasToday ? new Date() : getNextOccurrenceDate(currentDayIndex, new Date())),
+      date: toIsoDate(hasToday ? new Date() : addDays(activeWeekStart, currentDayIndex)),
       time: chosenTime,
       child: inferredChild,
       title: description,
@@ -711,6 +712,14 @@ const createEvent = (payload: Omit<SchedulerEvent, 'id'>): SchedulerEvent => ({
   id: generateId(),
   ...payload,
 });
+
+const resolveTargetWeekStartFromEvents = (events: AiEvent[], fallbackWeekStart: Date) => {
+  const firstValidDate = events
+    .map((event) => (event.date ? parseEventDateKey(event.date) : null))
+    .find((date): date is Date => Boolean(date && !Number.isNaN(date.getTime())));
+
+  return firstValidDate ? getWeekStart(firstValidDate) : getWeekStart(fallbackWeekStart);
+};
 
 const delay = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
@@ -2063,9 +2072,6 @@ export default function FamilyScheduler() {
   const hardRefreshScheduleAfterSuccess = async (targetWeekStart: Date) => {
     await mutateSchedule('/api/schedule', targetWeekStart);
     router.refresh();
-    if (typeof window !== 'undefined') {
-      window.location.reload();
-    }
   };
 
   const handleClearAll = async () => {
@@ -2117,6 +2123,7 @@ export default function FamilyScheduler() {
 
   const persistAiEventsToDatabase = async (events: AiEvent[], targetWeekStart: Date) => {
     setDbSyncStatus({ state: 'saving', message: 'Saving AI events...' });
+    const resolvedTargetWeekStart = resolveTargetWeekStartFromEvents(events, targetWeekStart);
     await Promise.all(events.map(async (eventData) => {
       const normalizedChild = normalizeChildKey(String(eventData.child));
       if (!normalizedChild || eventData.dayIndex < 0 || eventData.dayIndex > 6) {
@@ -2124,7 +2131,7 @@ export default function FamilyScheduler() {
       }
 
       const parsedEventDate = eventData.date ? parseEventDateKey(eventData.date) : null;
-      const resolvedEventDate = parsedEventDate ?? addDays(targetWeekStart, eventData.dayIndex);
+      const resolvedEventDate = parsedEventDate ?? addDays(resolvedTargetWeekStart, eventData.dayIndex);
       const eventDate = toEventDateKey(resolvedEventDate);
       const recurringTemplateId = eventData.recurringWeekly ? generateId() : undefined;
       const event: SchedulerEvent = {
@@ -2144,9 +2151,9 @@ export default function FamilyScheduler() {
       await upsertEventToDatabase(event, eventData.dayIndex);
     }));
 
-    setWeekStart(targetWeekStart);
-    await refetchEventsFromDatabase(targetWeekStart);
-    await mutateSchedule('/api/schedule', targetWeekStart);
+    setWeekStart(resolvedTargetWeekStart);
+    await refetchEventsFromDatabase(resolvedTargetWeekStart);
+    await mutateSchedule('/api/schedule', resolvedTargetWeekStart);
     router.refresh();
     setDbSyncStatus({ state: 'saved', message: 'Saved' });
   };
