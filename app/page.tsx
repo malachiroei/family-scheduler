@@ -459,16 +459,55 @@ const parseComplexWhatsAppMessage = (
   const parseBulkScheduleLines = (rawText: string): { targetWeekStart: Date; events: AiEvent[] } | null => {
     const nextWeekStart = addDays(getWeekStart(new Date()), 7);
     const lines = rawText
-      .split(/\r?\n|•|\u2022|\||;|,/) 
+      .split(/\r?\n|•|\u2022|\||;|,/)
       .map((line) => line.trim())
       .filter(Boolean);
 
-    if (lines.length < 2) {
-      return null;
-    }
-
     const events: AiEvent[] = [];
     const seen = new Set<string>();
+
+    const pairRegex = /(?:^|\s)(?:יום\s+)?(ראשון|שני|שלישי|רביעי|חמישי|שישי|שבת)\b[^\d]*(\d{1,2}:\d{2}|\d{3,4})/g;
+    const dayToIndex: Record<string, number> = {
+      ראשון: 0,
+      שני: 1,
+      שלישי: 2,
+      רביעי: 3,
+      חמישי: 4,
+      שישי: 5,
+      שבת: 6,
+    };
+
+    const directPairs = [...rawText.matchAll(pairRegex)];
+    if (directPairs.length >= 2) {
+      directPairs.forEach((match) => {
+        const dayWord = (match[1] || '').trim();
+        const dayIndex = Object.prototype.hasOwnProperty.call(dayToIndex, dayWord) ? dayToIndex[dayWord] : null;
+        const normalizedTime = normalizeLooseClock((match[2] || '').trim());
+        if (dayIndex === null || !normalizedTime) {
+          return;
+        }
+
+        const targetDate = addDays(nextWeekStart, dayIndex);
+        const key = `${dayIndex}|${normalizedTime}|אימון`;
+        if (seen.has(key)) {
+          return;
+        }
+        seen.add(key);
+
+        events.push({
+          dayIndex,
+          date: toIsoDate(targetDate),
+          time: normalizedTime,
+          child: 'amit',
+          title: 'אימון',
+          type: 'gym',
+        });
+      });
+    }
+
+    if (events.length >= 2) {
+      return { targetWeekStart: nextWeekStart, events };
+    }
 
     for (const line of lines) {
       const dayIndex = getDayIndexFromText(line);
@@ -2335,17 +2374,17 @@ export default function FamilyScheduler() {
   };
 
   return (
-    <div className="print-scheduler-shell h-screen overflow-y-auto bg-[#f8fafc] p-3 pb-20 md:p-4 md:pb-24 dir-rtl" dir="rtl">
+    <div className="print-scheduler-shell h-screen overflow-y-auto bg-[#f8fafc] px-3 pt-6 pb-20 md:px-4 md:pt-6 md:pb-24 dir-rtl" dir="rtl">
       <button
         type="button"
         onClick={() => setShowSettingsModal(true)}
-        className="fixed top-2 left-2 md:top-3 md:left-3 z-40 h-10 w-10 rounded-full bg-slate-800 text-white shadow-lg hover:bg-slate-700 transition print:hidden flex items-center justify-center"
+        className="fixed top-4 left-4 md:top-5 md:left-5 z-40 h-10 w-10 rounded-full bg-slate-800 text-white shadow-lg hover:bg-slate-700 transition print:hidden flex items-center justify-center"
         aria-label="פתח הגדרות"
       >
         <Settings size={18} />
       </button>
 
-      <div className="max-w-6xl mx-auto mb-2 flex items-center justify-between gap-2 bg-white border border-slate-200 rounded-2xl p-2 shadow-sm print:hidden">
+      <div className="max-w-6xl mx-auto mb-3 flex items-center justify-center gap-2 bg-white/95 border border-slate-200 rounded-2xl px-3 py-2 shadow-md print:hidden w-fit">
         <button
           onClick={() => shiftWeek(1)}
           className="flex items-center gap-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 px-3 py-1.5 rounded-xl transition text-sm"
@@ -2362,12 +2401,11 @@ export default function FamilyScheduler() {
       </div>
 
       <div className="max-w-6xl mx-auto mb-2 bg-white border border-slate-200 rounded-2xl p-2 shadow-sm print:hidden space-y-2">
-        <div className="flex flex-wrap items-center gap-1.5">
-          <span className="text-xs font-semibold text-slate-500">תרשים:</span>
+        <div className="rounded-2xl bg-slate-50 border border-slate-200 p-2 flex flex-wrap items-center justify-center gap-2">
           {(Object.keys(baseChildrenConfig) as BaseChildKey[]).map((childKey) => {
             const config = baseChildrenConfig[childKey];
             return (
-              <div key={childKey} className="flex items-center gap-1.5 bg-slate-50 border border-slate-200 rounded-xl px-2.5 py-1.5">
+              <div key={childKey} className="flex items-center gap-1.5 bg-white border border-slate-200 rounded-xl px-3 py-2 shadow-sm hover:bg-slate-50 transition">
                 <span className={`w-3 h-3 rounded-full ${config.color}`} />
                 <span className="text-sm font-bold text-slate-700">{config.name}</span>
               </div>
