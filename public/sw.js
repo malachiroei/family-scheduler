@@ -127,9 +127,9 @@ self.addEventListener('push', (event) => {
     icon: '/icon-512.png',
     badge: '/icon-512.png',
     vibrate: [200, 100, 200],
-    actions: payload.confirmTask
-      ? [{ action: 'confirm', title: 'אישרתי שראיתי' }]
-      : [],
+    actions: Array.isArray(payload.actions)
+      ? payload.actions
+      : (payload.confirmTask ? [{ action: 'confirm', title: 'אישרתי שראיתי' }] : []),
     data: {
       url: payload.url || '/',
       sound,

@@ -4,6 +4,7 @@ import { sendUpcomingTaskReminders } from "@/app/lib/push";
 const isAuthorizedCron = (request: NextRequest) => {
   const expected = process.env.CRON_SECRET?.trim();
   if (!expected) {
+    console.warn("[NOTIFICATIONS_CHECK] CRON_SECRET is not configured; allowing request");
     return true;
   }
 
@@ -19,6 +20,7 @@ const runCheck = async (request: NextRequest) => {
 
   try {
     const result = await sendUpcomingTaskReminders();
+    console.log("[NOTIFICATIONS_CHECK] cron result", result);
     return NextResponse.json({ ok: true, ...result });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Failed to check notifications";

@@ -5,6 +5,7 @@ type PushPayload = {
   title: string;
   body: string;
   url?: string;
+  actions?: Array<{ action: string; title: string }>;
   confirmTask?: {
     eventId: string;
     eventTitle: string;
@@ -493,6 +494,9 @@ export const sendUpcomingTaskReminders = async () => {
       COALESCE(require_confirmation, FALSE) AS require_confirmation,
       COALESCE(needs_ack, require_confirmation, FALSE) AS needs_ack
     FROM family_schedule
+    WHERE COALESCE(event_date, day) = ${nowDateKey}
+      AND COALESCE(send_notification, TRUE) = TRUE
+      AND COALESCE(completed, FALSE) = FALSE
   `;
 
   const { dateKey: nowDateKey, minutes: nowMinutes } = getNowInReminderTimezone();
@@ -586,6 +590,7 @@ export const sendUpcomingTaskReminders = async () => {
         title: "תזכורת למשימה",
         body: `${task.text} מתחילה ב-${diffMinutes} דקות (${task.time})`,
         url: "/",
+        actions: [{ action: "confirm", title: "אישרתי שראיתי" }],
         confirmTask: {
           eventId: String(task.id),
           eventTitle: String(task.text || "משימה"),
