@@ -186,58 +186,112 @@ const ensureFamilyScheduleTable = async () => {
   }
 };
 
-const tryParseJsonBody = async (request: NextRequest) => {
-  const rawBody = await request.text();
-  if (!rawBody.trim()) {
-    return { ok: true as const, data: {} as Record<string, unknown> };
+const createId = () => (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+  ? crypto.randomUUID()
+  : `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`);
+
+const normalizeClock = (value: string) => {
+  const trimmed = value.trim();
+  const hhmm = trimmed.match(/^(\d{1,2}):(\d{2})$/);
+  if (hhmm) {
+    const hours = Number(hhmm[1]);
+    const minutes = Number(hhmm[2]);
+    if (hours >= 0 && hours <= 23 && minutes >= 0 && minutes <= 59) {
+      return `${`${hours}`.padStart(2, "0")}:${`${minutes}`.padStart(2, "0")}`;
+    }
   }
 
+  const compact = trimmed.match(/^(\d{3,4})$/);
+  if (compact) {
+    const raw = compact[1].padStart(4, "0");
+    const hours = Number(raw.slice(0, 2));
+    const minutes = Number(raw.slice(2));
+    if (hours >= 0 && hours <= 23 && minutes >= 0 && minutes <= 59) {
+      return `${`${hours}`.padStart(2, "0")}:${`${minutes}`.padStart(2, "0")}`;
+    }
+  }
+
+  return null;
+};
+
+const tryParseJsonBody = async (request: NextRequest) => {
   try {
+    const rawBody = await request.text();
+    if (!rawBody || !rawBody.trim()) {
+      return { ok: true as const, data: {} as Record<string, unknown> };
+    }
+
     const parsed = JSON.parse(rawBody);
     if (!parsed || typeof parsed !== "object") {
       return { ok: true as const, data: {} as Record<string, unknown> };
     }
+
     return { ok: true as const, data: parsed as Record<string, unknown> };
   } catch (error) {
     return { ok: false as const, error };
   }
 };
 
-const sanitizeDbEvent = (value: unknown) => {
-  if (!value || typeof value !== "object") {
+const sanitizeDbEvent = (event: unknown) => {
+  if (!event || typeof event !== "object") {
     return null;
   }
 
-  const payload = value as Record<string, unknown>;
-  const eventId = typeof payload.id === "string" ? payload.id.trim() : "";
-  const date = typeof payload.date === "string" ? payload.date.trim() : "";
-  const dayIndex = Number(payload.dayIndex);
-  const time = typeof payload.time === "string" ? payload.time.trim() : "";
-  const child = typeof payload.child === "string" ? payload.child : "";
-  const title = typeof payload.title === "string" ? payload.title.trim() : "";
-  const type = typeof payload.type === "string" ? payload.type.trim() : "";
-  const isRecurring = parseBooleanValue(payload.isRecurring);
-  const recurringTemplateId = typeof payload.recurringTemplateId === "string"
-    ? payload.recurringTemplateId.trim()
-    : null;
-  const completed = parseBooleanValue(payload.completed);
-  const sendNotification = payload.sendNotification === undefined
-    ? true
-    : parseBooleanValue(payload.sendNotification);
-  const requireConfirmation = parseBooleanValue(payload.requireConfirmation);
-  const needsAck = payload.needsAck === undefined
-    ? requireConfirmation
-    : parseBooleanValue(payload.needsAck);
-  const userId = typeof payload.userId === "string" && payload.userId.trim()
-    ? payload.userId.trim()
-    : "system";
+  const candidate = event as Record<string, unknown>;
+  const eventId = typeof candidate.id === "string" && candidate.id.trim()
+    ? candidate.id.trim()
+    : (typeof candidate.eventId === "string" && candidate.eventId.trim() ? candidate.eventId.trim() : createId());
+
+  const dateRaw = typeof candidate.date === "string"
+    ? candidate.date.trim()
+    : (typeof candidate.day === "string"
+      ? candidate.day.trim()
+      : (typeof candidate.event_date === "string"
+        ? candidate.event_date.trim()
+        : (typeof candidate.eventDate === "string" ? candidate.eventDate.trim() : "")));
+
+  const dayIndexRaw = Number(
+    candidate.dayIndex ?? candidate.day_index ?? (typeof dateRaw === "string" && dateRaw ? toDayIndex(dateRaw, 0) : Number.NaN)
+  );
+
+  const date = dateRaw || (Number.isInteger(dayIndexRaw) ? String(dayIndexRaw) : "");
+
+  const timeRaw = typeof candidate.time === "string"
+    ? candidate.time.trim()
+    : (typeof candidate.event_time === "string"
+      ? candidate.event_time.trim()
+      : (typeof candidate.eventTime === "string" ? candidate.eventTime.trim() : ""));
+  const time = normalizeClock(timeRaw);
+
+  const child = typeof candidate.child === "string" ? candidate.child.trim().toLowerCase() : "";
+  const title = typeof candidate.title === "string"
+    ? candidate.title.trim()
+    : (typeof candidate.text === "string" ? candidate.text.trim() : "");
+  const type = typeof candidate.type === "string"
+    ? candidate.type.trim().toLowerCase()
+    : (typeof candidate.event_type === "string" ? candidate.event_type.trim().toLowerCase() : "");
+
+  const isRecurring = parseBooleanValue(candidate.isRecurring ?? candidate.is_recurring ?? candidate.is_weekly);
+  const recurringTemplateId = typeof candidate.recurringTemplateId === "string" && candidate.recurringTemplateId.trim()
+    ? candidate.recurringTemplateId.trim()
+    : (typeof candidate.recurring_template_id === "string" && candidate.recurring_template_id.trim()
+      ? candidate.recurring_template_id.trim()
+      : undefined);
+  const completed = parseBooleanValue(candidate.completed);
+  const sendNotification = parseBooleanValue(candidate.sendNotification ?? candidate.send_notification ?? true);
+  const requireConfirmation = parseBooleanValue(
+    candidate.requireConfirmation ?? candidate.require_confirmation ?? candidate.needsAck ?? candidate.needs_ack ?? false
+  );
+  const needsAck = parseBooleanValue(candidate.needsAck ?? candidate.needs_ack ?? requireConfirmation);
+  const userId = typeof candidate.userId === "string" && candidate.userId.trim()
+    ? candidate.userId.trim()
+    : (typeof candidate.user_id === "string" && candidate.user_id.trim() ? candidate.user_id.trim() : "system");
 
   if (
-    !eventId ||
     !date ||
-    !Number.isInteger(dayIndex) ||
-    dayIndex < 0 ||
-    dayIndex > 6 ||
+    !Number.isInteger(dayIndexRaw) ||
+    dayIndexRaw < 0 ||
+    dayIndexRaw > 6 ||
     !time ||
     !title ||
     !allowedScheduleChildren.includes(child as (typeof allowedScheduleChildren)[number]) ||
@@ -249,7 +303,7 @@ const sanitizeDbEvent = (value: unknown) => {
   return {
     eventId,
     date,
-    dayIndex,
+    dayIndex: dayIndexRaw,
     time,
     child,
     title,
@@ -343,40 +397,15 @@ const parseBulkEventsFromText = (text: string) => {
     }>;
   }
 
-  const dayMatchers: Array<{ regex: RegExp; dayIndex: number }> = [
-    { regex: /(?:^|\s|ב)(?:יום\s*)?ראשון(?:\s|$)/, dayIndex: 0 },
-    { regex: /(?:^|\s|ב)(?:יום\s*)?שני(?:\s|$)/, dayIndex: 1 },
-    { regex: /(?:^|\s|ב)(?:יום\s*)?שלישי(?:\s|$)/, dayIndex: 2 },
-    { regex: /(?:^|\s|ב)(?:יום\s*)?רביעי(?:\s|$)/, dayIndex: 3 },
-    { regex: /(?:^|\s|ב)(?:יום\s*)?חמישי(?:\s|$)/, dayIndex: 4 },
-    { regex: /(?:^|\s|ב)(?:יום\s*)?שישי(?:\s|$)/, dayIndex: 5 },
-    { regex: /(?:^|\s|ב)(?:יום\s*)?שבת(?:\s|$)/, dayIndex: 6 },
-  ];
-
-  const normalizeClock = (value: string) => {
-    const hhmm = value.match(/^(\d{1,2}):(\d{2})$/);
-    if (hhmm) {
-      const hours = Number(hhmm[1]);
-      const minutes = Number(hhmm[2]);
-      if (hours >= 0 && hours <= 23 && minutes >= 0 && minutes <= 59) {
-        return `${`${hours}`.padStart(2, "0")}:${`${minutes}`.padStart(2, "0")}`;
-      }
-    }
-
-    const compact = value.match(/^(\d{3,4})$/);
-    if (compact) {
-      const raw = compact[1].padStart(4, "0");
-      const hours = Number(raw.slice(0, 2));
-      const minutes = Number(raw.slice(2));
-      if (hours >= 0 && hours <= 23 && minutes >= 0 && minutes <= 59) {
-        return `${`${hours}`.padStart(2, "0")}:${`${minutes}`.padStart(2, "0")}`;
-      }
-    }
-
-    return null;
+  const dayWordToIndex: Record<string, number> = {
+    ראשון: 0,
+    שני: 1,
+    שלישי: 2,
+    רביעי: 3,
+    חמישי: 4,
+    שישי: 5,
+    שבת: 6,
   };
-
-  const hasAmitContext = /עמית|amit|לוז\s*כדורסל|כדורסל|basketball/i.test(text);
   const fixedWeekDateByDayIndex: Record<number, string> = {
     0: "2026-02-22",
     2: "2026-02-24",
@@ -393,33 +422,43 @@ const parseBulkEventsFromText = (text: string) => {
   const seenKeys = new Set<string>();
 
   for (const line of lines) {
-    const dayMatch = dayMatchers.find((item) => item.regex.test(line));
-    const timeToken = line.match(/(\d{1,2}:\d{2}|\d{3,4})/)?.[1] || "";
-    const normalizedTime = normalizeClock(timeToken);
-    if (!dayMatch || !normalizedTime) {
+    const pairRegex = /(?:^|\s|ב)(?:יום\s*)?(ראשון|שני|שלישי|רביעי|חמישי|שישי|שבת)[^\d]*(\d{1,2}:\d{2}|\d{3,4})/g;
+    const pairMatches = [...line.matchAll(pairRegex)];
+    if (!pairMatches.length) {
       continue;
     }
 
-    const fixedDate = fixedWeekDateByDayIndex[dayMatch.dayIndex];
-    if (!fixedDate) {
-      continue;
-    }
+    for (const pairMatch of pairMatches) {
+      const dayWord = (pairMatch[1] || "").trim();
+      const dayIndex = Object.prototype.hasOwnProperty.call(dayWordToIndex, dayWord)
+        ? dayWordToIndex[dayWord]
+        : -1;
+      const normalizedTime = normalizeClock((pairMatch[2] || "").trim());
 
-    const key = `${dayMatch.dayIndex}|${normalizedTime}`;
-    if (seenKeys.has(key)) {
-      continue;
-    }
-    seenKeys.add(key);
+      if (dayIndex < 0 || !normalizedTime) {
+        continue;
+      }
 
-    const lineHasAmitContext = hasAmitContext || /עמית|amit|לוז\s*כדורסל|כדורסל|basketball/i.test(line);
-    events.push({
-      date: fixedDate,
-      dayIndex: dayMatch.dayIndex,
-      time: normalizedTime,
-      child: lineHasAmitContext ? "amit" : "amit",
-      title: "אימון",
-      type: "gym",
-    });
+      const fixedDate = fixedWeekDateByDayIndex[dayIndex];
+      if (!fixedDate) {
+        continue;
+      }
+
+      const key = `${dayIndex}|${normalizedTime}`;
+      if (seenKeys.has(key)) {
+        continue;
+      }
+      seenKeys.add(key);
+
+      events.push({
+        date: fixedDate,
+        dayIndex,
+        time: normalizedTime,
+        child: "amit",
+        title: "אימון",
+        type: "gym",
+      });
+    }
   }
 
   return events;
@@ -1037,11 +1076,13 @@ export async function POST(request: NextRequest) {
         return NextResponse.json({ error: failed.error }, { status: 500 });
       }
 
+      const successfulCount = upsertResults.filter((result) => result?.ok === true).length;
+ 
       const savedEvents = upsertResults
         .filter((result) => result?.ok === true && result?.event)
         .map((result) => result.event);
 
-      if (!savedEvents.length) {
+      if (!savedEvents.length || savedEvents.length !== successfulCount) {
         return NextResponse.json({ error: "No valid bulk events were found" }, { status: 400 });
       }
 
