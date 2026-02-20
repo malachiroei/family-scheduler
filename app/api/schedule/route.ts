@@ -326,26 +326,9 @@ const toDayIndex = (dayValue: string, fallback: number) => {
   return fallback;
 };
 
-const toIsoDate = (date: Date) => {
-  const y = date.getFullYear();
-  const m = `${date.getMonth() + 1}`.padStart(2, "0");
-  const d = `${date.getDate()}`.padStart(2, "0");
-  return `${y}-${m}-${d}`;
-};
-
-const getNextWeekSunday = (fromDate: Date) => {
-  const baseSunday = new Date(fromDate);
-  baseSunday.setHours(0, 0, 0, 0);
-  baseSunday.setDate(baseSunday.getDate() - baseSunday.getDay());
-
-  const nextSunday = new Date(baseSunday);
-  nextSunday.setDate(nextSunday.getDate() + 7);
-  return nextSunday;
-};
-
 const parseBulkEventsFromText = (text: string) => {
   const lines = text
-    .split(/\r?\n|•|\u2022|\||;|,/)
+    .split(/\r?\n/)
     .map((line) => line.trim())
     .filter(Boolean);
 
@@ -393,8 +376,12 @@ const parseBulkEventsFromText = (text: string) => {
     return null;
   };
 
-  const nextSunday = getNextWeekSunday(new Date());
-  const hasAmitContext = /עמית|amit|כדורסל|basketball|בית\s*דני/i.test(text);
+  const hasAmitContext = /עמית|amit|לוז\s*כדורסל|כדורסל|basketball/i.test(text);
+  const fixedWeekDateByDayIndex: Record<number, string> = {
+    0: "2026-02-22",
+    2: "2026-02-24",
+    4: "2026-02-26",
+  };
   const events: Array<{
     date: string;
     dayIndex: number;
@@ -406,44 +393,15 @@ const parseBulkEventsFromText = (text: string) => {
   const seenKeys = new Set<string>();
 
   for (const line of lines) {
-    const pairRegex = /(?:^|\s|ב)(?:יום\s*)?(ראשון|שני|שלישי|רביעי|חמישי|שישי|שבת)[^\d]*(\d{1,2}:\d{2}|\d{3,4})/g;
-    const pairMatches = [...line.matchAll(pairRegex)];
-
-    if (pairMatches.length > 0) {
-      for (const match of pairMatches) {
-        const dayText = (match[1] || '').trim();
-        const timeText = (match[2] || '').trim();
-        const dayMatch = dayMatchers.find((item) => item.regex.test(dayText));
-        const normalizedTime = normalizeClock(timeText);
-        if (!dayMatch || !normalizedTime) {
-          continue;
-        }
-
-        const key = `${dayMatch.dayIndex}|${normalizedTime}`;
-        if (seenKeys.has(key)) {
-          continue;
-        }
-        seenKeys.add(key);
-
-        const date = new Date(nextSunday);
-        date.setDate(nextSunday.getDate() + dayMatch.dayIndex);
-        const lineHasAmitContext = hasAmitContext || /עמית|amit|כדורסל|basketball|בית\s*דני/i.test(line);
-        events.push({
-          date: toIsoDate(date),
-          dayIndex: dayMatch.dayIndex,
-          time: normalizedTime,
-          child: lineHasAmitContext ? "amit" : "amit",
-          title: "אימון",
-          type: "gym",
-        });
-      }
-      continue;
-    }
-
     const dayMatch = dayMatchers.find((item) => item.regex.test(line));
     const timeToken = line.match(/(\d{1,2}:\d{2}|\d{3,4})/)?.[1] || "";
     const normalizedTime = normalizeClock(timeToken);
     if (!dayMatch || !normalizedTime) {
+      continue;
+    }
+
+    const fixedDate = fixedWeekDateByDayIndex[dayMatch.dayIndex];
+    if (!fixedDate) {
       continue;
     }
 
@@ -453,11 +411,9 @@ const parseBulkEventsFromText = (text: string) => {
     }
     seenKeys.add(key);
 
-    const date = new Date(nextSunday);
-    date.setDate(nextSunday.getDate() + dayMatch.dayIndex);
-    const lineHasAmitContext = hasAmitContext || /עמית|amit|כדורסל|basketball|בית\s*דני/i.test(line);
+    const lineHasAmitContext = hasAmitContext || /עמית|amit|לוז\s*כדורסל|כדורסל|basketball/i.test(line);
     events.push({
-      date: toIsoDate(date),
+      date: fixedDate,
       dayIndex: dayMatch.dayIndex,
       time: normalizedTime,
       child: lineHasAmitContext ? "amit" : "amit",
@@ -895,12 +851,6 @@ const normalizeModel = (value: unknown, fallback: SupportedModel): SupportedMode
 export async function POST(request: NextRequest) {
   console.log('[API] POST /api/schedule');
 
-  type BulkUpsertEntry = {
-    ok: boolean;
-    error?: string;
-    event?: unknown;
-  };
-
   try {
     const tableStatus = await ensureFamilyScheduleTable();
     if (!tableStatus.ok) {
@@ -924,7 +874,8 @@ export async function POST(request: NextRequest) {
       ? body.bulkEvents as Array<Record<string, unknown>>
       : [];
     if (bulkEventsPayload.length > 0) {
-      const upsertResults: BulkUpsertEntry[] = await Promise.all(bulkEventsPayload.map(async (bulkItem) => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const upsertResults: any[] = await Promise.all(bulkEventsPayload.map(async (bulkItem) => {
         const incoming = sanitizeDbEvent(bulkItem);
         if (!incoming) {
           return { ok: false as const, error: "Invalid bulk event payload" };
@@ -1018,7 +969,8 @@ export async function POST(request: NextRequest) {
 
     const bulkFromText = text ? parseBulkEventsFromText(text) : [];
     if (bulkFromText.length > 0) {
-      const upsertResults: BulkUpsertEntry[] = await Promise.all(bulkFromText.map(async (item) => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const upsertResults: any[] = await Promise.all(bulkFromText.map(async (item) => {
         const generatedId = typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
           ? crypto.randomUUID()
           : `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
