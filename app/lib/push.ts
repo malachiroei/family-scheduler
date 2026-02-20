@@ -30,6 +30,8 @@ type TaskRow = {
   type: string;
   is_weekly?: boolean;
   completed?: boolean;
+  send_notification?: boolean;
+  require_confirmation?: boolean;
 };
 
 const childUserNames = ["רביד", "עמית", "אלין"] as const;
@@ -399,6 +401,8 @@ export const sendUpcomingTaskReminders = async () => {
   await ensurePushTables();
   try {
     await sql`ALTER TABLE family_schedule ADD COLUMN IF NOT EXISTS completed BOOLEAN NOT NULL DEFAULT FALSE`;
+    await sql`ALTER TABLE family_schedule ADD COLUMN IF NOT EXISTS send_notification BOOLEAN NOT NULL DEFAULT TRUE`;
+    await sql`ALTER TABLE family_schedule ADD COLUMN IF NOT EXISTS require_confirmation BOOLEAN NOT NULL DEFAULT FALSE`;
   } catch {
     // no-op: handled by schedule bootstrap route in normal flow
   }
@@ -414,7 +418,9 @@ export const sendUpcomingTaskReminders = async () => {
   }
 
   const tasksResult = await sql<TaskRow>`
-    SELECT id, text, day, time, child, type, is_weekly, completed
+    SELECT id, text, day, time, child, type, is_weekly, completed,
+      COALESCE(send_notification, TRUE) AS send_notification,
+      COALESCE(require_confirmation, FALSE) AS require_confirmation
     FROM family_schedule
   `;
 
@@ -426,6 +432,10 @@ export const sendUpcomingTaskReminders = async () => {
 
   for (const task of tasksResult.rows) {
     if (Boolean(task.completed)) {
+      continue;
+    }
+
+    if (!Boolean(task.send_notification ?? true)) {
       continue;
     }
 
@@ -474,7 +484,7 @@ export const sendUpcomingTaskReminders = async () => {
         title: "תזכורת למשימה",
         body: `${task.text} מתחילה ב-${diffMinutes} דקות (${task.time})`,
         url: "/",
-        confirmTask: childDisplayName
+        confirmTask: childDisplayName && Boolean(task.require_confirmation)
           ? {
               eventId: String(task.id),
               eventTitle: String(task.text || "משימה"),

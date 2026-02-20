@@ -133,11 +133,19 @@ const ensureFamilyScheduleTable = async () => {
     await sql`ALTER TABLE family_schedule ADD COLUMN IF NOT EXISTS is_recurring BOOLEAN NOT NULL DEFAULT FALSE`;
     await sql`ALTER TABLE family_schedule ADD COLUMN IF NOT EXISTS recurring_template_id TEXT`;
     await sql`ALTER TABLE family_schedule ADD COLUMN IF NOT EXISTS completed BOOLEAN NOT NULL DEFAULT FALSE`;
+    await sql`ALTER TABLE family_schedule ADD COLUMN IF NOT EXISTS send_notification BOOLEAN NOT NULL DEFAULT TRUE`;
+    await sql`ALTER TABLE family_schedule ADD COLUMN IF NOT EXISTS require_confirmation BOOLEAN NOT NULL DEFAULT FALSE`;
     await sql`ALTER TABLE family_schedule ADD COLUMN IF NOT EXISTS user_id TEXT`;
     await sql`ALTER TABLE family_schedule ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()`;
     await sql`UPDATE family_schedule SET completed = FALSE WHERE completed IS NULL`;
     await sql`ALTER TABLE family_schedule ALTER COLUMN completed SET DEFAULT FALSE`;
     await sql`ALTER TABLE family_schedule ALTER COLUMN completed SET NOT NULL`;
+    await sql`UPDATE family_schedule SET send_notification = TRUE WHERE send_notification IS NULL`;
+    await sql`ALTER TABLE family_schedule ALTER COLUMN send_notification SET DEFAULT TRUE`;
+    await sql`ALTER TABLE family_schedule ALTER COLUMN send_notification SET NOT NULL`;
+    await sql`UPDATE family_schedule SET require_confirmation = FALSE WHERE require_confirmation IS NULL`;
+    await sql`ALTER TABLE family_schedule ALTER COLUMN require_confirmation SET DEFAULT FALSE`;
+    await sql`ALTER TABLE family_schedule ALTER COLUMN require_confirmation SET NOT NULL`;
     await sql`UPDATE family_schedule SET user_id = 'system' WHERE user_id IS NULL OR BTRIM(user_id) = ''`;
     await sql`ALTER TABLE family_schedule ALTER COLUMN user_id SET DEFAULT 'system'`;
     await sql`ALTER TABLE family_schedule ALTER COLUMN user_id SET NOT NULL`;
@@ -208,6 +216,10 @@ const sanitizeDbEvent = (value: unknown) => {
     ? payload.recurringTemplateId.trim()
     : null;
   const completed = parseBooleanValue(payload.completed);
+  const sendNotification = payload.sendNotification === undefined
+    ? true
+    : parseBooleanValue(payload.sendNotification);
+  const requireConfirmation = parseBooleanValue(payload.requireConfirmation);
   const userId = typeof payload.userId === "string" && payload.userId.trim()
     ? payload.userId.trim()
     : "system";
@@ -237,6 +249,8 @@ const sanitizeDbEvent = (value: unknown) => {
     isRecurring,
     recurringTemplateId,
     completed,
+    sendNotification,
+    requireConfirmation,
     userId,
   };
 };
@@ -271,6 +285,8 @@ const createIncomingFromFlatBody = (body: Record<string, unknown>) => {
     type,
     isRecurring: false,
     completed: false,
+    sendNotification: true,
+    requireConfirmation: false,
   });
 };
 
@@ -328,6 +344,8 @@ const upsertScheduleEvent = async (incoming: ReturnType<typeof sanitizeDbEvent>)
       is_recurring: incoming.isRecurring ?? false,
       recurring_template_id: incoming.recurringTemplateId ?? null,
       completed: incoming.completed ?? false,
+      send_notification: incoming.sendNotification ?? true,
+      require_confirmation: incoming.requireConfirmation ?? false,
       user_id: incoming.userId ?? "system",
     };
     console.log("Data to save:", data);
@@ -350,6 +368,8 @@ const upsertScheduleEvent = async (incoming: ReturnType<typeof sanitizeDbEvent>)
         is_recurring,
         recurring_template_id,
         completed,
+        send_notification,
+        require_confirmation,
         user_id,
         updated_at
       )
@@ -370,6 +390,8 @@ const upsertScheduleEvent = async (incoming: ReturnType<typeof sanitizeDbEvent>)
         ${data.is_recurring},
         ${data.recurring_template_id},
         ${data.completed},
+        ${data.send_notification},
+        ${data.require_confirmation},
         ${data.user_id},
         NOW()
       )
@@ -390,6 +412,8 @@ const upsertScheduleEvent = async (incoming: ReturnType<typeof sanitizeDbEvent>)
         is_recurring = EXCLUDED.is_recurring,
         recurring_template_id = EXCLUDED.recurring_template_id,
         completed = EXCLUDED.completed,
+        send_notification = EXCLUDED.send_notification,
+        require_confirmation = EXCLUDED.require_confirmation,
         user_id = EXCLUDED.user_id,
         updated_at = NOW()
       RETURNING *
@@ -419,6 +443,8 @@ const upsertScheduleEvent = async (incoming: ReturnType<typeof sanitizeDbEvent>)
           ? saved.recurring_template_id.trim()
           : undefined,
         completed: parseBooleanValue(saved.completed),
+        sendNotification: parseBooleanValue(saved.send_notification),
+        requireConfirmation: parseBooleanValue(saved.require_confirmation),
       },
     };
   } catch (error) {
@@ -456,7 +482,9 @@ export async function GET() {
         COALESCE(event_type, type) AS event_type,
         COALESCE(is_recurring, is_weekly, FALSE) AS is_recurring,
         recurring_template_id,
-        COALESCE(completed, FALSE) AS completed
+        COALESCE(completed, FALSE) AS completed,
+        COALESCE(send_notification, TRUE) AS send_notification,
+        COALESCE(require_confirmation, FALSE) AS require_confirmation
       FROM family_schedule
       ORDER BY COALESCE(event_time, time) ASC
     `;
@@ -478,6 +506,8 @@ export async function GET() {
         ? row.recurring_template_id.trim()
         : undefined,
       completed: parseBooleanValue(row.completed),
+      sendNotification: parseBooleanValue(row.send_notification),
+      requireConfirmation: parseBooleanValue(row.require_confirmation),
     }));
 
     return NextResponse.json({ events });

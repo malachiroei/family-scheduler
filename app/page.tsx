@@ -25,6 +25,8 @@ type SchedulerEvent = {
   isRecurring?: boolean;
   recurringTemplateId?: string;
   completed?: boolean;
+  sendNotification?: boolean;
+  requireConfirmation?: boolean;
 };
 
 type DaySchedule = {
@@ -52,6 +54,8 @@ type RecurringTemplate = {
   title: string;
   type: EventType;
   isRecurring?: boolean;
+  sendNotification?: boolean;
+  requireConfirmation?: boolean;
 };
 
 type NewEventDraft = {
@@ -62,6 +66,8 @@ type NewEventDraft = {
     child: ChildKey;
     title: string;
     type: EventType;
+    sendNotification: boolean;
+    requireConfirmation: boolean;
   };
 };
 
@@ -133,6 +139,8 @@ type ScheduleApiEvent = {
   isRecurring?: boolean;
   recurringTemplateId?: string;
   completed?: boolean;
+  sendNotification?: boolean;
+  requireConfirmation?: boolean;
 };
 
 type BeforeInstallPromptEvent = Event & {
@@ -201,6 +209,8 @@ const normalizeWeekEventsWithDate = (weeksData: Record<string, DaySchedule[]> | 
               date: normalizeEventDateKey(event.date, parseEventDateKey(day.isoDate) ?? new Date(`${day.isoDate}T00:00:00`)),
               isRecurring: event.isRecurring ?? Boolean(event.recurringTemplateId),
               completed: Boolean(event.completed),
+              sendNotification: event.sendNotification ?? true,
+              requireConfirmation: Boolean(event.requireConfirmation),
             }))
             .filter((event, idx, arr) => idx === arr.findIndex((candidate) => (
               candidate.id === event.id ||
@@ -716,6 +726,8 @@ const createWeekDays = (weekStart: Date, includeDemo: boolean, recurringTemplate
       date: normalizeEventDateKey(event.date, fallbackDate),
       isRecurring: event.isRecurring ?? Boolean(event.recurringTemplateId),
       completed: Boolean(event.completed),
+      sendNotification: event.sendNotification ?? true,
+      requireConfirmation: Boolean(event.requireConfirmation),
     });
   };
 
@@ -733,6 +745,8 @@ const createWeekDays = (weekStart: Date, includeDemo: boolean, recurringTemplate
       type: template.type,
       isRecurring: template.isRecurring,
       recurringTemplateId: template.templateId,
+      sendNotification: template.sendNotification,
+      requireConfirmation: template.requireConfirmation,
     });
     });
 
@@ -1480,6 +1494,8 @@ export default function FamilyScheduler() {
           title: event.title,
           type: event.type,
           isRecurring: true,
+          sendNotification: event.sendNotification ?? true,
+          requireConfirmation: Boolean(event.requireConfirmation),
         });
       }
     });
@@ -1510,6 +1526,8 @@ export default function FamilyScheduler() {
           isRecurring: false,
           recurringTemplateId: undefined,
           completed: Boolean(event.completed),
+          sendNotification: event.sendNotification ?? true,
+          requireConfirmation: Boolean(event.requireConfirmation),
         });
         weekDays[dayIndex].events = sortEvents(weekDays[dayIndex].events);
       });
@@ -1931,6 +1949,8 @@ export default function FamilyScheduler() {
         isRecurring: Boolean(eventData.recurringWeekly),
         recurringTemplateId,
         completed: false,
+        sendNotification: true,
+        requireConfirmation: false,
       };
 
       await upsertEventToDatabase(event, eventData.dayIndex);
@@ -2073,6 +2093,8 @@ export default function FamilyScheduler() {
         child: 'amit',
         title: '',
         type: 'lesson',
+        sendNotification: true,
+        requireConfirmation: false,
       },
     });
   };
@@ -2111,6 +2133,8 @@ export default function FamilyScheduler() {
       isRecurring: creatingEvent.recurringWeekly,
       recurringTemplateId,
       completed: false,
+      sendNotification: Boolean(creatingEvent.data.sendNotification),
+      requireConfirmation: Boolean(creatingEvent.data.requireConfirmation),
     };
 
     const targetWeekKey = toIsoDate(targetWeekStart);
@@ -2375,6 +2399,12 @@ export default function FamilyScheduler() {
                           <span className="text-[11px] font-bold text-emerald-700 bg-emerald-100 px-2 py-0.5 rounded-full">V</span>
                         )}
                         <span className="text-slate-700 font-semibold text-sm">{event.title}</span>
+                        {event.sendNotification !== false && (
+                          <span className="text-[10px] font-bold text-indigo-700 bg-indigo-100 px-2 py-0.5 rounded-full">התראה</span>
+                        )}
+                        {event.requireConfirmation && (
+                          <span className="text-[10px] font-bold text-amber-700 bg-amber-100 px-2 py-0.5 rounded-full">אישור ילד</span>
+                        )}
                         {(event.isRecurring || event.recurringTemplateId) && (
                           <span className="text-[10px] font-bold text-blue-700 bg-blue-100 px-2 py-0.5 rounded-full">קבוע</span>
                         )}
@@ -2802,6 +2832,28 @@ export default function FamilyScheduler() {
               פעילות שבועית חוזרת
             </label>
 
+            <div className="border border-slate-200 rounded-xl p-3 space-y-2 bg-slate-50">
+              <div className="text-xs font-bold text-slate-600">הגדרות התראה</div>
+              <label className="flex items-center gap-2 text-sm text-slate-700 font-medium">
+                <input
+                  type="checkbox"
+                  checked={Boolean(creatingEvent.data.sendNotification)}
+                  onChange={(e) => setCreatingEvent((prev) => prev ? ({ ...prev, data: { ...prev.data, sendNotification: e.target.checked } }) : prev)}
+                  className="h-4 w-4 rounded border-slate-300"
+                />
+                הפעל התראה למשימה זו
+              </label>
+              <label className="flex items-center gap-2 text-sm text-slate-700 font-medium">
+                <input
+                  type="checkbox"
+                  checked={Boolean(creatingEvent.data.requireConfirmation)}
+                  onChange={(e) => setCreatingEvent((prev) => prev ? ({ ...prev, data: { ...prev.data, requireConfirmation: e.target.checked } }) : prev)}
+                  className="h-4 w-4 rounded border-slate-300"
+                />
+                בקש אישור מהילד ושלח פוש להורים
+              </label>
+            </div>
+
             <div className="flex gap-2 justify-end pt-2">
               {dbSyncStatus.state !== 'idle' && (
                 <div className={`self-center text-xs font-semibold ${dbSyncStatus.state === 'error' ? 'text-red-600' : dbSyncStatus.state === 'saving' ? 'text-amber-600' : 'text-emerald-600'}`}>
@@ -2943,6 +2995,30 @@ export default function FamilyScheduler() {
               />
               פעילות שבועית חוזרת
             </label>
+
+            <div className="border border-slate-200 rounded-xl p-3 space-y-2 bg-slate-50">
+              <div className="text-xs font-bold text-slate-600">הגדרות התראה</div>
+              <label className="flex items-center gap-2 text-sm text-slate-700 font-medium">
+                <input
+                  type="checkbox"
+                  checked={Boolean(editingEvent.data.sendNotification)}
+                  onChange={(e) => setEditingEvent((prev) => prev ? ({ ...prev, data: { ...prev.data, sendNotification: e.target.checked } }) : prev)}
+                  disabled={Boolean(editingEvent.data.completed)}
+                  className="h-4 w-4 rounded border-slate-300"
+                />
+                הפעל התראה למשימה זו
+              </label>
+              <label className="flex items-center gap-2 text-sm text-slate-700 font-medium">
+                <input
+                  type="checkbox"
+                  checked={Boolean(editingEvent.data.requireConfirmation)}
+                  onChange={(e) => setEditingEvent((prev) => prev ? ({ ...prev, data: { ...prev.data, requireConfirmation: e.target.checked } }) : prev)}
+                  disabled={Boolean(editingEvent.data.completed)}
+                  className="h-4 w-4 rounded border-slate-300"
+                />
+                בקש אישור מהילד ושלח פוש להורים
+              </label>
+            </div>
 
             {editingEvent.data.completed && (
               <button
