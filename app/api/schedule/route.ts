@@ -600,7 +600,7 @@ const upsertScheduleEvent = async (incoming: ReturnType<typeof sanitizeDbEvent>)
       day: incoming.date,
       time: incoming.time,
       type: incoming.type,
-      child: "amit",
+      child: incoming.child,
       is_weekly: incoming.isRecurring ?? false,
       event_id: incoming.eventId,
       event_date: incoming.date,
