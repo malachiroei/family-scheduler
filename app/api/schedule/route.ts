@@ -505,7 +505,7 @@ const upsertScheduleEvent = async (incoming: ReturnType<typeof sanitizeDbEvent>)
   }
 
   try {
-    const data = {
+    const newEvent = {
       id: incoming.eventId,
       text: incoming.title,
       day: incoming.date,
@@ -527,7 +527,8 @@ const upsertScheduleEvent = async (incoming: ReturnType<typeof sanitizeDbEvent>)
       needs_ack: incoming.needsAck ?? incoming.requireConfirmation ?? false,
       user_id: incoming.userId ?? "system",
     };
-    console.log("Data to save:", data);
+    console.log("Data to save:", newEvent);
+    console.log("Inserting event:", newEvent);
 
     const newRow = await sql`
       INSERT INTO family_schedule (
@@ -554,26 +555,26 @@ const upsertScheduleEvent = async (incoming: ReturnType<typeof sanitizeDbEvent>)
         updated_at
       )
       VALUES (
-        ${data.id},
-        ${data.text},
-        ${data.day},
-        ${data.time},
-        ${data.type},
-        ${data.child},
-        ${data.is_weekly},
-        ${data.event_id},
-        ${data.event_date},
-        ${data.day_index},
-        ${data.event_time},
-        ${data.title},
-        ${data.event_type},
-        ${data.is_recurring},
-        ${data.recurring_template_id},
-        ${data.completed},
-        ${data.send_notification},
-        ${data.require_confirmation},
-        ${data.needs_ack},
-        ${data.user_id},
+        ${newEvent.id},
+        ${newEvent.text},
+        ${newEvent.day},
+        ${newEvent.time},
+        ${newEvent.type},
+        ${newEvent.child},
+        ${newEvent.is_weekly},
+        ${newEvent.event_id},
+        ${newEvent.event_date},
+        ${newEvent.day_index},
+        ${newEvent.event_time},
+        ${newEvent.title},
+        ${newEvent.event_type},
+        ${newEvent.is_recurring},
+        ${newEvent.recurring_template_id},
+        ${newEvent.completed},
+        ${newEvent.send_notification},
+        ${newEvent.require_confirmation},
+        ${newEvent.needs_ack},
+        ${newEvent.user_id},
         NOW()
       )
       ON CONFLICT (id)
