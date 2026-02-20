@@ -471,6 +471,7 @@ const minutesFromClock = (value: string) => {
   return hours * 60 + minutes;
 };
 
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
 const parseComplexWhatsAppMessage = (
   text: string,
   weekStart: Date
@@ -2008,6 +2009,7 @@ export default function FamilyScheduler() {
     hasAutoScrolledToTodayRef.current = true;
   }, [isHydrated, weekKey, days.length]);
 
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
   const parseInstructionFallback = (text: string): { targetWeekStart: Date; events: AiEvent[] } | null => {
     const timeMatch = extractTimesFromLine(text)[0];
     const child = detectChildFromText(text);
@@ -2203,26 +2205,6 @@ export default function FamilyScheduler() {
     setApiError('');
     setSuccessMessage('');
 
-    const parsedComplex = parseComplexWhatsAppMessage(text, weekStart);
-    if (parsedComplex && !imageFile) {
-      await persistAiEventsToDatabase(parsedComplex.events, parsedComplex.targetWeekStart);
-
-      setInputText('');
-      setSuccessMessage('האירועים נוספו בהצלחה ללו״ז.');
-      await hardRefreshScheduleAfterSuccess(parsedComplex.targetWeekStart);
-      return;
-    }
-
-    const parsedFallback = parseInstructionFallback(text);
-    if (parsedFallback && !imageFile) {
-      await persistAiEventsToDatabase(parsedFallback.events, parsedFallback.targetWeekStart);
-
-      setInputText('');
-      setSuccessMessage('האירוע נוסף בהצלחה ללו״ז.');
-      await hardRefreshScheduleAfterSuccess(parsedFallback.targetWeekStart);
-      return;
-    }
-
     requestInFlightRef.current = true;
     setIsSubmitting(true);
 
@@ -2258,7 +2240,13 @@ export default function FamilyScheduler() {
       const rawEvents = payload?.events ?? payload?.event ?? [];
       const events = (Array.isArray(rawEvents) ? rawEvents : [rawEvents]) as AiEvent[];
       if (events.length) {
-        await persistAiEventsToDatabase(events, weekStart);
+        if (payload?.ok === true) {
+          const targetWeekStart = resolveTargetWeekStartFromEvents(events, weekStart);
+          setWeekStart(targetWeekStart);
+          await hardRefreshScheduleAfterSuccess(targetWeekStart);
+        } else {
+          await persistAiEventsToDatabase(events, weekStart);
+        }
         setSuccessMessage('האירועים נוספו בהצלחה ללו״ז.');
       } else {
         if (imageFile) {
