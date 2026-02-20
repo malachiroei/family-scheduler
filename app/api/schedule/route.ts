@@ -190,6 +190,41 @@ const createId = () => (typeof crypto !== "undefined" && typeof crypto.randomUUI
   ? crypto.randomUUID()
   : `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`);
 
+const fixedWeekDateByDayIndex: Partial<Record<number, string>> = {
+  0: "2026-02-22",
+  2: "2026-02-24",
+  4: "2026-02-26",
+};
+
+const toIsoDate = (value: string) => {
+  const trimmed = value.trim();
+  const yyyyMmDd = trimmed.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (yyyyMmDd) {
+    return `${yyyyMmDd[1]}-${yyyyMmDd[2]}-${yyyyMmDd[3]}`;
+  }
+
+  const ddMmYyyy = trimmed.match(/^(\d{2})-(\d{2})-(\d{4})$/);
+  if (ddMmYyyy) {
+    return `${ddMmYyyy[3]}-${ddMmYyyy[2]}-${ddMmYyyy[1]}`;
+  }
+
+  return "";
+};
+
+const normalizeDateStrict = (rawDate: string, dayIndex: number) => {
+  const fixedDate = fixedWeekDateByDayIndex[dayIndex];
+  if (fixedDate) {
+    return fixedDate;
+  }
+
+  const isoDate = toIsoDate(rawDate);
+  if (isoDate) {
+    return isoDate;
+  }
+
+  return "";
+};
+
 const normalizeClock = (value: string) => {
   const trimmed = value.trim();
   const hhmm = trimmed.match(/^(\d{1,2}):(\d{2})$/);
@@ -254,7 +289,7 @@ const sanitizeDbEvent = (event: unknown) => {
     candidate.dayIndex ?? candidate.day_index ?? (typeof dateRaw === "string" && dateRaw ? toDayIndex(dateRaw, 0) : Number.NaN)
   );
 
-  const date = dateRaw || (Number.isInteger(dayIndexRaw) ? String(dayIndexRaw) : "");
+  const date = normalizeDateStrict(dateRaw || "", dayIndexRaw);
 
   const timeRaw = typeof candidate.time === "string"
     ? candidate.time.trim()
@@ -406,11 +441,6 @@ const parseBulkEventsFromText = (text: string) => {
     שישי: 5,
     שבת: 6,
   };
-  const fixedWeekDateByDayIndex: Record<number, string> = {
-    0: "2026-02-22",
-    2: "2026-02-24",
-    4: "2026-02-26",
-  };
   const events: Array<{
     date: string;
     dayIndex: number;
@@ -481,7 +511,7 @@ const upsertScheduleEvent = async (incoming: ReturnType<typeof sanitizeDbEvent>)
       day: incoming.date,
       time: incoming.time,
       type: incoming.type,
-      child: incoming.child,
+      child: "amit",
       is_weekly: incoming.isRecurring ?? false,
       event_id: incoming.eventId,
       event_date: incoming.date,
@@ -571,6 +601,10 @@ const upsertScheduleEvent = async (incoming: ReturnType<typeof sanitizeDbEvent>)
       RETURNING *
     `;
     console.log("DB Action Success:", newRow.rowCount);
+
+    if (!newRow.rowCount || newRow.rowCount < 1) {
+      return { ok: false as const, error: "Insert did not return a positive DB response" };
+    }
 
     const saved = newRow.rows[0];
     if (!saved) {
