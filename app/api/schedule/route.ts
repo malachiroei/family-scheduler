@@ -875,17 +875,31 @@ export async function POST(request: NextRequest) {
       : [];
     if (bulkEventsPayload.length > 0) {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const upsertResults: any[] = await Promise.all(bulkEventsPayload.map(async (bulkItem) => {
-        const incoming = sanitizeDbEvent(bulkItem);
-        if (!incoming) {
-          return { ok: false as const, error: "Invalid bulk event payload" };
-        }
-        const upsertResult = await upsertScheduleEvent(incoming);
-        if (!upsertResult.ok) {
-          return { ok: false as const, error: upsertResult.error };
-        }
-        return { ok: true as const, row: upsertResult.row, event: upsertResult.event };
-      }));
+      let upsertResults: any[] = [];
+      try {
+        upsertResults = await Promise.all(bulkEventsPayload.map(async (bulkItem) => {
+          const incoming = sanitizeDbEvent(bulkItem);
+          if (!incoming) {
+            return { ok: false as const, error: "Invalid bulk event payload" };
+          }
+          const upsertResult = await upsertScheduleEvent(incoming);
+          if (!upsertResult.ok) {
+            console.error("[API] POST /api/schedule bulk upsert failed", {
+              error: upsertResult.error,
+              bulkItem,
+            });
+            return { ok: false as const, error: upsertResult.error };
+          }
+          return { ok: true as const, row: upsertResult.row, event: upsertResult.event };
+        }));
+      } catch (error) {
+        console.error("[API] POST /api/schedule bulk save crashed", {
+          error,
+          message: getErrorMessage(error),
+          bulkEventsPayload,
+        });
+        return NextResponse.json({ error: getErrorMessage(error) }, { status: 500 });
+      }
 
       if (!upsertResults || upsertResults.length === 0) {
         return NextResponse.json({ error: "Bulk upsert returned no results" }, { status: 500 });
@@ -970,34 +984,49 @@ export async function POST(request: NextRequest) {
     const bulkFromText = text ? parseBulkEventsFromText(text) : [];
     if (bulkFromText.length > 0) {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const upsertResults: any[] = await Promise.all(bulkFromText.map(async (item) => {
-        const generatedId = typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
-          ? crypto.randomUUID()
-          : `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
-        const incoming = sanitizeDbEvent({
-          id: generatedId,
-          date: item.date,
-          dayIndex: item.dayIndex,
-          time: item.time,
-          child: item.child,
-          title: item.title,
-          type: item.type,
-          isRecurring: false,
-          completed: false,
-          sendNotification: true,
-          requireConfirmation: false,
-          needsAck: false,
-        });
-        if (!incoming) {
-          return { ok: false as const, error: "Invalid bulk text event payload" };
-        }
+      let upsertResults: any[] = [];
+      try {
+        upsertResults = await Promise.all(bulkFromText.map(async (item) => {
+          const generatedId = typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+            ? crypto.randomUUID()
+            : `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+          const incoming = sanitizeDbEvent({
+            id: generatedId,
+            date: item.date,
+            dayIndex: item.dayIndex,
+            time: item.time,
+            child: item.child,
+            title: item.title,
+            type: item.type,
+            isRecurring: false,
+            completed: false,
+            sendNotification: true,
+            requireConfirmation: false,
+            needsAck: false,
+          });
+          if (!incoming) {
+            return { ok: false as const, error: "Invalid bulk text event payload" };
+          }
 
-        const upsertResult = await upsertScheduleEvent(incoming);
-        if (!upsertResult.ok) {
-          return { ok: false as const, error: upsertResult.error };
-        }
-        return { ok: true as const, row: upsertResult.row, event: upsertResult.event };
-      }));
+          const upsertResult = await upsertScheduleEvent(incoming);
+          if (!upsertResult.ok) {
+            console.error("[API] POST /api/schedule bulk-text upsert failed", {
+              error: upsertResult.error,
+              item,
+              incoming,
+            });
+            return { ok: false as const, error: upsertResult.error };
+          }
+          return { ok: true as const, row: upsertResult.row, event: upsertResult.event };
+        }));
+      } catch (error) {
+        console.error("[API] POST /api/schedule bulk-text save crashed", {
+          error,
+          message: getErrorMessage(error),
+          bulkFromText,
+        });
+        return NextResponse.json({ error: getErrorMessage(error) }, { status: 500 });
+      }
 
       if (!upsertResults || upsertResults.length === 0) {
         return NextResponse.json({ error: "Bulk text upsert returned no results" }, { status: 500 });
