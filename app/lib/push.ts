@@ -208,6 +208,7 @@ const sendToSubscription = async (row: SubscriptionRow, payload: PushPayload) =>
   }
 
   try {
+    console.log("Sending push to:", row.endpoint);
     await webpush.sendNotification(
       {
         endpoint: row.endpoint,
@@ -416,9 +417,9 @@ const toDateKey = (date: Date) => {
 
 const REMINDER_TIMEZONE = "Asia/Jerusalem";
 
-const getNowInReminderTimezone = () => {
+const getNowInReminderTimezone = (timeZone: string) => {
   const formatter = new Intl.DateTimeFormat("en-CA", {
-    timeZone: REMINDER_TIMEZONE,
+    timeZone,
     year: "numeric",
     month: "2-digit",
     day: "2-digit",
@@ -458,7 +459,12 @@ const markReminderDispatched = async (dispatchKey: string) => {
   `;
 };
 
-export const sendUpcomingTaskReminders = async () => {
+export const sendUpcomingTaskReminders = async (
+  options?: {
+    timeZone?: string;
+    toleranceMinutes?: number;
+  }
+) => {
   await ensurePushTables();
   try {
     await sql`ALTER TABLE family_schedule ADD COLUMN IF NOT EXISTS completed BOOLEAN NOT NULL DEFAULT FALSE`;
@@ -499,7 +505,13 @@ export const sendUpcomingTaskReminders = async () => {
       AND COALESCE(completed, FALSE) = FALSE
   `;
 
-  const { dateKey: nowDateKey, minutes: nowMinutes } = getNowInReminderTimezone();
+  const reminderTimeZone = options?.timeZone?.trim() || REMINDER_TIMEZONE;
+  const toleranceMinutesRaw = Number(options?.toleranceMinutes);
+  const toleranceMinutes = Number.isFinite(toleranceMinutesRaw)
+    ? Math.max(0, Math.min(5, Math.floor(toleranceMinutesRaw)))
+    : 0;
+
+  const { dateKey: nowDateKey, minutes: nowMinutes } = getNowInReminderTimezone(reminderTimeZone);
 
   let sent = 0;
   const skippedByReason: Record<string, number> = {
@@ -572,7 +584,9 @@ export const sendUpcomingTaskReminders = async () => {
     const defaultChildName = audienceChildren[0] || "הילד";
     for (const subscription of targetSubscriptions) {
       const reminderLeadMinutes = normalizeReminderLeadMinutes(subscription.reminder_lead_minutes);
-      if (diffMinutes !== reminderLeadMinutes) {
+      const minDue = Math.max(0, reminderLeadMinutes - toleranceMinutes);
+      const maxDue = reminderLeadMinutes + toleranceMinutes;
+      if (diffMinutes < minDue || diffMinutes > maxDue) {
         continue;
       }
 
@@ -620,6 +634,24 @@ export const sendUpcomingTaskReminders = async () => {
   }
 
   const scanned = tasksResult.rowCount || 0;
-  debugReminderLog("summary", { scanned, sent, skippedByReason, nowDateKey, nowMinutes, subscriptions: subscriptions.length });
-  return { scanned, sent, skippedByReason, nowDateKey, nowMinutes, subscriptions: subscriptions.length };
+  debugReminderLog("summary", {
+    scanned,
+    sent,
+    skippedByReason,
+    nowDateKey,
+    nowMinutes,
+    subscriptions: subscriptions.length,
+    reminderTimeZone,
+    toleranceMinutes,
+  });
+  return {
+    scanned,
+    sent,
+    skippedByReason,
+    nowDateKey,
+    nowMinutes,
+    subscriptions: subscriptions.length,
+    reminderTimeZone,
+    toleranceMinutes,
+  };
 };
