@@ -995,7 +995,7 @@ export async function POST(request: NextRequest) {
             date: item.date,
             dayIndex: item.dayIndex,
             time: item.time,
-            child: item.child,
+            child: "amit",
             title: item.title,
             type: item.type,
             isRecurring: false,
