@@ -19,22 +19,13 @@ const runCheck = async (request: NextRequest) => {
   }
 
   try {
-    const currentTimeInIsrael = new Intl.DateTimeFormat("en-GB", {
-      timeZone: "Asia/Jerusalem",
-      year: "numeric",
-      month: "2-digit",
-      day: "2-digit",
-      hour: "2-digit",
-      minute: "2-digit",
-      second: "2-digit",
-      hour12: false,
-    }).format(new Date());
+    const israelTime = new Date().toLocaleString("en-US", { timeZone: "Asia/Jerusalem" });
 
     const result = await sendUpcomingTaskReminders({
       timeZone: "Asia/Jerusalem",
-      toleranceMinutes: 2,
+      windowForwardMinutes: 5,
     });
-    console.log("[NOTIFICATIONS_CHECK] currentTimeInIsrael", currentTimeInIsrael);
+    console.log("Current Israel Time:", israelTime);
     console.log("[NOTIFICATIONS_CHECK] cron result", result);
     return NextResponse.json({ ok: true, ...result });
   } catch (error) {

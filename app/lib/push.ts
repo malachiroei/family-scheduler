@@ -32,6 +32,7 @@ type TaskRow = {
   type: string;
   is_weekly?: boolean;
   completed?: boolean;
+  notified?: boolean;
   send_notification?: boolean;
   require_confirmation?: boolean;
   needs_ack?: boolean;
@@ -462,18 +463,27 @@ const markReminderDispatched = async (dispatchKey: string) => {
 export const sendUpcomingTaskReminders = async (
   options?: {
     timeZone?: string;
-    toleranceMinutes?: number;
+    windowForwardMinutes?: number;
   }
 ) => {
   await ensurePushTables();
   try {
     await sql`ALTER TABLE family_schedule ADD COLUMN IF NOT EXISTS completed BOOLEAN NOT NULL DEFAULT FALSE`;
+    await sql`ALTER TABLE family_schedule ADD COLUMN IF NOT EXISTS notified BOOLEAN NOT NULL DEFAULT FALSE`;
     await sql`ALTER TABLE family_schedule ADD COLUMN IF NOT EXISTS send_notification BOOLEAN NOT NULL DEFAULT TRUE`;
     await sql`ALTER TABLE family_schedule ADD COLUMN IF NOT EXISTS require_confirmation BOOLEAN NOT NULL DEFAULT FALSE`;
     await sql`ALTER TABLE family_schedule ADD COLUMN IF NOT EXISTS needs_ack BOOLEAN NOT NULL DEFAULT FALSE`;
   } catch {
     // no-op: handled by schedule bootstrap route in normal flow
   }
+
+  const reminderTimeZone = options?.timeZone?.trim() || REMINDER_TIMEZONE;
+  const windowForwardMinutesRaw = Number(options?.windowForwardMinutes);
+  const windowForwardMinutes = Number.isFinite(windowForwardMinutesRaw)
+    ? Math.max(0, Math.min(10, Math.floor(windowForwardMinutesRaw)))
+    : 0;
+
+  const { dateKey: nowDateKey, minutes: nowMinutes } = getNowInReminderTimezone(reminderTimeZone);
 
   const subscriptionsResult = await sql<SubscriptionRow>`
     SELECT endpoint, p256dh, auth, user_name, receive_all, watch_children, reminder_lead_minutes
@@ -496,6 +506,7 @@ export const sendUpcomingTaskReminders = async (
       COALESCE(event_type, type) AS type,
       COALESCE(is_recurring, is_weekly, FALSE) AS is_weekly,
       completed,
+      COALESCE(notified, FALSE) AS notified,
       COALESCE(send_notification, TRUE) AS send_notification,
       COALESCE(require_confirmation, FALSE) AS require_confirmation,
       COALESCE(needs_ack, require_confirmation, FALSE) AS needs_ack
@@ -503,19 +514,13 @@ export const sendUpcomingTaskReminders = async (
     WHERE COALESCE(event_date, day) = ${nowDateKey}
       AND COALESCE(send_notification, TRUE) = TRUE
       AND COALESCE(completed, FALSE) = FALSE
+      AND COALESCE(notified, FALSE) = FALSE
   `;
-
-  const reminderTimeZone = options?.timeZone?.trim() || REMINDER_TIMEZONE;
-  const toleranceMinutesRaw = Number(options?.toleranceMinutes);
-  const toleranceMinutes = Number.isFinite(toleranceMinutesRaw)
-    ? Math.max(0, Math.min(5, Math.floor(toleranceMinutesRaw)))
-    : 0;
-
-  const { dateKey: nowDateKey, minutes: nowMinutes } = getNowInReminderTimezone(reminderTimeZone);
 
   let sent = 0;
   const skippedByReason: Record<string, number> = {
     completed: 0,
+    already_notified: 0,
     notifications_disabled: 0,
     type_not_eligible: 0,
     invalid_date: 0,
@@ -532,6 +537,12 @@ export const sendUpcomingTaskReminders = async (
     if (Boolean(task.completed)) {
       skippedByReason.completed += 1;
       debugReminderLog("skip completed", { taskId: task.id });
+      continue;
+    }
+
+    if (Boolean(task.notified)) {
+      skippedByReason.already_notified += 1;
+      debugReminderLog("skip already_notified", { taskId: task.id });
       continue;
     }
 
@@ -584,8 +595,8 @@ export const sendUpcomingTaskReminders = async (
     const defaultChildName = audienceChildren[0] || "הילד";
     for (const subscription of targetSubscriptions) {
       const reminderLeadMinutes = normalizeReminderLeadMinutes(subscription.reminder_lead_minutes);
-      const minDue = Math.max(0, reminderLeadMinutes - toleranceMinutes);
-      const maxDue = reminderLeadMinutes + toleranceMinutes;
+      const minDue = reminderLeadMinutes;
+      const maxDue = reminderLeadMinutes + windowForwardMinutes;
       if (diffMinutes < minDue || diffMinutes > maxDue) {
         continue;
       }
@@ -625,6 +636,12 @@ export const sendUpcomingTaskReminders = async (
     }
 
     if (deliveredForTask > 0) {
+      await sql`
+        UPDATE family_schedule
+        SET notified = TRUE,
+            updated_at = NOW()
+        WHERE id = ${task.id}
+      `;
       sent += deliveredForTask;
       debugReminderLog("sent", { taskId: task.id, deliveredForTask, diffMinutes, audienceChildren });
     } else {
@@ -642,7 +659,7 @@ export const sendUpcomingTaskReminders = async (
     nowMinutes,
     subscriptions: subscriptions.length,
     reminderTimeZone,
-    toleranceMinutes,
+    windowForwardMinutes,
   });
   return {
     scanned,
@@ -652,6 +669,6 @@ export const sendUpcomingTaskReminders = async (
     nowMinutes,
     subscriptions: subscriptions.length,
     reminderTimeZone,
-    toleranceMinutes,
+    windowForwardMinutes,
   };
 };
