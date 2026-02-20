@@ -431,6 +431,33 @@ const parseBulkEventsFromText = (text: string) => {
   return events;
 };
 
+type UpsertResultSuccess = {
+  ok: true;
+  row: unknown;
+  event: {
+    id: string;
+    date: string;
+    dayIndex: number;
+    time: string;
+    child: string;
+    title: string;
+    type: string;
+    isRecurring?: boolean;
+    recurringTemplateId?: string;
+    completed?: boolean;
+    sendNotification?: boolean;
+    requireConfirmation?: boolean;
+  };
+};
+
+type UpsertResultFailure = {
+  ok: false;
+  error: string;
+};
+
+const isUpsertSuccess = (result: UpsertResultSuccess | UpsertResultFailure): result is UpsertResultSuccess =>
+  result.ok === true;
+
 const upsertScheduleEvent = async (incoming: ReturnType<typeof sanitizeDbEvent>) => {
   if (!incoming) {
     return { ok: false as const, error: "Invalid event payload" };
@@ -880,12 +907,16 @@ export async function POST(request: NextRequest) {
       ? body.bulkEvents as Array<Record<string, unknown>>
       : [];
     if (bulkEventsPayload.length > 0) {
-      const upsertResults = await Promise.all(bulkEventsPayload.map(async (bulkItem) => {
+      const upsertResults: Array<UpsertResultSuccess | UpsertResultFailure> = await Promise.all(bulkEventsPayload.map(async (bulkItem) => {
         const incoming = sanitizeDbEvent(bulkItem);
         if (!incoming) {
           return { ok: false as const, error: "Invalid bulk event payload" };
         }
-        return upsertScheduleEvent(incoming);
+        const upsertResult = await upsertScheduleEvent(incoming);
+        if (!upsertResult.ok) {
+          return { ok: false as const, error: upsertResult.error };
+        }
+        return { ok: true as const, row: upsertResult.row, event: upsertResult.event };
       }));
 
       const failed = upsertResults.find((result) => !result.ok);
@@ -893,7 +924,7 @@ export async function POST(request: NextRequest) {
         return NextResponse.json({ error: failed.error }, { status: 500 });
       }
 
-      const savedEvents = upsertResults.map((result) => result.event);
+      const savedEvents = upsertResults.filter(isUpsertSuccess).map((result) => result.event);
 
       return NextResponse.json({ ok: true, events: savedEvents });
     }
@@ -964,7 +995,7 @@ export async function POST(request: NextRequest) {
 
     const bulkFromText = text ? parseBulkEventsFromText(text) : [];
     if (bulkFromText.length > 0) {
-      const upsertResults = await Promise.all(bulkFromText.map(async (item) => {
+      const upsertResults: Array<UpsertResultSuccess | UpsertResultFailure> = await Promise.all(bulkFromText.map(async (item) => {
         const generatedId = typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
           ? crypto.randomUUID()
           : `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
@@ -986,7 +1017,11 @@ export async function POST(request: NextRequest) {
           return { ok: false as const, error: "Invalid bulk text event payload" };
         }
 
-        return upsertScheduleEvent(incoming);
+        const upsertResult = await upsertScheduleEvent(incoming);
+        if (!upsertResult.ok) {
+          return { ok: false as const, error: upsertResult.error };
+        }
+        return { ok: true as const, row: upsertResult.row, event: upsertResult.event };
       }));
 
       const failed = upsertResults.find((result) => !result.ok);
@@ -994,7 +1029,7 @@ export async function POST(request: NextRequest) {
         return NextResponse.json({ error: failed.error }, { status: 500 });
       }
 
-      const savedEvents = upsertResults.map((result) => result.event);
+      const savedEvents = upsertResults.filter(isUpsertSuccess).map((result) => result.event);
 
       if (!savedEvents.length) {
         return NextResponse.json({ error: "No valid bulk events were found" }, { status: 400 });

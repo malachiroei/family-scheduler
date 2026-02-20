@@ -2374,34 +2374,36 @@ export default function FamilyScheduler() {
   };
 
   return (
-    <div className="print-scheduler-shell h-screen overflow-y-auto bg-[#f8fafc] px-3 pt-6 pb-20 md:px-4 md:pt-6 md:pb-24 dir-rtl" dir="rtl">
+    <div className="print-scheduler-shell h-screen overflow-y-auto bg-[#f8fafc] px-3 pt-8 pb-20 md:px-4 md:pt-8 md:pb-24 dir-rtl" dir="rtl">
       <button
         type="button"
         onClick={() => setShowSettingsModal(true)}
-        className="fixed top-4 left-4 md:top-5 md:left-5 z-40 h-10 w-10 rounded-full bg-slate-800 text-white shadow-lg hover:bg-slate-700 transition print:hidden flex items-center justify-center"
+        className="fixed top-5 left-5 md:top-6 md:left-6 z-40 h-10 w-10 rounded-full bg-slate-800 text-white shadow-lg hover:bg-slate-700 transition print:hidden flex items-center justify-center"
         aria-label="פתח הגדרות"
       >
         <Settings size={18} />
       </button>
 
-      <div className="max-w-6xl mx-auto mb-3 flex items-center justify-center gap-2 bg-white/95 border border-slate-200 rounded-2xl px-3 py-2 shadow-md print:hidden w-fit">
+      <div className="max-w-6xl mx-auto mb-4 flex items-center justify-center gap-3 bg-white/95 border border-slate-200 rounded-2xl px-3 py-3 shadow-sm print:hidden w-fit">
         <button
           onClick={() => shiftWeek(1)}
-          className="flex items-center gap-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 px-3 py-1.5 rounded-xl transition text-sm"
+          className="h-9 w-9 rounded-full bg-slate-100 hover:bg-slate-200 text-slate-700 transition flex items-center justify-center"
+          aria-label="שבוע הבא"
         >
-          <ChevronRight size={18} /> שבוע הבא
+          <ChevronRight size={18} />
         </button>
-        <div className="text-slate-800 font-bold">{weekRangeLabel}</div>
+        <div className="text-slate-800 font-extrabold text-lg tracking-tight px-1">{weekRangeLabel}</div>
         <button
           onClick={() => shiftWeek(-1)}
-          className="flex items-center gap-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 px-3 py-1.5 rounded-xl transition text-sm"
+          className="h-9 w-9 rounded-full bg-slate-100 hover:bg-slate-200 text-slate-700 transition flex items-center justify-center"
+          aria-label="שבוע קודם"
         >
-          שבוע קודם <ChevronLeft size={18} />
+          <ChevronLeft size={18} />
         </button>
       </div>
 
       <div className="max-w-6xl mx-auto mb-2 bg-white border border-slate-200 rounded-2xl p-2 shadow-sm print:hidden space-y-2">
-        <div className="rounded-2xl bg-slate-50 border border-slate-200 p-2 flex flex-wrap items-center justify-center gap-2">
+        <div className="rounded-2xl bg-white border border-slate-200 p-2.5 shadow-sm flex flex-wrap items-center justify-center gap-2">
           {(Object.keys(baseChildrenConfig) as BaseChildKey[]).map((childKey) => {
             const config = baseChildrenConfig[childKey];
             return (
@@ -2424,7 +2426,7 @@ export default function FamilyScheduler() {
         </div>
       </div>
 
-      <div className="max-w-6xl mx-auto mb-1 print:hidden">
+      <div className="max-w-6xl mx-auto mb-4 print:hidden">
         <h2 className="text-base font-bold text-slate-700">Weekly View</h2>
       </div>
 
