@@ -2074,6 +2074,7 @@ export default function FamilyScheduler() {
       await upsertEventToDatabase(event, eventData.dayIndex);
     }));
 
+    setWeekStart(targetWeekStart);
     await refetchEventsFromDatabase(targetWeekStart);
     router.refresh();
     setDbSyncStatus({ state: 'saved', message: 'Saved' });
