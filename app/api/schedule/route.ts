@@ -1,16 +1,14 @@
 import { NextRequest, NextResponse } from "next/server";
-import { sql } from "@vercel/postgres";
+import { ensureDatabaseConnectionString, getDatabaseConfig, sql } from "@/app/lib/db";
 import { sendPushToAll, sendPushToParents } from "@/app/lib/push";
 
 export const revalidate = 0;
 
-if (!process.env.POSTGRES_URL && process.env.DATABASE_URL) {
-  process.env.POSTGRES_URL = process.env.DATABASE_URL;
-}
+const dbConfig = getDatabaseConfig();
+const activeDatabaseUrl = dbConfig.url;
 
-const activeDatabaseUrl = process.env.POSTGRES_URL?.trim() || "";
-
-console.log("Syncing with Neon DB: ", process.env.POSTGRES_URL ? "CONNECTED" : "MISSING");
+console.log("Syncing with Neon DB: ", activeDatabaseUrl ? "CONNECTED" : "MISSING");
+console.log("DB URL source:", dbConfig.source);
 
 console.log("Saving to DB:", activeDatabaseUrl ? activeDatabaseUrl.substring(0, 15) + "..." : "(missing)");
 
@@ -92,12 +90,98 @@ const parseBooleanValue = (value: unknown) => {
 };
 
 const ensurePostgresEnv = () => {
-  const dbUrl = process.env.POSTGRES_URL?.trim();
-  if (!dbUrl) {
+  const config = ensureDatabaseConnectionString();
+  if (!config?.url) {
     return "MISSING_POSTGRES_ENV";
   }
 
   return null;
+};
+
+const requiredInsertColumns = [
+  "id",
+  "text",
+  "day",
+  "time",
+  "type",
+  "child",
+  "is_weekly",
+  "event_id",
+  "event_date",
+  "day_index",
+  "event_time",
+  "title",
+  "event_type",
+  "is_recurring",
+  "recurring_template_id",
+  "completed",
+  "send_notification",
+  "require_confirmation",
+  "needs_ack",
+  "user_id",
+  "updated_at",
+] as const;
+
+const ensureInsertColumnsExist = async () => {
+  try {
+    const result = await sql`
+      SELECT column_name
+      FROM information_schema.columns
+      WHERE table_name = 'family_schedule'
+    `;
+
+    const existingColumns = new Set(result.rows.map((row) => String(row.column_name || "").trim().toLowerCase()));
+    const missingColumns = requiredInsertColumns.filter((columnName) => !existingColumns.has(columnName));
+
+    if (missingColumns.length > 0) {
+      return {
+        ok: false as const,
+        code: "MISSING_TABLE_COLUMNS",
+        error: `family_schedule is missing required columns: ${missingColumns.join(", ")}`,
+      };
+    }
+
+    return { ok: true as const };
+  } catch (error) {
+    return {
+      ok: false as const,
+      code: "COLUMN_VERIFICATION_FAILED",
+      error: `Failed to verify family_schedule columns: ${getErrorMessage(error)}`,
+    };
+  }
+};
+
+const formatDbError = (error: unknown) => {
+  if (!error || typeof error !== "object") {
+    return getErrorMessage(error);
+  }
+
+  const candidate = error as Record<string, unknown>;
+  const details: string[] = [];
+
+  if (typeof candidate.message === "string" && candidate.message.trim()) {
+    details.push(`message=${candidate.message.trim()}`);
+  }
+  if (typeof candidate.code === "string" && candidate.code.trim()) {
+    details.push(`code=${candidate.code.trim()}`);
+  }
+  if (typeof candidate.detail === "string" && candidate.detail.trim()) {
+    details.push(`detail=${candidate.detail.trim()}`);
+  }
+  if (typeof candidate.hint === "string" && candidate.hint.trim()) {
+    details.push(`hint=${candidate.hint.trim()}`);
+  }
+  if (typeof candidate.table === "string" && candidate.table.trim()) {
+    details.push(`table=${candidate.table.trim()}`);
+  }
+  if (typeof candidate.column === "string" && candidate.column.trim()) {
+    details.push(`column=${candidate.column.trim()}`);
+  }
+  if (typeof candidate.constraint === "string" && candidate.constraint.trim()) {
+    details.push(`constraint=${candidate.constraint.trim()}`);
+  }
+
+  return details.length ? details.join(" | ") : getErrorMessage(error);
 };
 
 const ensureFamilyScheduleTable = async () => {
@@ -504,6 +588,11 @@ const upsertScheduleEvent = async (incoming: ReturnType<typeof sanitizeDbEvent>)
     return tableStatus;
   }
 
+  const columnsStatus = await ensureInsertColumnsExist();
+  if (!columnsStatus.ok) {
+    return columnsStatus;
+  }
+
   try {
     const newEvent = {
       id: incoming.eventId,
@@ -530,77 +619,92 @@ const upsertScheduleEvent = async (incoming: ReturnType<typeof sanitizeDbEvent>)
     console.log("Data to save:", newEvent);
     console.log("Inserting event:", newEvent);
 
-    const newRow = await sql`
-      INSERT INTO family_schedule (
-        id,
-        text,
-        day,
-        time,
-        type,
-        child,
-        is_weekly,
-        event_id,
-        event_date,
-        day_index,
-        event_time,
-        title,
-        event_type,
-        is_recurring,
-        recurring_template_id,
-        completed,
-        send_notification,
-        require_confirmation,
-        needs_ack,
-        user_id,
-        updated_at
-      )
-      VALUES (
-        ${newEvent.id},
-        ${newEvent.text},
-        ${newEvent.day},
-        ${newEvent.time},
-        ${newEvent.type},
-        ${newEvent.child},
-        ${newEvent.is_weekly},
-        ${newEvent.event_id},
-        ${newEvent.event_date},
-        ${newEvent.day_index},
-        ${newEvent.event_time},
-        ${newEvent.title},
-        ${newEvent.event_type},
-        ${newEvent.is_recurring},
-        ${newEvent.recurring_template_id},
-        ${newEvent.completed},
-        ${newEvent.send_notification},
-        ${newEvent.require_confirmation},
-        ${newEvent.needs_ack},
-        ${newEvent.user_id},
-        NOW()
-      )
-      ON CONFLICT (id)
-      DO UPDATE SET
-        text = EXCLUDED.text,
-        day = EXCLUDED.day,
-        time = EXCLUDED.time,
-        type = EXCLUDED.type,
-        child = EXCLUDED.child,
-        is_weekly = EXCLUDED.is_weekly,
-        event_id = EXCLUDED.event_id,
-        event_date = EXCLUDED.event_date,
-        day_index = EXCLUDED.day_index,
-        event_time = EXCLUDED.event_time,
-        title = EXCLUDED.title,
-        event_type = EXCLUDED.event_type,
-        is_recurring = EXCLUDED.is_recurring,
-        recurring_template_id = EXCLUDED.recurring_template_id,
-        completed = EXCLUDED.completed,
-        send_notification = EXCLUDED.send_notification,
-        require_confirmation = EXCLUDED.require_confirmation,
-        needs_ack = EXCLUDED.needs_ack,
-        user_id = EXCLUDED.user_id,
-        updated_at = NOW()
-      RETURNING *
-    `;
+    let newRow;
+    try {
+      newRow = await sql`
+        INSERT INTO family_schedule (
+          id,
+          text,
+          day,
+          time,
+          type,
+          child,
+          is_weekly,
+          event_id,
+          event_date,
+          day_index,
+          event_time,
+          title,
+          event_type,
+          is_recurring,
+          recurring_template_id,
+          completed,
+          send_notification,
+          require_confirmation,
+          needs_ack,
+          user_id,
+          updated_at
+        )
+        VALUES (
+          ${newEvent.id},
+          ${newEvent.text},
+          ${newEvent.day},
+          ${newEvent.time},
+          ${newEvent.type},
+          ${newEvent.child},
+          ${newEvent.is_weekly},
+          ${newEvent.event_id},
+          ${newEvent.event_date},
+          ${newEvent.day_index},
+          ${newEvent.event_time},
+          ${newEvent.title},
+          ${newEvent.event_type},
+          ${newEvent.is_recurring},
+          ${newEvent.recurring_template_id},
+          ${newEvent.completed},
+          ${newEvent.send_notification},
+          ${newEvent.require_confirmation},
+          ${newEvent.needs_ack},
+          ${newEvent.user_id},
+          NOW()
+        )
+        ON CONFLICT (id)
+        DO UPDATE SET
+          text = EXCLUDED.text,
+          day = EXCLUDED.day,
+          time = EXCLUDED.time,
+          type = EXCLUDED.type,
+          child = EXCLUDED.child,
+          is_weekly = EXCLUDED.is_weekly,
+          event_id = EXCLUDED.event_id,
+          event_date = EXCLUDED.event_date,
+          day_index = EXCLUDED.day_index,
+          event_time = EXCLUDED.event_time,
+          title = EXCLUDED.title,
+          event_type = EXCLUDED.event_type,
+          is_recurring = EXCLUDED.is_recurring,
+          recurring_template_id = EXCLUDED.recurring_template_id,
+          completed = EXCLUDED.completed,
+          send_notification = EXCLUDED.send_notification,
+          require_confirmation = EXCLUDED.require_confirmation,
+          needs_ack = EXCLUDED.needs_ack,
+          user_id = EXCLUDED.user_id,
+          updated_at = NOW()
+        RETURNING *
+      `;
+    } catch (error) {
+      const dbError = formatDbError(error);
+      console.error("[API] SQL insert into family_schedule failed", {
+        dbError,
+        rawError: error,
+        newEvent,
+      });
+      return {
+        ok: false as const,
+        error: `DB insert failed: ${dbError}`,
+      };
+    }
+
     console.log("DB Action Success:", newRow.rowCount);
 
     if (!newRow.rowCount || newRow.rowCount < 1) {

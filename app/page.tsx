@@ -2,7 +2,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import Image from 'next/image';
 import { useRouter } from 'next/navigation';
-import { Dog, Dumbbell, Music, GraduationCap, Trophy, Printer, Image as ImageIcon, MessageCircle, ChevronRight, ChevronLeft, X, Plus, CalendarDays, Settings } from 'lucide-react';
+import { Dog, Dumbbell, Music, GraduationCap, Trophy, Printer, Image as ImageIcon, MessageCircle, ChevronRight, ChevronLeft, X, Plus, CalendarDays, Settings, RefreshCw } from 'lucide-react';
 import html2canvas from 'html2canvas';
 
 const baseChildrenConfig = {
@@ -420,6 +420,13 @@ const normalizeChildKey = (value: string): BaseChildKey | null => {
   if (normalized === 'ravid' || normalized === 'רביד') return 'ravid';
   if (normalized === 'alin' || normalized === 'אלין') return 'alin';
   return null;
+};
+
+const normalizeChildFilterValue = (value: unknown): 'all' | BaseChildKey => {
+  if (value === 'ravid' || value === 'amit' || value === 'alin') {
+    return value;
+  }
+  return 'all';
 };
 
 const detectChildFromText = (text: string): BaseChildKey | null => {
@@ -895,6 +902,7 @@ export default function FamilyScheduler() {
   });
   const [selectedChildFilter, setSelectedChildFilter] = useState<'all' | BaseChildKey>('all');
   const [settingsChildFilter, setSettingsChildFilter] = useState<'all' | BaseChildKey>('all');
+  const [isRefreshing, setIsRefreshing] = useState(false);
   const [weekStart, setWeekStart] = useState(initialWeekStart);
   const [recurringTemplates, setRecurringTemplates] = useState<RecurringTemplate[]>([]);
   const [weeksData, setWeeksData] = useState<Record<string, DaySchedule[]>>(() => ({
@@ -937,17 +945,18 @@ export default function FamilyScheduler() {
 
   const weekKey = toIsoDate(weekStart);
   const days = weeksData[weekKey] ?? [];
+  const activeChildFilter = normalizeChildFilterValue(selectedChildFilter);
   const notificationsApproved = pushEnabled || (typeof Notification !== 'undefined' && Notification.permission === 'granted');
 
   useEffect(() => {
     if (!showSettingsModal) {
       return;
     }
-    setSettingsChildFilter(selectedChildFilter);
+    setSettingsChildFilter(normalizeChildFilterValue(selectedChildFilter));
   }, [showSettingsModal, selectedChildFilter]);
 
   const saveSettingsChildFilter = () => {
-    setSelectedChildFilter(settingsChildFilter);
+    setSelectedChildFilter(normalizeChildFilterValue(settingsChildFilter));
     setSuccessMessage('סינון התצוגה נשמר.');
     setShowSettingsModal(false);
     if (apiError) {
@@ -1589,8 +1598,15 @@ export default function FamilyScheduler() {
 
   const refetchEventsFromDatabase = async (targetWeekStart: Date) => {
     try {
+      const weekStartIso = toIsoDate(targetWeekStart);
+      const weekEndIso = toIsoDate(addDays(targetWeekStart, 6));
+      const query = new URLSearchParams({
+        weekStart: weekStartIso,
+        start: weekStartIso,
+        end: weekEndIso,
+      });
       console.log('[API] GET /api/schedule -> start');
-      const response = await fetch('/api/schedule', { cache: 'no-store' });
+      const response = await fetch(`/api/schedule?${query.toString()}`, { cache: 'no-store' });
       const payload = await response.json();
       console.log('[API] GET /api/schedule ->', response.status, payload);
       if (!response.ok) {
@@ -1655,6 +1671,26 @@ export default function FamilyScheduler() {
     } catch (error) {
       console.error('[API] GET /api/schedule client failed', error);
       throw error;
+    }
+  };
+
+  const handleManualRefresh = async () => {
+    if (isRefreshing) {
+      return;
+    }
+
+    setIsRefreshing(true);
+    try {
+      await refetchEventsFromDatabase(weekStart);
+      setSuccessMessage('הלוח עודכן.');
+      if (apiError) {
+        setApiError('');
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'רענון הלו״ז נכשל';
+      setApiError(message);
+    } finally {
+      setIsRefreshing(false);
     }
   };
 
@@ -2374,7 +2410,7 @@ export default function FamilyScheduler() {
   };
 
   return (
-    <div className="print-scheduler-shell h-screen overflow-y-auto bg-[#f8fafc] px-3 pt-8 pb-20 md:px-4 md:pt-8 md:pb-24 dir-rtl" dir="rtl">
+    <div className="print-scheduler-shell h-screen overflow-y-auto bg-[#f8fafc] px-3 pt-12 pb-20 md:px-4 md:pt-14 md:pb-24 dir-rtl" dir="rtl">
       <button
         type="button"
         onClick={() => setShowSettingsModal(true)}
@@ -2382,6 +2418,16 @@ export default function FamilyScheduler() {
         aria-label="פתח הגדרות"
       >
         <Settings size={18} />
+      </button>
+      <button
+        type="button"
+        onClick={() => { void handleManualRefresh(); }}
+        disabled={isRefreshing}
+        className="fixed top-5 right-5 md:top-6 md:right-6 z-40 h-9 rounded-full bg-white border border-slate-200 text-slate-700 shadow-lg hover:bg-slate-50 transition print:hidden flex items-center justify-center gap-1.5 px-3 disabled:opacity-60 disabled:cursor-not-allowed"
+        aria-label="רענן"
+      >
+        <RefreshCw size={14} className={isRefreshing ? 'animate-spin' : ''} />
+        <span className="text-xs font-bold">רענן</span>
       </button>
 
       <div className="max-w-6xl mx-auto mb-4 pb-4 print:hidden">
@@ -2430,7 +2476,7 @@ export default function FamilyScheduler() {
           const currentCellDate = toEventDateKey(new Date(`${day.isoDate}T00:00:00`));
           const visibleEvents = day.events.filter((event) => {
             const isRecurringEvent = Boolean(event.isRecurring || event.recurringTemplateId);
-            const matchesChild = selectedChildFilter === 'all' || getChildKeys(event.child).includes(selectedChildFilter);
+            const matchesChild = activeChildFilter === 'all' || getChildKeys(event.child).includes(activeChildFilter);
             if (!matchesChild) {
               return false;
             }
