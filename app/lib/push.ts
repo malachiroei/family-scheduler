@@ -187,6 +187,7 @@ export const removePushSubscription = async (endpoint: string) => {
 
 const sendToSubscription = async (row: SubscriptionRow, payload: PushPayload) => {
   if (!initVapid()) {
+    console.error("[PUSH] Missing VAPID config; cannot send notification");
     return { ok: false as const, removed: false, reason: "missing-vapid" };
   }
 
@@ -207,11 +208,22 @@ const sendToSubscription = async (row: SubscriptionRow, payload: PushPayload) =>
     const statusCode = typeof (error as { statusCode?: unknown })?.statusCode === "number"
       ? ((error as { statusCode: number }).statusCode)
       : 0;
+    const message = error instanceof Error ? error.message : String(error);
 
     if (statusCode === 404 || statusCode === 410) {
       await removePushSubscription(row.endpoint);
+      console.warn("[PUSH] Subscription expired and removed", {
+        statusCode,
+        endpointPrefix: row.endpoint.slice(0, 40),
+      });
       return { ok: false as const, removed: true, reason: "expired-subscription" };
     }
+
+    console.error("[PUSH] Failed to send notification", {
+      statusCode,
+      message,
+      endpointPrefix: row.endpoint.slice(0, 40),
+    });
 
     return { ok: false as const, removed: false, reason: "send-failed" };
   }
@@ -329,6 +341,10 @@ const shouldSubscriptionReceiveTask = (
       .split(",")
       .map((value) => value.trim())
       .filter((value): value is ChildUserName => childNameSet.has(value));
+
+    if (trackedChildren.length === 0) {
+      return true;
+    }
 
     return trackedChildren.some((name) => audienceChildren.includes(name));
   }

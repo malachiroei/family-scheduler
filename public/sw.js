@@ -1,4 +1,4 @@
-const CACHE_NAME = 'family-scheduler-v11';
+const CACHE_NAME = 'family-scheduler-v12';
 const APP_SHELL_FILES = ['/manifest.json?v=5', '/icon-512.png'];
 const reminderLeadOptions = [5, 10, 15, 30];
 const pushSoundOptions = ['/sounds/standard.mp3', '/sounds/bell.mp3', '/sounds/modern.mp3'];
@@ -128,7 +128,7 @@ self.addEventListener('push', (event) => {
     badge: '/icon-512.png',
     vibrate: [200, 100, 200],
     actions: payload.confirmTask
-      ? [{ action: 'confirm-task', title: 'אישרתי שראיתי' }]
+      ? [{ action: 'confirm', title: 'אישרתי שראיתי' }]
       : [],
     data: {
       url: payload.url || '/',
@@ -157,7 +157,7 @@ self.addEventListener('notificationclick', (event) => {
   event.notification.close();
   const targetUrl = event.notification?.data?.url || '/';
 
-  if (event.action === 'confirm-task') {
+  if (event.action === 'confirm') {
     const confirmTask = event.notification?.data?.confirmTask || null;
     const eventId = typeof confirmTask?.eventId === 'string' ? confirmTask.eventId.trim() : '';
     const childName = typeof confirmTask?.childName === 'string'
@@ -169,7 +169,7 @@ self.addEventListener('notificationclick', (event) => {
     }
 
     event.waitUntil((async () => {
-      await fetch('/api/push/confirm', {
+      await fetch('/api/notifications/ack', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -177,6 +177,7 @@ self.addEventListener('notificationclick', (event) => {
         body: JSON.stringify({
           eventId,
           childName,
+          eventTitle: typeof confirmTask?.eventTitle === 'string' ? confirmTask.eventTitle : '',
         }),
       }).catch(() => undefined);
 

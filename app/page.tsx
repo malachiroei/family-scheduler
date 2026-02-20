@@ -1500,6 +1500,31 @@ export default function FamilyScheduler() {
     }
   };
 
+  const ensureNotificationPermission = async () => {
+    if (!("Notification" in window)) {
+      setApiError('התראות אינן נתמכות כרגע בדפדפן במכשיר זה.');
+      return false;
+    }
+
+    const currentPermission = Notification.permission;
+    if (currentPermission === 'granted') {
+      return true;
+    }
+
+    if (currentPermission === 'denied') {
+      setApiError('ההתראות חסומות בדפדפן. יש לאפשר התראות בהגדרות הדפדפן.');
+      return false;
+    }
+
+    const requestedPermission = await Notification.requestPermission();
+    if (requestedPermission !== 'granted') {
+      setApiError('לא אושרו התראות בדפדפן.');
+      return false;
+    }
+
+    return true;
+  };
+
   const updatePushProfileForExistingSubscription = async () => {
     if (pushBusy) {
       return;
@@ -1520,9 +1545,8 @@ export default function FamilyScheduler() {
 
       let existing = await registration.pushManager.getSubscription();
       if (!existing) {
-        const permission = await Notification.requestPermission();
-        if (permission !== 'granted') {
-          setApiError('לא אושרו התראות בדפדפן.');
+        const hasPermission = await ensureNotificationPermission();
+        if (!hasPermission) {
           return;
         }
 
@@ -1589,9 +1613,8 @@ export default function FamilyScheduler() {
 
     setPushBusy(true);
     try {
-      const permission = await Notification.requestPermission();
-      if (permission !== 'granted') {
-        setApiError('לא אושרו התראות בדפדפן.');
+      const hasPermission = await ensureNotificationPermission();
+      if (!hasPermission) {
         return;
       }
 
