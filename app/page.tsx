@@ -2064,6 +2064,14 @@ export default function FamilyScheduler() {
     await refetchEventsFromDatabase(targetWeekStart);
   };
 
+  const hardRefreshScheduleAfterSuccess = async (targetWeekStart: Date) => {
+    await mutateSchedule('/api/schedule', targetWeekStart);
+    router.refresh();
+    if (typeof window !== 'undefined') {
+      window.location.reload();
+    }
+  };
+
   const handleClearAll = async () => {
     const confirmed = window.confirm('למחוק את כל המשימות מהלו״ז?');
     if (!confirmed) {
@@ -2142,6 +2150,7 @@ export default function FamilyScheduler() {
 
     setWeekStart(targetWeekStart);
     await refetchEventsFromDatabase(targetWeekStart);
+    await mutateSchedule('/api/schedule', targetWeekStart);
     router.refresh();
     setDbSyncStatus({ state: 'saved', message: 'Saved' });
   };
@@ -2160,6 +2169,7 @@ export default function FamilyScheduler() {
 
       setInputText('');
       setSuccessMessage('האירועים נוספו בהצלחה ללו״ז.');
+      await hardRefreshScheduleAfterSuccess(parsedComplex.targetWeekStart);
       return;
     }
 
@@ -2169,6 +2179,7 @@ export default function FamilyScheduler() {
 
       setInputText('');
       setSuccessMessage('האירוע נוסף בהצלחה ללו״ז.');
+      await hardRefreshScheduleAfterSuccess(parsedFallback.targetWeekStart);
       return;
     }
 
@@ -2222,6 +2233,7 @@ export default function FamilyScheduler() {
 
       setInputText('');
       setSelectedImage(null);
+      await hardRefreshScheduleAfterSuccess(weekStart);
     } catch (error) {
       console.error('[API] POST /api/schedule client failed', error);
       const message = error instanceof Error ? error.message : 'לא הצלחתי לעדכן את הלו"ז';
@@ -2342,6 +2354,7 @@ export default function FamilyScheduler() {
     if (apiError) {
       setApiError('');
     }
+    await hardRefreshScheduleAfterSuccess(targetWeekStart);
   };
 
   const saveEditedEvent = async () => {
@@ -2399,6 +2412,11 @@ export default function FamilyScheduler() {
     }
 
     setEditingEvent(null);
+    setSuccessMessage('המשימה עודכנה בהצלחה.');
+    if (apiError) {
+      setApiError('');
+    }
+    await hardRefreshScheduleAfterSuccess(targetWeekStart);
   };
 
   const undoCompletedEvent = async () => {
@@ -2711,7 +2729,7 @@ export default function FamilyScheduler() {
                 <div className="text-xs text-slate-500 mb-1">הצג משימות עבור</div>
                 <select
                   value={settingsChildFilter}
-                  onChange={(event) => setSettingsChildFilter(event.target.value as 'all' | BaseChildKey)}
+                  onChange={(event) => setSettingsChildFilter(normalizeChildFilterValue(event.target.value))}
                   className="w-full rounded-xl border border-slate-300 px-3 py-1.5 text-sm text-slate-700 outline-none focus:border-blue-400"
                 >
                   <option value="all">כולם</option>
