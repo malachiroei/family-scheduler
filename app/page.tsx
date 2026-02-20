@@ -170,7 +170,7 @@ const pushSoundOptions: Array<{ value: PushSoundPreset; label: string }> = [
 ];
 const defaultPushLeadMinutes: ReminderLeadMinutes = 10;
 const defaultPushSound: PushSoundPreset = '/sounds/standard.mp3';
-const SERVICE_WORKER_URL = '/sw.js?v=13';
+const SERVICE_WORKER_URL = `${API_BASE_URL}/sw.js?v=13`;
 
 const sanitizeReminderLead = (value: unknown): ReminderLeadMinutes => {
   const numeric = Number(value);
