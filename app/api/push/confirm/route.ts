@@ -60,7 +60,7 @@ export async function POST(request: NextRequest) {
       title: "אישור משימה",
       body: `${childName} אישר את המשימה: ${taskTitle}`,
       url: "/",
-    });
+    }, ["רועי"]);
 
     return NextResponse.json({
       ok: true,

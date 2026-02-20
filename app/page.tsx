@@ -455,6 +455,67 @@ const parseComplexWhatsAppMessage = (
     return null;
   }
 
+  const parseBulkScheduleLines = (rawText: string): { targetWeekStart: Date; events: AiEvent[] } | null => {
+    const nextWeekStart = addDays(getWeekStart(new Date()), 7);
+    const lines = rawText
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean);
+
+    if (lines.length < 2) {
+      return null;
+    }
+
+    const events: AiEvent[] = [];
+    const seen = new Set<string>();
+
+    for (const line of lines) {
+      const dayIndex = getDayIndexFromText(line);
+      const normalizedTime = extractTimesFromLine(line)[0] ?? null;
+      if (dayIndex === null || !normalizedTime) {
+        continue;
+      }
+
+      const titleTail = line
+        .replace(/(?:^|\s)(?:יום\s+)?(?:ראשון|שני|שלישי|רביעי|חמישי|שישי|שבת)(?:\s|$)/g, ' ')
+        .replace(/\b\d{1,2}:\d{2}\b/g, ' ')
+        .replace(/\b\d{3,4}\b/g, ' ')
+        .replace(/[>\-–—:|,؛;]+/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+      const resolvedTitle = !titleTail
+        ? 'אימון'
+        : (/^אימון\b/.test(titleTail) ? titleTail : `אימון ${titleTail}`);
+
+      const targetDate = addDays(nextWeekStart, dayIndex);
+      const key = `${dayIndex}|${normalizedTime}`;
+      if (seen.has(key)) {
+        continue;
+      }
+      seen.add(key);
+
+      events.push({
+        dayIndex,
+        date: toIsoDate(targetDate),
+        time: normalizedTime,
+        child: 'amit',
+        title: resolvedTitle,
+        type: 'gym',
+      });
+    }
+
+    if (events.length < 2) {
+      return null;
+    }
+
+    return { targetWeekStart: nextWeekStart, events };
+  };
+
+  const bulkResult = parseBulkScheduleLines(text);
+  if (bulkResult) {
+    return bulkResult;
+  }
+
   const globalChild = detectChildFromText(text) || (/בית\s*דני/.test(text) ? 'amit' : null);
   const expandedText = text
     .replace(/(ראשון|שני|שלישי|רביעי|חמישי|שישי|שבת)\s*[-:]/g, '\n$1 -')
@@ -2723,8 +2784,8 @@ export default function FamilyScheduler() {
 
       {creatingEvent && (
         <div className="fixed inset-0 bg-black/35 backdrop-blur-[1px] flex items-center justify-center p-4 z-50 print:hidden">
-          <div className="w-full max-w-lg bg-white rounded-2xl shadow-2xl border border-slate-200 p-5 space-y-4">
-            <div className="flex justify-between items-center">
+          <div className="w-full max-w-lg max-h-[85vh] bg-white rounded-2xl shadow-2xl border border-slate-200 flex flex-col overflow-hidden">
+            <div className="sticky top-0 z-10 bg-white border-b border-slate-200 px-5 py-4 flex justify-between items-center">
               <h2 className="text-lg font-bold text-slate-800">אירוע חדש</h2>
               <button
                 type="button"
@@ -2734,6 +2795,8 @@ export default function FamilyScheduler() {
                 <X size={20} />
               </button>
             </div>
+
+            <div className="max-h-[70vh] overflow-y-auto p-5 space-y-4">
 
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
               <label className="text-sm text-slate-700 font-medium">
@@ -2854,7 +2917,9 @@ export default function FamilyScheduler() {
               </label>
             </div>
 
-            <div className="flex gap-2 justify-end pt-2">
+            </div>
+
+            <div className="sticky bottom-0 z-20 shrink-0 bg-white border-t border-slate-200 px-5 py-3 flex gap-2 justify-end">
               {dbSyncStatus.state !== 'idle' && (
                 <div className={`self-center text-xs font-semibold ${dbSyncStatus.state === 'error' ? 'text-red-600' : dbSyncStatus.state === 'saving' ? 'text-amber-600' : 'text-emerald-600'}`}>
                   {dbSyncStatus.message}
@@ -2881,8 +2946,8 @@ export default function FamilyScheduler() {
 
       {editingEvent && (
         <div className="fixed inset-0 bg-black/35 backdrop-blur-[1px] flex items-center justify-center p-4 z-50 print:hidden">
-          <div className="w-full max-w-lg bg-white rounded-2xl shadow-2xl border border-slate-200 p-5 space-y-4">
-            <div className="flex justify-between items-center">
+          <div className="w-full max-w-lg max-h-[85vh] bg-white rounded-2xl shadow-2xl border border-slate-200 flex flex-col overflow-hidden">
+            <div className="sticky top-0 z-10 bg-white border-b border-slate-200 px-5 py-4 flex justify-between items-center">
               <h2 className="text-lg font-bold text-slate-800">עריכת משימה</h2>
               <button
                 type="button"
@@ -2892,6 +2957,8 @@ export default function FamilyScheduler() {
                 <X size={20} />
               </button>
             </div>
+
+            <div className="max-h-[70vh] overflow-y-auto p-5 space-y-4">
 
             {editingEvent.data.completed && (
               <div className="rounded-xl border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm font-semibold text-emerald-700">
@@ -3038,7 +3105,9 @@ export default function FamilyScheduler() {
               מחק משימה
             </button>
 
-            <div className="flex gap-2 justify-end pt-2">
+            </div>
+
+            <div className="sticky bottom-0 z-20 shrink-0 bg-white border-t border-slate-200 px-5 py-3 flex gap-2 justify-end">
               {dbSyncStatus.state !== 'idle' && (
                 <div className={`self-center text-xs font-semibold ${dbSyncStatus.state === 'error' ? 'text-red-600' : dbSyncStatus.state === 'saving' ? 'text-amber-600' : 'text-emerald-600'}`}>
                   {dbSyncStatus.message}

@@ -135,6 +135,7 @@ const ensureFamilyScheduleTable = async () => {
     await sql`ALTER TABLE family_schedule ADD COLUMN IF NOT EXISTS completed BOOLEAN NOT NULL DEFAULT FALSE`;
     await sql`ALTER TABLE family_schedule ADD COLUMN IF NOT EXISTS send_notification BOOLEAN NOT NULL DEFAULT TRUE`;
     await sql`ALTER TABLE family_schedule ADD COLUMN IF NOT EXISTS require_confirmation BOOLEAN NOT NULL DEFAULT FALSE`;
+    await sql`ALTER TABLE family_schedule ADD COLUMN IF NOT EXISTS needs_ack BOOLEAN NOT NULL DEFAULT FALSE`;
     await sql`ALTER TABLE family_schedule ADD COLUMN IF NOT EXISTS user_id TEXT`;
     await sql`ALTER TABLE family_schedule ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()`;
     await sql`UPDATE family_schedule SET completed = FALSE WHERE completed IS NULL`;
@@ -146,6 +147,10 @@ const ensureFamilyScheduleTable = async () => {
     await sql`UPDATE family_schedule SET require_confirmation = FALSE WHERE require_confirmation IS NULL`;
     await sql`ALTER TABLE family_schedule ALTER COLUMN require_confirmation SET DEFAULT FALSE`;
     await sql`ALTER TABLE family_schedule ALTER COLUMN require_confirmation SET NOT NULL`;
+    await sql`UPDATE family_schedule SET needs_ack = COALESCE(needs_ack, require_confirmation, FALSE)`;
+    await sql`ALTER TABLE family_schedule ALTER COLUMN needs_ack SET DEFAULT FALSE`;
+    await sql`ALTER TABLE family_schedule ALTER COLUMN needs_ack SET NOT NULL`;
+    await sql`UPDATE family_schedule SET require_confirmation = COALESCE(needs_ack, require_confirmation, FALSE)`;
     await sql`UPDATE family_schedule SET user_id = 'system' WHERE user_id IS NULL OR BTRIM(user_id) = ''`;
     await sql`ALTER TABLE family_schedule ALTER COLUMN user_id SET DEFAULT 'system'`;
     await sql`ALTER TABLE family_schedule ALTER COLUMN user_id SET NOT NULL`;
@@ -220,6 +225,9 @@ const sanitizeDbEvent = (value: unknown) => {
     ? true
     : parseBooleanValue(payload.sendNotification);
   const requireConfirmation = parseBooleanValue(payload.requireConfirmation);
+  const needsAck = payload.needsAck === undefined
+    ? requireConfirmation
+    : parseBooleanValue(payload.needsAck);
   const userId = typeof payload.userId === "string" && payload.userId.trim()
     ? payload.userId.trim()
     : "system";
@@ -251,6 +259,7 @@ const sanitizeDbEvent = (value: unknown) => {
     completed,
     sendNotification,
     requireConfirmation,
+    needsAck,
     userId,
   };
 };
@@ -287,6 +296,7 @@ const createIncomingFromFlatBody = (body: Record<string, unknown>) => {
     completed: false,
     sendNotification: true,
     requireConfirmation: false,
+    needsAck: false,
   });
 };
 
@@ -346,6 +356,7 @@ const upsertScheduleEvent = async (incoming: ReturnType<typeof sanitizeDbEvent>)
       completed: incoming.completed ?? false,
       send_notification: incoming.sendNotification ?? true,
       require_confirmation: incoming.requireConfirmation ?? false,
+      needs_ack: incoming.needsAck ?? incoming.requireConfirmation ?? false,
       user_id: incoming.userId ?? "system",
     };
     console.log("Data to save:", data);
@@ -370,6 +381,7 @@ const upsertScheduleEvent = async (incoming: ReturnType<typeof sanitizeDbEvent>)
         completed,
         send_notification,
         require_confirmation,
+        needs_ack,
         user_id,
         updated_at
       )
@@ -392,6 +404,7 @@ const upsertScheduleEvent = async (incoming: ReturnType<typeof sanitizeDbEvent>)
         ${data.completed},
         ${data.send_notification},
         ${data.require_confirmation},
+        ${data.needs_ack},
         ${data.user_id},
         NOW()
       )
@@ -414,6 +427,7 @@ const upsertScheduleEvent = async (incoming: ReturnType<typeof sanitizeDbEvent>)
         completed = EXCLUDED.completed,
         send_notification = EXCLUDED.send_notification,
         require_confirmation = EXCLUDED.require_confirmation,
+        needs_ack = EXCLUDED.needs_ack,
         user_id = EXCLUDED.user_id,
         updated_at = NOW()
       RETURNING *
@@ -444,7 +458,7 @@ const upsertScheduleEvent = async (incoming: ReturnType<typeof sanitizeDbEvent>)
           : undefined,
         completed: parseBooleanValue(saved.completed),
         sendNotification: parseBooleanValue(saved.send_notification),
-        requireConfirmation: parseBooleanValue(saved.require_confirmation),
+        requireConfirmation: parseBooleanValue(saved.needs_ack ?? saved.require_confirmation),
       },
     };
   } catch (error) {
@@ -484,7 +498,8 @@ export async function GET() {
         recurring_template_id,
         COALESCE(completed, FALSE) AS completed,
         COALESCE(send_notification, TRUE) AS send_notification,
-        COALESCE(require_confirmation, FALSE) AS require_confirmation
+        COALESCE(require_confirmation, FALSE) AS require_confirmation,
+        COALESCE(needs_ack, require_confirmation, FALSE) AS needs_ack
       FROM family_schedule
       ORDER BY COALESCE(event_time, time) ASC
     `;
@@ -507,7 +522,7 @@ export async function GET() {
         : undefined,
       completed: parseBooleanValue(row.completed),
       sendNotification: parseBooleanValue(row.send_notification),
-      requireConfirmation: parseBooleanValue(row.require_confirmation),
+      requireConfirmation: parseBooleanValue(row.needs_ack ?? row.require_confirmation),
     }));
 
     return NextResponse.json({ events });
