@@ -856,6 +856,7 @@ export default function FamilyScheduler() {
   });
   const [showRecurringOnly, setShowRecurringOnly] = useState(false);
   const [selectedChildFilter, setSelectedChildFilter] = useState<'all' | BaseChildKey>('all');
+  const [settingsChildFilter, setSettingsChildFilter] = useState<'all' | BaseChildKey>('all');
   const [weekStart, setWeekStart] = useState(initialWeekStart);
   const [recurringTemplates, setRecurringTemplates] = useState<RecurringTemplate[]>([]);
   const [weeksData, setWeeksData] = useState<Record<string, DaySchedule[]>>(() => ({
@@ -899,6 +900,22 @@ export default function FamilyScheduler() {
   const weekKey = toIsoDate(weekStart);
   const days = weeksData[weekKey] ?? [];
   const notificationsApproved = pushEnabled || (typeof Notification !== 'undefined' && Notification.permission === 'granted');
+
+  useEffect(() => {
+    if (!showSettingsModal) {
+      return;
+    }
+    setSettingsChildFilter(selectedChildFilter);
+  }, [showSettingsModal, selectedChildFilter]);
+
+  const saveSettingsChildFilter = () => {
+    setSelectedChildFilter(settingsChildFilter);
+    setSuccessMessage('סינון התצוגה נשמר.');
+    setShowSettingsModal(false);
+    if (apiError) {
+      setApiError('');
+    }
+  };
 
   const playPushSound = (soundUrl: string) => {
     if (typeof window === 'undefined') {
@@ -2359,24 +2376,6 @@ export default function FamilyScheduler() {
         </div>
 
         <div className="flex flex-wrap items-center gap-1.5">
-          <span className="text-xs font-semibold text-slate-500">סינון לפי ילד:</span>
-          <button
-            type="button"
-            onClick={() => setSelectedChildFilter('all')}
-            className={`px-3 py-1 rounded-xl border text-sm font-semibold transition ${selectedChildFilter === 'all' ? 'bg-slate-800 text-white border-slate-800' : 'bg-white text-slate-700 border-slate-300 hover:bg-slate-50'}`}
-          >
-            הכל
-          </button>
-          {(Object.keys(baseChildrenConfig) as BaseChildKey[]).map((childKey) => (
-            <button
-              key={`filter-${childKey}`}
-              type="button"
-              onClick={() => setSelectedChildFilter(childKey)}
-              className={`px-3 py-1 rounded-xl border text-sm font-semibold transition ${selectedChildFilter === childKey ? 'bg-slate-800 text-white border-slate-800' : 'bg-white text-slate-700 border-slate-300 hover:bg-slate-50'}`}
-            >
-              {baseChildrenConfig[childKey].name}
-            </button>
-          ))}
           <button
             type="button"
             onClick={() => setShowRecurringOnly((prev) => !prev)}
@@ -2594,6 +2593,30 @@ export default function FamilyScheduler() {
                 </div>
               </div>
             )}
+
+            <div className="space-y-2 border border-slate-200 rounded-xl p-2.5 bg-slate-50">
+              <div className="text-xs font-bold text-slate-600">סינון תצוגה</div>
+              <div>
+                <div className="text-xs text-slate-500 mb-1">הצג משימות עבור</div>
+                <select
+                  value={settingsChildFilter}
+                  onChange={(event) => setSettingsChildFilter(event.target.value as 'all' | BaseChildKey)}
+                  className="w-full rounded-xl border border-slate-300 px-3 py-1.5 text-sm text-slate-700 outline-none focus:border-blue-400"
+                >
+                  <option value="all">כולם</option>
+                  {(Object.keys(baseChildrenConfig) as BaseChildKey[]).map((childKey) => (
+                    <option key={`settings-filter-${childKey}`} value={childKey}>{baseChildrenConfig[childKey].name}</option>
+                  ))}
+                </select>
+              </div>
+              <button
+                type="button"
+                onClick={saveSettingsChildFilter}
+                className="w-full rounded-xl bg-blue-600 px-3 py-2 text-sm font-bold text-white hover:bg-blue-700 transition"
+              >
+                שמור
+              </button>
+            </div>
 
             <button
               type="button"
