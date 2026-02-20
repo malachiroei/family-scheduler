@@ -349,7 +349,7 @@ const parseBulkEventsFromText = (text: string) => {
     .map((line) => line.trim())
     .filter(Boolean);
 
-  if (lines.length < 2) {
+  if (lines.length === 0) {
     return [] as Array<{
       date: string;
       dayIndex: number;
@@ -394,7 +394,7 @@ const parseBulkEventsFromText = (text: string) => {
   };
 
   const nextSunday = getNextWeekSunday(new Date());
-  const hasAmitMention = /עמית|amit/i.test(text);
+  const hasAmitContext = /עמית|amit|כדורסל|basketball|בית\s*דני/i.test(text);
   const events: Array<{
     date: string;
     dayIndex: number;
@@ -427,11 +427,12 @@ const parseBulkEventsFromText = (text: string) => {
 
         const date = new Date(nextSunday);
         date.setDate(nextSunday.getDate() + dayMatch.dayIndex);
+        const lineHasAmitContext = hasAmitContext || /עמית|amit|כדורסל|basketball|בית\s*דני/i.test(line);
         events.push({
           date: toIsoDate(date),
           dayIndex: dayMatch.dayIndex,
           time: normalizedTime,
-          child: hasAmitMention ? "amit" : "amit",
+          child: lineHasAmitContext ? "amit" : "amit",
           title: "אימון",
           type: "gym",
         });
@@ -454,11 +455,12 @@ const parseBulkEventsFromText = (text: string) => {
 
     const date = new Date(nextSunday);
     date.setDate(nextSunday.getDate() + dayMatch.dayIndex);
+    const lineHasAmitContext = hasAmitContext || /עמית|amit|כדורסל|basketball|בית\s*דני/i.test(line);
     events.push({
       date: toIsoDate(date),
       dayIndex: dayMatch.dayIndex,
       time: normalizedTime,
-      child: hasAmitMention ? "amit" : "amit",
+      child: lineHasAmitContext ? "amit" : "amit",
       title: "אימון",
       type: "gym",
     });
@@ -1065,7 +1067,7 @@ export async function POST(request: NextRequest) {
       await sendPushToAll(
         {
           title: "משימות חדשות נוספו",
-          body: `נוספו ${savedEvents.length} משימות`,
+          body: `נוספו ${savedEvents.length} אימונים לעמית לשבוע הקרוב`,
           url: "/",
         },
         { excludeEndpoint: senderSubscriptionEndpoint }
