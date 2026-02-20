@@ -1064,11 +1064,9 @@ export default function FamilyScheduler() {
           const payload = await response.json() as { state?: PersistedStatePayload };
           if (payload?.state && !cancelled) {
             const normalized = normalizePersistedState(payload.state, initialWeekStart);
-            setWeekStart(initialWeekStart);
+            setWeekStart(normalized.weekStart);
             setRecurringTemplates(normalized.recurringTemplates);
-            setWeeksData({
-              [toIsoDate(initialWeekStart)]: createWeekDays(initialWeekStart, false, normalized.recurringTemplates),
-            });
+            setWeeksData(normalized.weeksData);
             return;
           }
         }
@@ -1081,11 +1079,9 @@ export default function FamilyScheduler() {
         const parsed = raw ? JSON.parse(raw) as PersistedStatePayload : null;
         const normalized = normalizePersistedState(parsed, initialWeekStart);
         if (!cancelled) {
-          setWeekStart(initialWeekStart);
+          setWeekStart(normalized.weekStart);
           setRecurringTemplates(normalized.recurringTemplates);
-          setWeeksData({
-            [toIsoDate(initialWeekStart)]: createWeekDays(initialWeekStart, false, normalized.recurringTemplates),
-          });
+          setWeeksData(normalized.weeksData);
         }
       } catch {
         if (!cancelled) {
