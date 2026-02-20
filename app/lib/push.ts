@@ -8,7 +8,7 @@ type PushPayload = {
   confirmTask?: {
     eventId: string;
     eventTitle: string;
-    confirmedBy: string;
+    childName: string;
   };
 };
 
@@ -478,7 +478,7 @@ export const sendUpcomingTaskReminders = async () => {
           ? {
               eventId: String(task.id),
               eventTitle: String(task.text || "משימה"),
-              confirmedBy: childDisplayName,
+              childName: childDisplayName,
             }
           : undefined,
       });

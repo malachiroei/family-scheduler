@@ -36,6 +36,7 @@ type DaySchedule = {
 
 type AiEvent = {
   dayIndex: number;
+  date?: string;
   time: string;
   child: BaseChildKey | string;
   title: string;
@@ -149,7 +150,7 @@ const pushChildOptions: PushChildName[] = ['רביד', 'עמית', 'אלין'];
 const PUSH_USER_STORAGE_KEY = 'family-scheduler-push-user';
 const PUSH_MIGRATION_FLAG_KEY = 'family-scheduler-push-migrated-v1';
 const PUSH_PREFS_STORAGE_KEY = 'family-scheduler-push-preferences-v1';
-const PUSH_CUSTOM_SOUND_SOURCE_KEY = 'family-scheduler-custom-sound-source-v1';
+const NOTIFICATION_SETTINGS_STORAGE_KEY = 'notification_settings';
 const reminderLeadOptions: ReminderLeadMinutes[] = [5, 10, 15, 30];
 const pushSoundOptions: Array<{ value: PushSoundPreset; label: string }> = [
   { value: '/sounds/standard.mp3', label: 'Standard' },
@@ -158,7 +159,7 @@ const pushSoundOptions: Array<{ value: PushSoundPreset; label: string }> = [
 ];
 const defaultPushLeadMinutes: ReminderLeadMinutes = 10;
 const defaultPushSound: PushSoundPreset = '/sounds/standard.mp3';
-const SERVICE_WORKER_URL = '/sw.js?v=9';
+const SERVICE_WORKER_URL = '/sw.js?v=10';
 
 const sanitizeReminderLead = (value: unknown): ReminderLeadMinutes => {
   const numeric = Number(value);
@@ -232,6 +233,13 @@ const getWeekStart = (date: Date) => {
   next.setHours(0, 0, 0, 0);
   next.setDate(next.getDate() - day);
   return next;
+};
+
+const getNextOccurrenceDate = (dayIndex: number, fromDate: Date) => {
+  const base = new Date(fromDate);
+  base.setHours(0, 0, 0, 0);
+  const diff = (dayIndex - base.getDay() + 7) % 7;
+  return addDays(base, diff);
 };
 
 const toIsoDate = (date: Date) => {
@@ -495,6 +503,7 @@ const parseComplexWhatsAppMessage = (
 
     events.push({
       dayIndex: currentDayIndex,
+      date: toIsoDate(hasToday ? new Date() : getNextOccurrenceDate(currentDayIndex, new Date())),
       time: chosenTime,
       child: inferredChild,
       title: description,
@@ -506,7 +515,10 @@ const parseComplexWhatsAppMessage = (
     return null;
   }
 
-  const targetWeekStart = text.includes('היום') ? getWeekStart(new Date()) : weekStart;
+  const firstEventDate = events[0]?.date ? parseEventDateKey(events[0].date) : null;
+  const targetWeekStart = firstEventDate
+    ? getWeekStart(firstEventDate)
+    : (text.includes('היום') ? getWeekStart(new Date()) : weekStart);
   return { targetWeekStart, events };
 };
 
@@ -794,8 +806,6 @@ export default function FamilyScheduler() {
   const [parentWatchChildren, setParentWatchChildren] = useState<PushChildName[]>(['רביד', 'עמית', 'אלין']);
   const [reminderLeadMinutes, setReminderLeadMinutes] = useState<ReminderLeadMinutes>(defaultPushLeadMinutes);
   const [pushSound, setPushSound] = useState<PushSoundPreset>(defaultPushSound);
-  const [customSoundUrl, setCustomSoundUrl] = useState('');
-  const [customSoundData, setCustomSoundData] = useState('');
   const [installPromptEvent, setInstallPromptEvent] = useState<BeforeInstallPromptEvent | null>(null);
   const [isInstallReady, setIsInstallReady] = useState(false);
   const [, setSubscriptionEndpoint] = useState("");
@@ -811,7 +821,7 @@ export default function FamilyScheduler() {
 
   const weekKey = toIsoDate(weekStart);
   const days = weeksData[weekKey] ?? [];
-  const selectedSoundPath = customSoundData || customSoundUrl.trim() || pushSound;
+  const notificationsApproved = pushEnabled || (typeof Notification !== 'undefined' && Notification.permission === 'granted');
 
   const playPushSound = (soundUrl: string) => {
     if (typeof window === 'undefined') {
@@ -821,54 +831,6 @@ export default function FamilyScheduler() {
     const audio = new Audio(soundUrl);
     audio.volume = 0.85;
     void audio.play().catch(() => undefined);
-  };
-
-  const saveAndPlayCustomSound = () => {
-    const source = selectedSoundPath;
-    if (!source) {
-      setApiError('יש לבחור או להזין צליל לפני שמירה.');
-      return;
-    }
-
-    try {
-      localStorage.setItem(PUSH_PREFS_STORAGE_KEY, JSON.stringify({
-        reminderLeadMinutes,
-        sound: pushSound,
-      }));
-      localStorage.setItem(PUSH_CUSTOM_SOUND_SOURCE_KEY, JSON.stringify({
-        customSoundUrl: customSoundUrl.trim(),
-        customSoundData,
-      }));
-    } catch {
-      // no-op
-    }
-
-    playPushSound(source);
-    setSuccessMessage('הצליל נשמר והושמע בהצלחה.');
-  };
-
-  const handleCustomSoundFileSelect = (event: React.ChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0] || null;
-    if (!file) {
-      return;
-    }
-
-    const reader = new FileReader();
-    reader.onload = () => {
-      const result = typeof reader.result === 'string' ? reader.result : '';
-      if (!result) {
-        setApiError('לא ניתן לקרוא את קובץ האודיו שנבחר.');
-        return;
-      }
-
-      setCustomSoundData(result);
-      setCustomSoundUrl('');
-      setSuccessMessage(`נבחר קובץ צליל: ${file.name}`);
-    };
-    reader.onerror = () => {
-      setApiError('טעינת קובץ האודיו נכשלה.');
-    };
-    reader.readAsDataURL(file);
   };
 
   const ensureServiceWorkerRegistration = useCallback(async () => {
@@ -908,7 +870,7 @@ export default function FamilyScheduler() {
       type: 'PUSH_PREFERENCES',
       payload: {
         reminderLeadMinutes,
-        sound: sanitizePushSound(selectedSoundPath),
+        sound: pushSound,
       },
     };
 
@@ -920,7 +882,7 @@ export default function FamilyScheduler() {
     if (navigator.serviceWorker.controller) {
       navigator.serviceWorker.controller.postMessage(message);
     }
-  }, [ensureServiceWorkerRegistration, reminderLeadMinutes, selectedSoundPath]);
+  }, [ensureServiceWorkerRegistration, reminderLeadMinutes, pushSound]);
 
   useEffect(() => {
     setWeeksData((prev) => {
@@ -1059,7 +1021,7 @@ export default function FamilyScheduler() {
 
   useEffect(() => {
     try {
-      const rawPrefs = localStorage.getItem(PUSH_PREFS_STORAGE_KEY);
+      const rawPrefs = localStorage.getItem(NOTIFICATION_SETTINGS_STORAGE_KEY) || localStorage.getItem(PUSH_PREFS_STORAGE_KEY);
       if (!rawPrefs) {
         return;
       }
@@ -1067,13 +1029,6 @@ export default function FamilyScheduler() {
       const parsed = JSON.parse(rawPrefs) as { reminderLeadMinutes?: unknown; sound?: unknown };
       setReminderLeadMinutes(sanitizeReminderLead(parsed?.reminderLeadMinutes));
       setPushSound(sanitizePushSound(parsed?.sound));
-
-      const rawCustomSource = localStorage.getItem(PUSH_CUSTOM_SOUND_SOURCE_KEY);
-      if (rawCustomSource) {
-        const parsedCustom = JSON.parse(rawCustomSource) as { customSoundUrl?: unknown; customSoundData?: unknown };
-        setCustomSoundUrl(typeof parsedCustom?.customSoundUrl === 'string' ? parsedCustom.customSoundUrl : '');
-        setCustomSoundData(typeof parsedCustom?.customSoundData === 'string' ? parsedCustom.customSoundData : '');
-      }
     } catch {
       // no-op
     }
@@ -1081,20 +1036,20 @@ export default function FamilyScheduler() {
 
   useEffect(() => {
     try {
-      localStorage.setItem(PUSH_PREFS_STORAGE_KEY, JSON.stringify({
+      localStorage.setItem(NOTIFICATION_SETTINGS_STORAGE_KEY, JSON.stringify({
         reminderLeadMinutes,
         sound: pushSound,
       }));
-      localStorage.setItem(PUSH_CUSTOM_SOUND_SOURCE_KEY, JSON.stringify({
-        customSoundUrl: customSoundUrl.trim(),
-        customSoundData,
+      localStorage.setItem(PUSH_PREFS_STORAGE_KEY, JSON.stringify({
+        reminderLeadMinutes,
+        sound: pushSound,
       }));
     } catch {
       // no-op
     }
 
     void syncPushPreferencesToServiceWorker().catch(() => undefined);
-  }, [reminderLeadMinutes, pushSound, customSoundUrl, customSoundData, syncPushPreferencesToServiceWorker]);
+  }, [reminderLeadMinutes, pushSound, syncPushPreferencesToServiceWorker]);
 
   useEffect(() => {
     if (!("serviceWorker" in navigator)) {
@@ -1107,7 +1062,7 @@ export default function FamilyScheduler() {
       if (data?.type === 'PLAY_PUSH_SOUND') {
         const selectedSound = (typeof data?.payload?.sound === 'string' && data.payload.sound)
           ? data.payload.sound
-          : selectedSoundPath;
+          : pushSound;
         playPushSound(selectedSound);
         return;
       }
@@ -1137,7 +1092,7 @@ export default function FamilyScheduler() {
     return () => {
       navigator.serviceWorker.removeEventListener('message', onWorkerMessage);
     };
-  }, [selectedSoundPath]);
+  }, [pushSound]);
 
   useEffect(() => {
     let cancelled = false;
@@ -1570,12 +1525,18 @@ export default function FamilyScheduler() {
   const upsertEventToDatabase = async (event: SchedulerEvent, dayIndex: number) => {
     try {
       console.log('[API] POST /api/schedule -> start', event);
+      const parsedEventDate = parseEventDateKey(event.date);
+      const normalizedApiDate = parsedEventDate
+        ? toIsoDate(parsedEventDate)
+        : toIsoDate(getNextOccurrenceDate(dayIndex, new Date()));
+
       let response = await fetch('/api/schedule', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           event: {
             ...event,
+            date: normalizedApiDate,
             dayIndex,
           },
         }),
@@ -1588,6 +1549,7 @@ export default function FamilyScheduler() {
           body: JSON.stringify({
             event: {
               ...event,
+              date: normalizedApiDate,
               dayIndex,
             },
           }),
@@ -1707,8 +1669,8 @@ export default function FamilyScheduler() {
     }
 
     try {
+      localStorage.removeItem(NOTIFICATION_SETTINGS_STORAGE_KEY);
       localStorage.removeItem(PUSH_PREFS_STORAGE_KEY);
-      localStorage.removeItem(PUSH_CUSTOM_SOUND_SOURCE_KEY);
       localStorage.removeItem(PUSH_USER_STORAGE_KEY);
     } catch {
       // no-op
@@ -1719,8 +1681,6 @@ export default function FamilyScheduler() {
     setParentWatchChildren(['רביד', 'עמית', 'אלין']);
     setReminderLeadMinutes(defaultPushLeadMinutes);
     setPushSound(defaultPushSound);
-    setCustomSoundUrl('');
-    setCustomSoundData('');
     setSuccessMessage('ההגדרות אופסו בהצלחה.');
     if (apiError) {
       setApiError('');
@@ -1828,13 +1788,14 @@ export default function FamilyScheduler() {
       return null;
     }
 
-    const targetWeekStart = hasTodayKeyword ? getWeekStart(today) : weekStart;
     const dayIndex = hasTodayKeyword ? today.getDay() : explicitDayIndex!;
+    const targetDate = hasTodayKeyword ? today : getNextOccurrenceDate(dayIndex, today);
+    const targetWeekStart = getWeekStart(targetDate);
     const { type, title } = detectTypeAndTitle(text);
 
     return {
       targetWeekStart,
-      events: [{ dayIndex, time: normalizedTime, child, title, type }],
+      events: [{ dayIndex, date: toIsoDate(targetDate), time: normalizedTime, child, title, type }],
     };
   };
 
@@ -1956,7 +1917,9 @@ export default function FamilyScheduler() {
         continue;
       }
 
-      const eventDate = toEventDateKey(addDays(targetWeekStart, eventData.dayIndex));
+      const parsedEventDate = eventData.date ? parseEventDateKey(eventData.date) : null;
+      const resolvedEventDate = parsedEventDate ?? addDays(targetWeekStart, eventData.dayIndex);
+      const eventDate = toEventDateKey(resolvedEventDate);
       const recurringTemplateId = eventData.recurringWeekly ? generateId() : undefined;
       const event: SchedulerEvent = {
         id: generateId(),
@@ -2409,7 +2372,7 @@ export default function FamilyScheduler() {
                       {renderChildBadges(event.child)}
                       <div className="flex items-center gap-2">
                         {event.completed && (
-                          <span className="text-[11px] font-bold text-emerald-700 bg-emerald-100 px-2 py-0.5 rounded-full">✓ בוצע</span>
+                          <span className="text-[11px] font-bold text-emerald-700 bg-emerald-100 px-2 py-0.5 rounded-full">V</span>
                         )}
                         <span className="text-slate-700 font-semibold text-sm">{event.title}</span>
                         {(event.isRecurring || event.recurringTemplateId) && (
@@ -2508,77 +2471,43 @@ export default function FamilyScheduler() {
               )}
             </div>
 
-            <div className="space-y-2 border border-slate-200 rounded-xl p-2.5 bg-slate-50">
-              <div>
-                <div className="text-xs text-slate-500 mb-1">זמן התראה לפני אירוע</div>
-                <select
-                  value={reminderLeadMinutes}
-                  onChange={(event) => setReminderLeadMinutes(sanitizeReminderLead(event.target.value))}
-                  className="w-full rounded-xl border border-slate-300 px-3 py-1.5 text-sm text-slate-700 outline-none focus:border-blue-400"
-                >
-                  {reminderLeadOptions.map((minutes) => (
-                    <option key={`settings-lead-${minutes}`} value={minutes}>{minutes} דקות לפני</option>
-                  ))}
-                </select>
+            {notificationsApproved && (
+              <div className="space-y-2 border border-slate-200 rounded-xl p-2.5 bg-slate-50">
+                <div>
+                  <div className="text-xs text-slate-500 mb-1">בחירת צליל</div>
+                  <select
+                    value={pushSound}
+                    onChange={(event) => setPushSound(sanitizePushSound(event.target.value))}
+                    className="w-full rounded-xl border border-slate-300 px-3 py-1.5 text-sm text-slate-700 outline-none focus:border-blue-400"
+                  >
+                    {pushSoundOptions.map((option) => (
+                      <option key={`settings-sound-${option.value}`} value={option.value}>{option.label}</option>
+                    ))}
+                  </select>
+                </div>
+
+                <div>
+                  <div className="text-xs text-slate-500 mb-1">זמן התראה</div>
+                  <select
+                    value={reminderLeadMinutes}
+                    onChange={(event) => setReminderLeadMinutes(sanitizeReminderLead(event.target.value))}
+                    className="w-full rounded-xl border border-slate-300 px-3 py-1.5 text-sm text-slate-700 outline-none focus:border-blue-400"
+                  >
+                    {reminderLeadOptions.map((minutes) => (
+                      <option key={`settings-lead-${minutes}`} value={minutes}>{minutes} דקות לפני</option>
+                    ))}
+                  </select>
+                </div>
               </div>
+            )}
 
-              <div>
-                <div className="text-xs text-slate-500 mb-1">צליל מובנה</div>
-                <select
-                  value={pushSound}
-                  onChange={(event) => {
-                    setPushSound(sanitizePushSound(event.target.value));
-                    setCustomSoundData('');
-                  }}
-                  className="w-full rounded-xl border border-slate-300 px-3 py-1.5 text-sm text-slate-700 outline-none focus:border-blue-400"
-                >
-                  {pushSoundOptions.map((option) => (
-                    <option key={`settings-sound-${option.value}`} value={option.value}>{option.label}</option>
-                  ))}
-                </select>
-              </div>
-
-              <div>
-                <div className="text-xs text-slate-500 mb-1">קישור מותאם ל-mp3</div>
-                <input
-                  value={customSoundUrl}
-                  onChange={(event) => {
-                    setCustomSoundUrl(event.target.value);
-                    if (event.target.value.trim()) {
-                      setCustomSoundData('');
-                    }
-                  }}
-                  className="w-full rounded-xl border border-slate-300 px-3 py-1.5 text-sm text-slate-700 outline-none focus:border-blue-400"
-                  placeholder="https://example.com/alert.mp3"
-                />
-              </div>
-
-              <div>
-                <div className="text-xs text-slate-500 mb-1">או בחר קובץ אודיו מהמכשיר</div>
-                <input
-                  type="file"
-                  accept="audio/*"
-                  onChange={handleCustomSoundFileSelect}
-                  className="w-full rounded-xl border border-slate-300 px-3 py-1.5 text-sm text-slate-700"
-                />
-              </div>
-
-              <button
-                type="button"
-                onClick={saveAndPlayCustomSound}
-                className="w-full rounded-xl bg-indigo-600 px-3 py-2 text-sm font-bold text-white hover:bg-indigo-700 transition"
-              >
-                שמור והשמע דוגמה
-              </button>
-
-              <button
-                type="button"
-                onClick={resetSettingsWithPassword}
-                className="w-full rounded-xl bg-rose-600 px-3 py-2 text-sm font-bold text-white hover:bg-rose-700 transition"
-              >
-                איפוס הגדרות (עם סיסמה)
-              </button>
-            </div>
+            <button
+              type="button"
+              onClick={resetSettingsWithPassword}
+              className="w-full rounded-xl bg-rose-600 px-3 py-2 text-sm font-bold text-white hover:bg-rose-700 transition"
+            >
+              איפוס הגדרות (עם סיסמה)
+            </button>
           </div>
         </div>
       )}
