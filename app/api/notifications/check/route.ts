@@ -19,13 +19,12 @@ const runCheck = async (request: NextRequest) => {
   }
 
   try {
-    const israelTime = new Date().toLocaleString("en-US", { timeZone: "Asia/Jerusalem" });
+    const currentUtcTime = new Date().toISOString();
 
     const result = await sendUpcomingTaskReminders({
-      timeZone: "Asia/Jerusalem",
-      windowForwardMinutes: 5,
+      windowForwardMinutes: 15,
     });
-    console.log("Current Israel Time:", israelTime);
+    console.log("Current UTC Time:", currentUtcTime);
     console.log("[NOTIFICATIONS_CHECK] cron result", result);
     return NextResponse.json({ ok: true, ...result });
   } catch (error) {

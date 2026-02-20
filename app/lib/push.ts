@@ -209,6 +209,7 @@ const sendToSubscription = async (row: SubscriptionRow, payload: PushPayload) =>
   }
 
   try {
+    console.log("Sending Push Notification for:", payload.confirmTask?.eventTitle || payload.title);
     console.log("Sending push to:", row.endpoint);
     await webpush.sendNotification(
       {
@@ -370,30 +371,6 @@ const shouldSubscriptionReceiveTask = (
   return false;
 };
 
-const parseTaskDate = (value: string) => {
-  const trimmed = value.trim();
-
-  const isoDateTime = trimmed.match(/^(\d{4}-\d{2}-\d{2})T/);
-  if (isoDateTime) {
-    const parsed = new Date(`${isoDateTime[1]}T00:00:00`);
-    return Number.isNaN(parsed.getTime()) ? null : parsed;
-  }
-
-  const yyyyMmDd = trimmed.match(/^(\d{4})-(\d{2})-(\d{2})$/);
-  if (yyyyMmDd) {
-    const parsed = new Date(`${yyyyMmDd[1]}-${yyyyMmDd[2]}-${yyyyMmDd[3]}T00:00:00`);
-    return Number.isNaN(parsed.getTime()) ? null : parsed;
-  }
-
-  const ddMmYyyy = trimmed.match(/^(\d{2})-(\d{2})-(\d{4})$/);
-  if (ddMmYyyy) {
-    const parsed = new Date(`${ddMmYyyy[3]}-${ddMmYyyy[2]}-${ddMmYyyy[1]}T00:00:00`);
-    return Number.isNaN(parsed.getTime()) ? null : parsed;
-  }
-
-  return null;
-};
-
 const parseTimeToMinutes = (value: string) => {
   const match = value.trim().match(/^(\d{1,2}):(\d{2})$/);
   if (!match) {
@@ -409,37 +386,45 @@ const parseTimeToMinutes = (value: string) => {
   return hours * 60 + minutes;
 };
 
-const toDateKey = (date: Date) => {
-  const y = date.getFullYear();
-  const m = `${date.getMonth() + 1}`.padStart(2, "0");
-  const d = `${date.getDate()}`.padStart(2, "0");
-  return `${y}-${m}-${d}`;
-};
+const parseTaskStartUtc = (dayValue: string, timeValue: string) => {
+  const day = dayValue.trim();
+  const time = timeValue.trim();
 
-const REMINDER_TIMEZONE = "Asia/Jerusalem";
+  if (!day || !time) {
+    return null;
+  }
 
-const getNowInReminderTimezone = (timeZone: string) => {
-  const formatter = new Intl.DateTimeFormat("en-CA", {
-    timeZone,
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-    hour12: false,
-  });
+  const timeMatch = time.match(/^(\d{1,2}):(\d{2})$/);
+  if (!timeMatch) {
+    return null;
+  }
 
-  const parts = formatter.formatToParts(new Date());
-  const getPart = (type: string) => parts.find((part) => part.type === type)?.value || "00";
+  const hours = Number(timeMatch[1]);
+  const minutes = Number(timeMatch[2]);
+  if (hours < 0 || hours > 23 || minutes < 0 || minutes > 59) {
+    return null;
+  }
 
-  const dateKey = `${getPart("year")}-${getPart("month")}-${getPart("day")}`;
-  const hours = Number(getPart("hour"));
-  const minutes = Number(getPart("minute"));
+  if (/^\d{4}-\d{2}-\d{2}T/.test(day)) {
+    const parsed = new Date(day);
+    return Number.isNaN(parsed.getTime()) ? null : parsed;
+  }
 
-  return {
-    dateKey,
-    minutes: (Number.isFinite(hours) ? hours : 0) * 60 + (Number.isFinite(minutes) ? minutes : 0),
-  };
+  const yyyyMmDd = day.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (yyyyMmDd) {
+    const isoUtc = `${yyyyMmDd[1]}-${yyyyMmDd[2]}-${yyyyMmDd[3]}T${`${hours}`.padStart(2, "0")}:${`${minutes}`.padStart(2, "0")}:00.000Z`;
+    const parsed = new Date(isoUtc);
+    return Number.isNaN(parsed.getTime()) ? null : parsed;
+  }
+
+  const ddMmYyyy = day.match(/^(\d{2})-(\d{2})-(\d{4})$/);
+  if (ddMmYyyy) {
+    const isoUtc = `${ddMmYyyy[3]}-${ddMmYyyy[2]}-${ddMmYyyy[1]}T${`${hours}`.padStart(2, "0")}:${`${minutes}`.padStart(2, "0")}:00.000Z`;
+    const parsed = new Date(isoUtc);
+    return Number.isNaN(parsed.getTime()) ? null : parsed;
+  }
+
+  return null;
 };
 
 const wasReminderDispatched = async (dispatchKey: string) => {
@@ -462,7 +447,6 @@ const markReminderDispatched = async (dispatchKey: string) => {
 
 export const sendUpcomingTaskReminders = async (
   options?: {
-    timeZone?: string;
     windowForwardMinutes?: number;
   }
 ) => {
@@ -477,13 +461,12 @@ export const sendUpcomingTaskReminders = async (
     // no-op: handled by schedule bootstrap route in normal flow
   }
 
-  const reminderTimeZone = options?.timeZone?.trim() || REMINDER_TIMEZONE;
   const windowForwardMinutesRaw = Number(options?.windowForwardMinutes);
   const windowForwardMinutes = Number.isFinite(windowForwardMinutesRaw)
-    ? Math.max(0, Math.min(10, Math.floor(windowForwardMinutesRaw)))
-    : 0;
-
-  const { dateKey: nowDateKey, minutes: nowMinutes } = getNowInReminderTimezone(reminderTimeZone);
+    ? Math.max(0, Math.min(15, Math.floor(windowForwardMinutesRaw)))
+    : 15;
+  const nowUtc = new Date();
+  const nowUtcMs = nowUtc.getTime();
 
   const subscriptionsResult = await sql<SubscriptionRow>`
     SELECT endpoint, p256dh, auth, user_name, receive_all, watch_children, reminder_lead_minutes
@@ -511,8 +494,7 @@ export const sendUpcomingTaskReminders = async (
       COALESCE(require_confirmation, FALSE) AS require_confirmation,
       COALESCE(needs_ack, require_confirmation, FALSE) AS needs_ack
     FROM family_schedule
-    WHERE COALESCE(event_date, day) = ${nowDateKey}
-      AND COALESCE(send_notification, TRUE) = TRUE
+    WHERE COALESCE(send_notification, TRUE) = TRUE
       AND COALESCE(completed, FALSE) = FALSE
       AND COALESCE(notified, FALSE) = FALSE
   `;
@@ -524,7 +506,6 @@ export const sendUpcomingTaskReminders = async (
     notifications_disabled: 0,
     type_not_eligible: 0,
     invalid_date: 0,
-    date_mismatch: 0,
     invalid_time: 0,
     outside_window: 0,
     offset_not_due: 0,
@@ -552,16 +533,10 @@ export const sendUpcomingTaskReminders = async (
       continue;
     }
 
-    const taskDate = parseTaskDate(task.day || "");
-    if (!taskDate) {
+    const taskStartUtc = parseTaskStartUtc(task.day || "", task.time || "");
+    if (!taskStartUtc) {
       skippedByReason.invalid_date += 1;
       debugReminderLog("skip invalid_date", { taskId: task.id, day: task.day });
-      continue;
-    }
-
-    if (toDateKey(taskDate) !== nowDateKey) {
-      skippedByReason.date_mismatch += 1;
-      debugReminderLog("skip date_mismatch", { taskId: task.id, taskDate: toDateKey(taskDate), nowDateKey });
       continue;
     }
 
@@ -572,10 +547,10 @@ export const sendUpcomingTaskReminders = async (
       continue;
     }
 
-    const diffMinutes = taskMinutes - nowMinutes;
-    if (diffMinutes < 0 || diffMinutes > 30) {
+    const diffMinutes = Math.floor((taskStartUtc.getTime() - nowUtcMs) / 60000);
+    if (diffMinutes < 0 || diffMinutes > 45) {
       skippedByReason.outside_window += 1;
-      debugReminderLog("skip outside_window", { taskId: task.id, diffMinutes, taskTime: task.time, nowMinutes });
+      debugReminderLog("skip outside_window", { taskId: task.id, diffMinutes, taskTime: task.time, nowUtc: nowUtc.toISOString() });
       continue;
     }
 
@@ -602,7 +577,7 @@ export const sendUpcomingTaskReminders = async (
       }
 
       hadDueByOffset = true;
-      const dispatchKey = `${task.id}:${toDateKey(taskDate)}:${task.time}:${reminderLeadMinutes}:${subscription.endpoint}`;
+      const dispatchKey = `${task.id}:${taskStartUtc.toISOString()}:${reminderLeadMinutes}:${subscription.endpoint}`;
       if (await wasReminderDispatched(dispatchKey)) {
         skippedByReason.already_dispatched += 1;
         debugReminderLog("skip already_dispatched", { taskId: task.id, dispatchKey });
@@ -655,20 +630,16 @@ export const sendUpcomingTaskReminders = async (
     scanned,
     sent,
     skippedByReason,
-    nowDateKey,
-    nowMinutes,
+    nowUtcIso: nowUtc.toISOString(),
     subscriptions: subscriptions.length,
-    reminderTimeZone,
     windowForwardMinutes,
   });
   return {
     scanned,
     sent,
     skippedByReason,
-    nowDateKey,
-    nowMinutes,
+    nowUtcIso: nowUtc.toISOString(),
     subscriptions: subscriptions.length,
-    reminderTimeZone,
     windowForwardMinutes,
   };
 };
