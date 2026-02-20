@@ -458,6 +458,9 @@ type UpsertResultFailure = {
 const isUpsertSuccess = (result: UpsertResultSuccess | UpsertResultFailure): result is UpsertResultSuccess =>
   result.ok === true;
 
+const isUpsertFailure = (result: UpsertResultSuccess | UpsertResultFailure): result is UpsertResultFailure =>
+  result.ok === false;
+
 const upsertScheduleEvent = async (incoming: ReturnType<typeof sanitizeDbEvent>) => {
   if (!incoming) {
     return { ok: false as const, error: "Invalid event payload" };
@@ -919,12 +922,13 @@ export async function POST(request: NextRequest) {
         return { ok: true as const, row: upsertResult.row, event: upsertResult.event };
       }));
 
-      const failed = upsertResults.find((result) => !result.ok);
+      const failed = upsertResults.find(isUpsertFailure);
       if (failed) {
         return NextResponse.json({ error: failed.error }, { status: 500 });
       }
 
-      const savedEvents = upsertResults.filter(isUpsertSuccess).map((result) => result.event);
+      const successfulResults = upsertResults.filter(isUpsertSuccess);
+      const savedEvents = successfulResults.map((result) => result.event);
 
       return NextResponse.json({ ok: true, events: savedEvents });
     }
@@ -1024,12 +1028,13 @@ export async function POST(request: NextRequest) {
         return { ok: true as const, row: upsertResult.row, event: upsertResult.event };
       }));
 
-      const failed = upsertResults.find((result) => !result.ok);
+      const failed = upsertResults.find(isUpsertFailure);
       if (failed) {
         return NextResponse.json({ error: failed.error }, { status: 500 });
       }
 
-      const savedEvents = upsertResults.filter(isUpsertSuccess).map((result) => result.event);
+      const successfulResults = upsertResults.filter(isUpsertSuccess);
+      const savedEvents = successfulResults.map((result) => result.event);
 
       if (!savedEvents.length) {
         return NextResponse.json({ error: "No valid bulk events were found" }, { status: 400 });

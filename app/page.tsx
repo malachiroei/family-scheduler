@@ -2384,22 +2384,26 @@ export default function FamilyScheduler() {
         <Settings size={18} />
       </button>
 
-      <div className="max-w-6xl mx-auto mb-4 flex items-center justify-center gap-3 bg-white/95 border border-slate-200 rounded-2xl px-3 py-3 shadow-sm print:hidden w-fit">
+      <div className="max-w-6xl mx-auto mb-4 pb-4 print:hidden">
+        <div className="relative flex items-center justify-center">
         <button
           onClick={() => shiftWeek(1)}
-          className="h-9 w-9 rounded-full bg-slate-100 hover:bg-slate-200 text-slate-700 transition flex items-center justify-center"
+          className="absolute right-0 h-9 w-9 rounded-full bg-white border border-slate-200 shadow-sm hover:bg-slate-50 text-slate-700 transition flex items-center justify-center"
           aria-label="שבוע הבא"
         >
           <ChevronRight size={18} />
         </button>
-        <div className="text-slate-800 font-extrabold text-lg tracking-tight px-1">{weekRangeLabel}</div>
+        <div className="w-[80%] rounded-full bg-white border border-slate-200 shadow-sm px-6 py-3 text-center text-slate-800 font-extrabold text-xl tracking-tight">
+          {weekRangeLabel}
+        </div>
         <button
           onClick={() => shiftWeek(-1)}
-          className="h-9 w-9 rounded-full bg-slate-100 hover:bg-slate-200 text-slate-700 transition flex items-center justify-center"
+          className="absolute left-0 h-9 w-9 rounded-full bg-white border border-slate-200 shadow-sm hover:bg-slate-50 text-slate-700 transition flex items-center justify-center"
           aria-label="שבוע קודם"
         >
           <ChevronLeft size={18} />
         </button>
+        </div>
       </div>
 
       <div className="max-w-6xl mx-auto mb-2 bg-white border border-slate-200 rounded-2xl p-2 shadow-sm print:hidden space-y-2">
