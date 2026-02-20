@@ -893,7 +893,6 @@ export default function FamilyScheduler() {
     state: 'idle',
     message: '',
   });
-  const [showRecurringOnly] = useState(false);
   const [selectedChildFilter, setSelectedChildFilter] = useState<'all' | BaseChildKey>('all');
   const [settingsChildFilter, setSettingsChildFilter] = useState<'all' | BaseChildKey>('all');
   const [weekStart, setWeekStart] = useState(initialWeekStart);
@@ -2433,9 +2432,6 @@ export default function FamilyScheduler() {
             const matchesChild = selectedChildFilter === 'all' || getChildKeys(event.child).includes(selectedChildFilter);
             if (!matchesChild) {
               return false;
-            }
-            if (showRecurringOnly) {
-              return isRecurringEvent;
             }
             if (isRecurringEvent) {
               return true;

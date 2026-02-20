@@ -403,18 +403,54 @@ const parseBulkEventsFromText = (text: string) => {
     title: string;
     type: string;
   }> = [];
+  const seenKeys = new Set<string>();
 
   for (const line of lines) {
-    const dayMatch = dayMatchers.find((item) => item.regex.test(line));
-    if (!dayMatch) {
+    const pairRegex = /(?:^|\s|ב)(?:יום\s*)?(ראשון|שני|שלישי|רביעי|חמישי|שישי|שבת)[^\d]*(\d{1,2}:\d{2}|\d{3,4})/g;
+    const pairMatches = [...line.matchAll(pairRegex)];
+
+    if (pairMatches.length > 0) {
+      for (const match of pairMatches) {
+        const dayText = (match[1] || '').trim();
+        const timeText = (match[2] || '').trim();
+        const dayMatch = dayMatchers.find((item) => item.regex.test(dayText));
+        const normalizedTime = normalizeClock(timeText);
+        if (!dayMatch || !normalizedTime) {
+          continue;
+        }
+
+        const key = `${dayMatch.dayIndex}|${normalizedTime}`;
+        if (seenKeys.has(key)) {
+          continue;
+        }
+        seenKeys.add(key);
+
+        const date = new Date(nextSunday);
+        date.setDate(nextSunday.getDate() + dayMatch.dayIndex);
+        events.push({
+          date: toIsoDate(date),
+          dayIndex: dayMatch.dayIndex,
+          time: normalizedTime,
+          child: hasAmitMention ? "amit" : "amit",
+          title: "אימון",
+          type: "gym",
+        });
+      }
       continue;
     }
 
+    const dayMatch = dayMatchers.find((item) => item.regex.test(line));
     const timeToken = line.match(/(\d{1,2}:\d{2}|\d{3,4})/)?.[1] || "";
     const normalizedTime = normalizeClock(timeToken);
-    if (!normalizedTime) {
+    if (!dayMatch || !normalizedTime) {
       continue;
     }
+
+    const key = `${dayMatch.dayIndex}|${normalizedTime}`;
+    if (seenKeys.has(key)) {
+      continue;
+    }
+    seenKeys.add(key);
 
     const date = new Date(nextSunday);
     date.setDate(nextSunday.getDate() + dayMatch.dayIndex);
