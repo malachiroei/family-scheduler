@@ -449,6 +449,7 @@ export const sendUpcomingTaskReminders = async (
   options?: {
     windowForwardMinutes?: number;
     strictChildUserOnly?: boolean;
+    onAttempt?: (attempt: { userName: string; eventTitle: string }) => void;
   }
 ) => {
   await ensurePushTables();
@@ -598,6 +599,10 @@ export const sendUpcomingTaskReminders = async (
 
       const childSubscriptionName = (subscription.user_name || "").trim();
       const childDisplayName = isChildUserName(childSubscriptionName) ? childSubscriptionName : defaultChildName;
+      options?.onAttempt?.({
+        userName: childSubscriptionName || "(unknown)",
+        eventTitle: String(task.text || "משימה"),
+      });
       const sendResult = await sendToSubscription(subscription, {
         title: "תזכורת למשימה",
         body: `${task.text} מתחילה ב-${diffMinutes} דקות (${task.time})`,

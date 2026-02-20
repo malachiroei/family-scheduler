@@ -24,6 +24,9 @@ const runCheck = async (request: NextRequest) => {
     const result = await sendUpcomingTaskReminders({
       windowForwardMinutes: 15,
       strictChildUserOnly: true,
+      onAttempt: ({ userName, eventTitle }) => {
+        console.log(`DEBUG: Attempting to send to ${userName} for event ${eventTitle}`);
+      },
     });
     console.log("Current UTC Time:", currentUtcTime);
     console.log("[NOTIFICATIONS_CHECK] cron result", result);
