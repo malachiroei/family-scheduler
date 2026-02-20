@@ -1,6 +1,7 @@
 "use client";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import Image from 'next/image';
+import { useRouter } from 'next/navigation';
 import { Dog, Dumbbell, Music, GraduationCap, Trophy, Printer, Image as ImageIcon, MessageCircle, ChevronRight, ChevronLeft, X, Plus, CalendarDays, Settings } from 'lucide-react';
 import html2canvas from 'html2canvas';
 
@@ -458,7 +459,7 @@ const parseComplexWhatsAppMessage = (
   const parseBulkScheduleLines = (rawText: string): { targetWeekStart: Date; events: AiEvent[] } | null => {
     const nextWeekStart = addDays(getWeekStart(new Date()), 7);
     const lines = rawText
-      .split(/\r?\n/)
+      .split(/\r?\n|•|\u2022|\||;|,/) 
       .map((line) => line.trim())
       .filter(Boolean);
 
@@ -488,7 +489,7 @@ const parseComplexWhatsAppMessage = (
         : (/^אימון\b/.test(titleTail) ? titleTail : `אימון ${titleTail}`);
 
       const targetDate = addDays(nextWeekStart, dayIndex);
-      const key = `${dayIndex}|${normalizedTime}`;
+      const key = `${dayIndex}|${normalizedTime}|${resolvedTitle}`;
       if (seen.has(key)) {
         continue;
       }
@@ -839,6 +840,7 @@ const getEventIcon = (eventType: EventType, title?: string) => {
 };
 
 export default function FamilyScheduler() {
+  const router = useRouter();
   const initialWeekStart = useMemo(() => getWeekStart(new Date()), []);
   const initialWeekKey = useMemo(() => toIsoDate(initialWeekStart), [initialWeekStart]);
 
@@ -1990,10 +1992,10 @@ export default function FamilyScheduler() {
 
   const persistAiEventsToDatabase = async (events: AiEvent[], targetWeekStart: Date) => {
     setDbSyncStatus({ state: 'saving', message: 'Saving AI events...' });
-    for (const eventData of events) {
+    await Promise.all(events.map(async (eventData) => {
       const normalizedChild = normalizeChildKey(String(eventData.child));
       if (!normalizedChild || eventData.dayIndex < 0 || eventData.dayIndex > 6) {
-        continue;
+        return;
       }
 
       const parsedEventDate = eventData.date ? parseEventDateKey(eventData.date) : null;
@@ -2015,9 +2017,10 @@ export default function FamilyScheduler() {
       };
 
       await upsertEventToDatabase(event, eventData.dayIndex);
-    }
+    }));
 
     await refetchEventsFromDatabase(targetWeekStart);
+    router.refresh();
     setDbSyncStatus({ state: 'saved', message: 'Saved' });
   };
 

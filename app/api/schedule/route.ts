@@ -326,6 +326,111 @@ const toDayIndex = (dayValue: string, fallback: number) => {
   return fallback;
 };
 
+const toIsoDate = (date: Date) => {
+  const y = date.getFullYear();
+  const m = `${date.getMonth() + 1}`.padStart(2, "0");
+  const d = `${date.getDate()}`.padStart(2, "0");
+  return `${y}-${m}-${d}`;
+};
+
+const getNextWeekSunday = (fromDate: Date) => {
+  const baseSunday = new Date(fromDate);
+  baseSunday.setHours(0, 0, 0, 0);
+  baseSunday.setDate(baseSunday.getDate() - baseSunday.getDay());
+
+  const nextSunday = new Date(baseSunday);
+  nextSunday.setDate(nextSunday.getDate() + 7);
+  return nextSunday;
+};
+
+const parseBulkEventsFromText = (text: string) => {
+  const lines = text
+    .split(/\r?\n|•|\u2022|\||;|,/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+
+  if (lines.length < 2) {
+    return [] as Array<{
+      date: string;
+      dayIndex: number;
+      time: string;
+      child: string;
+      title: string;
+      type: string;
+    }>;
+  }
+
+  const dayMatchers: Array<{ regex: RegExp; dayIndex: number }> = [
+    { regex: /(?:^|\s|ב)(?:יום\s*)?ראשון(?:\s|$)/, dayIndex: 0 },
+    { regex: /(?:^|\s|ב)(?:יום\s*)?שני(?:\s|$)/, dayIndex: 1 },
+    { regex: /(?:^|\s|ב)(?:יום\s*)?שלישי(?:\s|$)/, dayIndex: 2 },
+    { regex: /(?:^|\s|ב)(?:יום\s*)?רביעי(?:\s|$)/, dayIndex: 3 },
+    { regex: /(?:^|\s|ב)(?:יום\s*)?חמישי(?:\s|$)/, dayIndex: 4 },
+    { regex: /(?:^|\s|ב)(?:יום\s*)?שישי(?:\s|$)/, dayIndex: 5 },
+    { regex: /(?:^|\s|ב)(?:יום\s*)?שבת(?:\s|$)/, dayIndex: 6 },
+  ];
+
+  const normalizeClock = (value: string) => {
+    const hhmm = value.match(/^(\d{1,2}):(\d{2})$/);
+    if (hhmm) {
+      const hours = Number(hhmm[1]);
+      const minutes = Number(hhmm[2]);
+      if (hours >= 0 && hours <= 23 && minutes >= 0 && minutes <= 59) {
+        return `${`${hours}`.padStart(2, "0")}:${`${minutes}`.padStart(2, "0")}`;
+      }
+    }
+
+    const compact = value.match(/^(\d{3,4})$/);
+    if (compact) {
+      const raw = compact[1].padStart(4, "0");
+      const hours = Number(raw.slice(0, 2));
+      const minutes = Number(raw.slice(2));
+      if (hours >= 0 && hours <= 23 && minutes >= 0 && minutes <= 59) {
+        return `${`${hours}`.padStart(2, "0")}:${`${minutes}`.padStart(2, "0")}`;
+      }
+    }
+
+    return null;
+  };
+
+  const nextSunday = getNextWeekSunday(new Date());
+  const hasAmitMention = /עמית|amit/i.test(text);
+  const events: Array<{
+    date: string;
+    dayIndex: number;
+    time: string;
+    child: string;
+    title: string;
+    type: string;
+  }> = [];
+
+  for (const line of lines) {
+    const dayMatch = dayMatchers.find((item) => item.regex.test(line));
+    if (!dayMatch) {
+      continue;
+    }
+
+    const timeToken = line.match(/(\d{1,2}:\d{2}|\d{3,4})/)?.[1] || "";
+    const normalizedTime = normalizeClock(timeToken);
+    if (!normalizedTime) {
+      continue;
+    }
+
+    const date = new Date(nextSunday);
+    date.setDate(nextSunday.getDate() + dayMatch.dayIndex);
+    events.push({
+      date: toIsoDate(date),
+      dayIndex: dayMatch.dayIndex,
+      time: normalizedTime,
+      child: hasAmitMention ? "amit" : "amit",
+      title: "אימון",
+      type: "gym",
+    });
+  }
+
+  return events;
+};
+
 const upsertScheduleEvent = async (incoming: ReturnType<typeof sanitizeDbEvent>) => {
   if (!incoming) {
     return { ok: false as const, error: "Invalid event payload" };
@@ -756,7 +861,7 @@ export async function POST(request: NextRequest) {
     const tableStatus = await ensureFamilyScheduleTable();
     if (!tableStatus.ok) {
       if (tableStatus.code === "MISSING_POSTGRES_ENV") {
-        return NextResponse.json([]);
+        return NextResponse.json({ error: "Missing database configuration" }, { status: 500 });
       }
       return NextResponse.json({ error: tableStatus.error }, { status: 500 });
     }
@@ -770,6 +875,26 @@ export async function POST(request: NextRequest) {
     const senderSubscriptionEndpoint = typeof body?.senderSubscriptionEndpoint === "string"
       ? body.senderSubscriptionEndpoint.trim()
       : "";
+
+    const bulkEventsPayload = Array.isArray(body?.bulkEvents)
+      ? body.bulkEvents as Array<Record<string, unknown>>
+      : [];
+    if (bulkEventsPayload.length > 0) {
+      const savedEvents: unknown[] = [];
+      for (const bulkItem of bulkEventsPayload) {
+        const incoming = sanitizeDbEvent(bulkItem);
+        if (!incoming) {
+          return NextResponse.json({ error: "Invalid bulk event payload" }, { status: 400 });
+        }
+        const upsertResult = await upsertScheduleEvent(incoming);
+        if (!upsertResult.ok) {
+          return NextResponse.json({ error: upsertResult.error }, { status: 500 });
+        }
+        savedEvents.push(upsertResult.event);
+      }
+
+      return NextResponse.json({ ok: true, events: savedEvents });
+    }
 
     const flatIncoming = createIncomingFromFlatBody(body);
     if (flatIncoming) {
@@ -834,6 +959,54 @@ export async function POST(request: NextRequest) {
     const imageMimeType = typeof incomingInlineData?.mimeType === "string"
       ? incomingInlineData.mimeType.trim()
       : (typeof body?.imageMimeType === "string" ? body.imageMimeType.trim() : "image/png");
+
+    const bulkFromText = text ? parseBulkEventsFromText(text) : [];
+    if (bulkFromText.length > 0) {
+      const savedEvents: unknown[] = [];
+      for (const item of bulkFromText) {
+        const generatedId = typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+          ? crypto.randomUUID()
+          : `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+        const incoming = sanitizeDbEvent({
+          id: generatedId,
+          date: item.date,
+          dayIndex: item.dayIndex,
+          time: item.time,
+          child: item.child,
+          title: item.title,
+          type: item.type,
+          isRecurring: false,
+          completed: false,
+          sendNotification: true,
+          requireConfirmation: false,
+          needsAck: false,
+        });
+        if (!incoming) {
+          continue;
+        }
+
+        const upsertResult = await upsertScheduleEvent(incoming);
+        if (!upsertResult.ok) {
+          return NextResponse.json({ error: upsertResult.error }, { status: 500 });
+        }
+        savedEvents.push(upsertResult.event);
+      }
+
+      if (!savedEvents.length) {
+        return NextResponse.json({ error: "No valid bulk events were found" }, { status: 400 });
+      }
+
+      await sendPushToAll(
+        {
+          title: "משימות חדשות נוספו",
+          body: `נוספו ${savedEvents.length} משימות`,
+          url: "/",
+        },
+        { excludeEndpoint: senderSubscriptionEndpoint }
+      );
+
+      return NextResponse.json({ ok: true, events: savedEvents });
+    }
 
     if (!text && !imageBase64) {
       return NextResponse.json({ error: "Text or image is required" }, { status: 400 });
