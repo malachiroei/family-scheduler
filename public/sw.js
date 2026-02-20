@@ -1,4 +1,4 @@
-const CACHE_NAME = 'family-scheduler-v10';
+const CACHE_NAME = 'family-scheduler-v11';
 const APP_SHELL_FILES = ['/manifest.json?v=5', '/icon-512.png'];
 const reminderLeadOptions = [5, 10, 15, 30];
 const pushSoundOptions = ['/sounds/standard.mp3', '/sounds/bell.mp3', '/sounds/modern.mp3'];
@@ -57,6 +57,11 @@ self.addEventListener('fetch', (event) => {
 
   const url = new URL(event.request.url);
   if (url.origin !== self.location.origin) {
+    return;
+  }
+
+  if (url.pathname.startsWith('/api/')) {
+    event.respondWith(fetch(event.request));
     return;
   }
 

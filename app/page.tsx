@@ -167,7 +167,7 @@ const pushSoundOptions: Array<{ value: PushSoundPreset; label: string }> = [
 ];
 const defaultPushLeadMinutes: ReminderLeadMinutes = 10;
 const defaultPushSound: PushSoundPreset = '/sounds/standard.mp3';
-const SERVICE_WORKER_URL = '/sw.js?v=10';
+const SERVICE_WORKER_URL = '/sw.js?v=11';
 
 const sanitizeReminderLead = (value: unknown): ReminderLeadMinutes => {
   const numeric = Number(value);
@@ -501,7 +501,7 @@ const parseComplexWhatsAppMessage = (
     };
 
     const directPairs = [...rawText.matchAll(pairRegex)];
-    if (directPairs.length >= 2) {
+    if (directPairs.length >= 1) {
       directPairs.forEach((match) => {
         const dayWord = (match[1] || '').trim();
         const dayIndex = Object.prototype.hasOwnProperty.call(dayToIndex, dayWord) ? dayToIndex[dayWord] : null;
@@ -533,6 +533,48 @@ const parseComplexWhatsAppMessage = (
     }
 
     for (const line of lines) {
+      const pairMatches = [...line.matchAll(pairRegex)];
+      if (pairMatches.length > 0) {
+        for (const pairMatch of pairMatches) {
+          const dayWord = (pairMatch[1] || '').trim();
+          const dayIndex = Object.prototype.hasOwnProperty.call(dayToIndex, dayWord) ? dayToIndex[dayWord] : null;
+          const normalizedTime = normalizeLooseClock((pairMatch[2] || '').trim());
+
+          if (dayIndex === null || !normalizedTime) {
+            continue;
+          }
+
+          const titleTail = line
+            .replace(/(?:^|\s)(?:יום\s+)?(?:ראשון|שני|שלישי|רביעי|חמישי|שישי|שבת)(?:\s|$)/g, ' ')
+            .replace(/\b\d{1,2}:\d{2}\b/g, ' ')
+            .replace(/\b\d{3,4}\b/g, ' ')
+            .replace(/[>\-–—:|,؛;]+/g, ' ')
+            .replace(/\s+/g, ' ')
+            .trim();
+          const resolvedTitle = !titleTail
+            ? 'אימון'
+            : (/^אימון\b/.test(titleTail) ? titleTail : `אימון ${titleTail}`);
+
+          const targetDate = addDays(targetWeekStart, dayIndex);
+          const key = `${dayIndex}|${normalizedTime}|${resolvedTitle}`;
+          if (seen.has(key)) {
+            continue;
+          }
+          seen.add(key);
+
+          events.push({
+            dayIndex,
+            date: toIsoDate(targetDate),
+            time: normalizedTime,
+            child: 'amit',
+            title: resolvedTitle,
+            type: 'gym',
+          });
+        }
+
+        continue;
+      }
+
       const dayIndex = getDayIndexFromText(line);
       const normalizedTime = extractTimesFromLine(line)[0] ?? null;
       if (dayIndex === null || !normalizedTime) {
@@ -2099,10 +2141,9 @@ export default function FamilyScheduler() {
       }
 
       setRecurringTemplates([]);
-      setWeeksData((prev) => ({
-        ...prev,
+      setWeeksData({
         [weekKey]: createWeekDays(weekStart, false, []),
-      }));
+      });
 
       await refetchEventsFromDatabase(weekStart);
       setDbSyncStatus({ state: 'saved', message: 'Cleared' });
