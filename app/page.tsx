@@ -893,7 +893,7 @@ export default function FamilyScheduler() {
     state: 'idle',
     message: '',
   });
-  const [showRecurringOnly, setShowRecurringOnly] = useState(false);
+  const [showRecurringOnly] = useState(false);
   const [selectedChildFilter, setSelectedChildFilter] = useState<'all' | BaseChildKey>('all');
   const [settingsChildFilter, setSettingsChildFilter] = useState<'all' | BaseChildKey>('all');
   const [weekStart, setWeekStart] = useState(initialWeekStart);
@@ -2419,15 +2419,6 @@ export default function FamilyScheduler() {
           })}
         </div>
 
-        <div className="flex flex-wrap items-center gap-1.5">
-          <button
-            type="button"
-            onClick={() => setShowRecurringOnly((prev) => !prev)}
-            className={`px-3 py-1 rounded-xl border text-sm font-semibold transition ${showRecurringOnly ? 'bg-blue-600 text-white border-blue-600' : 'bg-white text-slate-700 border-slate-300 hover:bg-slate-50'}`}
-          >
-            {showRecurringOnly ? 'מציג רק קבועים' : 'הצג רק קבועים'}
-          </button>
-        </div>
       </div>
 
       <div className="max-w-6xl mx-auto mb-4 print:hidden">
