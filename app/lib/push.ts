@@ -339,6 +339,12 @@ const shouldSubscriptionReceiveTask = (
 const parseTaskDate = (value: string) => {
   const trimmed = value.trim();
 
+  const isoDateTime = trimmed.match(/^(\d{4}-\d{2}-\d{2})T/);
+  if (isoDateTime) {
+    const parsed = new Date(`${isoDateTime[1]}T00:00:00`);
+    return Number.isNaN(parsed.getTime()) ? null : parsed;
+  }
+
   const yyyyMmDd = trimmed.match(/^(\d{4})-(\d{2})-(\d{2})$/);
   if (yyyyMmDd) {
     const parsed = new Date(`${yyyyMmDd[1]}-${yyyyMmDd[2]}-${yyyyMmDd[3]}T00:00:00`);
@@ -443,7 +449,15 @@ export const sendUpcomingTaskReminders = async () => {
   }
 
   const tasksResult = await sql<TaskRow>`
-    SELECT id, text, day, time, child, type, is_weekly, completed,
+    SELECT
+      id,
+      COALESCE(title, text) AS text,
+      COALESCE(event_date, day) AS day,
+      COALESCE(event_time, time) AS time,
+      child,
+      COALESCE(event_type, type) AS type,
+      COALESCE(is_recurring, is_weekly, FALSE) AS is_weekly,
+      completed,
       COALESCE(send_notification, TRUE) AS send_notification,
       COALESCE(require_confirmation, FALSE) AS require_confirmation,
       COALESCE(needs_ack, require_confirmation, FALSE) AS needs_ack
@@ -557,10 +571,6 @@ export const sendUpcomingTaskReminders = async () => {
   }
 
   const scanned = tasksResult.rowCount || 0;
-  if (isVerboseReminderLogs) {
-    debugReminderLog("summary", { scanned, sent, skippedByReason, nowDateKey, nowMinutes, subscriptions: subscriptions.length });
-    return { scanned, sent, skippedByReason };
-  }
-
-  return { scanned, sent };
+  debugReminderLog("summary", { scanned, sent, skippedByReason, nowDateKey, nowMinutes, subscriptions: subscriptions.length });
+  return { scanned, sent, skippedByReason, nowDateKey, nowMinutes, subscriptions: subscriptions.length };
 };

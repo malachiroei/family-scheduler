@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { ensureDatabaseConnectionString, getDatabaseConfig, sql } from "@/app/lib/db";
-import { sendPushToAll, sendPushToParents } from "@/app/lib/push";
+import { sendPushToAll, sendPushToParents, sendUpcomingTaskReminders } from "@/app/lib/push";
 
 export const revalidate = 0;
 
@@ -762,6 +762,15 @@ const upsertScheduleEvent = async (incoming: ReturnType<typeof sanitizeDbEvent>)
   }
 };
 
+const runReminderSweep = async (source: string) => {
+  try {
+    const reminderResult = await sendUpcomingTaskReminders();
+    console.log(`[API] Reminder sweep (${source}):`, reminderResult);
+  } catch (error) {
+    console.error(`[API] Reminder sweep failed (${source})`, error);
+  }
+};
+
 export async function GET() {
   try {
     debugScheduleLog('[API] GET /api/schedule');
@@ -771,6 +780,14 @@ export async function GET() {
         return NextResponse.json([]);
       }
       return NextResponse.json({ error: tableStatus.error }, { status: 500 });
+    }
+
+    try {
+      const reminderResult = await sendUpcomingTaskReminders();
+      debugScheduleLog("Reminder fallback result:", reminderResult);
+      console.log("[API] Reminder fallback result:", reminderResult);
+    } catch (error) {
+      console.error("[API] Reminder fallback failed", error);
     }
 
     const result = await sql`
@@ -1112,6 +1129,8 @@ export async function POST(request: NextRequest) {
         .filter((result) => result?.ok === true && result?.event)
         .map((result) => result.event);
 
+      await runReminderSweep("POST bulkEvents");
+
       return NextResponse.json({ ok: true, events: savedEvents });
     }
 
@@ -1134,6 +1153,8 @@ export async function POST(request: NextRequest) {
         },
         { excludeEndpoint: senderSubscriptionEndpoint }
       );
+
+      await runReminderSweep("POST flatIncoming");
 
       return NextResponse.json(upsertResult.row);
     }
@@ -1161,6 +1182,8 @@ export async function POST(request: NextRequest) {
         },
         { excludeEndpoint: senderSubscriptionEndpoint }
       );
+
+      await runReminderSweep("POST incoming");
 
       return NextResponse.json(upsertResult.row);
     }
@@ -1253,6 +1276,8 @@ export async function POST(request: NextRequest) {
         },
         { excludeEndpoint: senderSubscriptionEndpoint }
       );
+
+      await runReminderSweep("POST bulkFromText");
 
       return NextResponse.json({ ok: true, events: savedEvents });
     }
