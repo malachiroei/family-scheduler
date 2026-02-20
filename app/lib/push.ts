@@ -57,15 +57,11 @@ const childKeyToName: Record<string, ChildUserName> = {
   "אלין": "אלין",
 };
 
-const shouldSendReminderForTask = (task: TaskRow) => {
-  const type = (task.type || "").toLowerCase();
-  const title = (task.text || "").toLowerCase();
-
-  if (type === "lesson") {
-    return true;
+const isVerboseReminderLogs = process.env.PUSH_REMINDER_VERBOSE === "1";
+const debugReminderLog = (...args: unknown[]) => {
+  if (isVerboseReminderLogs) {
+    console.log("[PUSH_REMIND]", ...args);
   }
-
-  return /שיעור|אנגלית|תגבור|lesson|english|tutoring/i.test(title);
 };
 
 const getEnv = () => ({
@@ -380,6 +376,32 @@ const toDateKey = (date: Date) => {
   return `${y}-${m}-${d}`;
 };
 
+const REMINDER_TIMEZONE = "Asia/Jerusalem";
+
+const getNowInReminderTimezone = () => {
+  const formatter = new Intl.DateTimeFormat("en-CA", {
+    timeZone: REMINDER_TIMEZONE,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  });
+
+  const parts = formatter.formatToParts(new Date());
+  const getPart = (type: string) => parts.find((part) => part.type === type)?.value || "00";
+
+  const dateKey = `${getPart("year")}-${getPart("month")}-${getPart("day")}`;
+  const hours = Number(getPart("hour"));
+  const minutes = Number(getPart("minute"));
+
+  return {
+    dateKey,
+    minutes: (Number.isFinite(hours) ? hours : 0) * 60 + (Number.isFinite(minutes) ? minutes : 0),
+  };
+};
+
 const wasReminderDispatched = async (dispatchKey: string) => {
   const existing = await sql`
     SELECT dispatch_key
@@ -416,6 +438,7 @@ export const sendUpcomingTaskReminders = async () => {
 
   const subscriptions = subscriptionsResult.rows;
   if (!subscriptions.length) {
+    debugReminderLog("no subscriptions");
     return { scanned: 0, sent: 0 };
   }
 
@@ -427,46 +450,66 @@ export const sendUpcomingTaskReminders = async () => {
     FROM family_schedule
   `;
 
-  const now = new Date();
-  const nowDateKey = toDateKey(now);
-  const nowMinutes = now.getHours() * 60 + now.getMinutes();
+  const { dateKey: nowDateKey, minutes: nowMinutes } = getNowInReminderTimezone();
 
   let sent = 0;
+  const skippedByReason: Record<string, number> = {
+    completed: 0,
+    notifications_disabled: 0,
+    type_not_eligible: 0,
+    invalid_date: 0,
+    date_mismatch: 0,
+    invalid_time: 0,
+    outside_window: 0,
+    already_dispatched: 0,
+    no_audience_subscriptions: 0,
+    delivery_failed: 0,
+  };
 
   for (const task of tasksResult.rows) {
     if (Boolean(task.completed)) {
+      skippedByReason.completed += 1;
+      debugReminderLog("skip completed", { taskId: task.id });
       continue;
     }
 
     if (!Boolean(task.send_notification ?? true)) {
-      continue;
-    }
-
-    if (!shouldSendReminderForTask(task)) {
+      skippedByReason.notifications_disabled += 1;
+      debugReminderLog("skip notifications_disabled", { taskId: task.id });
       continue;
     }
 
     const taskDate = parseTaskDate(task.day || "");
     if (!taskDate) {
+      skippedByReason.invalid_date += 1;
+      debugReminderLog("skip invalid_date", { taskId: task.id, day: task.day });
       continue;
     }
 
     if (toDateKey(taskDate) !== nowDateKey) {
+      skippedByReason.date_mismatch += 1;
+      debugReminderLog("skip date_mismatch", { taskId: task.id, taskDate: toDateKey(taskDate), nowDateKey });
       continue;
     }
 
     const taskMinutes = parseTimeToMinutes(task.time || "");
     if (taskMinutes === null) {
+      skippedByReason.invalid_time += 1;
+      debugReminderLog("skip invalid_time", { taskId: task.id, time: task.time });
       continue;
     }
 
     const diffMinutes = taskMinutes - nowMinutes;
     if (diffMinutes < 0 || diffMinutes > 15) {
+      skippedByReason.outside_window += 1;
+      debugReminderLog("skip outside_window", { taskId: task.id, diffMinutes, taskTime: task.time, nowMinutes });
       continue;
     }
 
     const dispatchKey = `${task.id}:${toDateKey(taskDate)}:${task.time}`;
     if (await wasReminderDispatched(dispatchKey)) {
+      skippedByReason.already_dispatched += 1;
+      debugReminderLog("skip already_dispatched", { taskId: task.id, dispatchKey });
       continue;
     }
 
@@ -476,6 +519,8 @@ export const sendUpcomingTaskReminders = async () => {
     );
 
     if (!targetSubscriptions.length) {
+      skippedByReason.no_audience_subscriptions += 1;
+      debugReminderLog("skip no_audience_subscriptions", { taskId: task.id, audienceChildren });
       continue;
     }
 
@@ -504,8 +549,18 @@ export const sendUpcomingTaskReminders = async () => {
     if (deliveredForTask > 0) {
       await markReminderDispatched(dispatchKey);
       sent += deliveredForTask;
+      debugReminderLog("sent", { taskId: task.id, deliveredForTask, diffMinutes, audienceChildren });
+    } else {
+      skippedByReason.delivery_failed += 1;
+      debugReminderLog("skip delivery_failed", { taskId: task.id, audienceChildren, subscriptions: targetSubscriptions.length });
     }
   }
 
-  return { scanned: tasksResult.rowCount || 0, sent };
+  const scanned = tasksResult.rowCount || 0;
+  if (isVerboseReminderLogs) {
+    debugReminderLog("summary", { scanned, sent, skippedByReason, nowDateKey, nowMinutes, subscriptions: subscriptions.length });
+    return { scanned, sent, skippedByReason };
+  }
+
+  return { scanned, sent };
 };

@@ -6,13 +6,17 @@ export const revalidate = 0;
 
 const dbConfig = getDatabaseConfig();
 const activeDatabaseUrl = dbConfig.url;
+const isVerboseScheduleLogs = process.env.SCHEDULE_VERBOSE_LOGS === "1";
+const debugScheduleLog = (...args: unknown[]) => {
+  if (isVerboseScheduleLogs) {
+    console.log(...args);
+  }
+};
 
-console.log("Syncing with Neon DB: ", activeDatabaseUrl ? "CONNECTED" : "MISSING");
-console.log("DB URL source:", dbConfig.source);
-
-console.log("Saving to DB:", activeDatabaseUrl ? activeDatabaseUrl.substring(0, 15) + "..." : "(missing)");
-
-console.log("Current ENV keys:", Object.keys(process.env));
+debugScheduleLog("Syncing with Neon DB: ", activeDatabaseUrl ? "CONNECTED" : "MISSING");
+debugScheduleLog("DB URL source:", dbConfig.source);
+debugScheduleLog("Saving to DB:", activeDatabaseUrl ? activeDatabaseUrl.substring(0, 15) + "..." : "(missing)");
+debugScheduleLog("Current ENV keys:", Object.keys(process.env));
 
 const allowedModels = ["gemini-1.5-flash", "gemini-2.0-flash"] as const;
 type SupportedModel = (typeof allowedModels)[number];
@@ -616,7 +620,7 @@ const upsertScheduleEvent = async (incoming: ReturnType<typeof sanitizeDbEvent>)
       needs_ack: incoming.needsAck ?? incoming.requireConfirmation ?? false,
       user_id: incoming.userId ?? "system",
     };
-    console.log("Data to save:", newEvent);
+    debugScheduleLog("Data to save:", newEvent);
     console.log("Inserting event:", newEvent);
 
     let newRow;
@@ -705,7 +709,7 @@ const upsertScheduleEvent = async (incoming: ReturnType<typeof sanitizeDbEvent>)
       };
     }
 
-    console.log("DB Action Success:", newRow.rowCount);
+    debugScheduleLog("DB Action Success:", newRow.rowCount);
 
     if (!newRow.rowCount || newRow.rowCount < 1) {
       return { ok: false as const, error: "Insert did not return a positive DB response" };
@@ -716,7 +720,7 @@ const upsertScheduleEvent = async (incoming: ReturnType<typeof sanitizeDbEvent>)
       return { ok: false as const, error: "Saved row was not found" };
     }
 
-    console.log("Saved successfully:", newRow.rows[0]);
+    debugScheduleLog("Saved successfully:", newRow.rows[0]);
 
     const savedDateRaw = String(saved.event_date ?? saved.day ?? "").trim();
     const savedDate = toIsoDate(savedDateRaw) || savedDateRaw;
@@ -760,7 +764,7 @@ const upsertScheduleEvent = async (incoming: ReturnType<typeof sanitizeDbEvent>)
 
 export async function GET() {
   try {
-    console.log('[API] GET /api/schedule');
+    debugScheduleLog('[API] GET /api/schedule');
     const tableStatus = await ensureFamilyScheduleTable();
     if (!tableStatus.ok) {
       if (tableStatus.code === "MISSING_POSTGRES_ENV") {
@@ -787,10 +791,10 @@ export async function GET() {
       FROM family_schedule
       ORDER BY COALESCE(event_time, time) ASC
     `;
-    console.log("DB Action Success:", result.rowCount);
+    debugScheduleLog("DB Action Success:", result.rowCount);
 
     const rows = result.rows;
-    console.log("Events found in DB:", rows);
+    debugScheduleLog("Events found in DB:", rows);
 
     const events = rows.map((row) => {
       const rawDate = String(row.event_date ?? "").trim();

@@ -755,6 +755,8 @@ const createEvent = (payload: Omit<SchedulerEvent, 'id'>): SchedulerEvent => ({
   ...payload,
 });
 
+const statusPillClassName = "text-[10px] font-bold px-2 py-0.5 rounded-full border";
+
 const resolveTargetWeekStartFromEvents = (events: AiEvent[], fallbackWeekStart: Date) => {
   const firstValidDate = events
     .map((event) => (event.date ? parseEventDateKey(event.date) : null))
@@ -2041,12 +2043,16 @@ export default function FamilyScheduler() {
   };
 
   const renderChildBadges = (childKey: ChildKey) => (
-    <div className="flex flex-wrap items-center gap-1">
+    <div className="flex flex-wrap items-center gap-1.5">
       {getChildKeys(childKey).map((baseKey) => {
         const config = baseChildrenConfig[baseKey];
         return (
-          <span key={`${childKey}-${baseKey}`} className={`px-4 py-1.5 rounded-full text-sm font-black uppercase tracking-tighter text-white ${config.color} shadow-sm`}>
-            {config.name}
+          <span
+            key={`${childKey}-${baseKey}`}
+            className="inline-flex items-center gap-1.5 rounded-full border border-slate-200 bg-white px-2.5 py-1 text-xs font-bold text-slate-700 shadow-sm"
+          >
+            <span className={`h-2.5 w-2.5 rounded-full ${config.color}`} />
+            <span>{config.name}</span>
           </span>
         );
       })}
@@ -2616,17 +2622,17 @@ export default function FamilyScheduler() {
                       {renderChildBadges(event.child)}
                       <div className="flex items-center gap-2">
                         {event.completed && (
-                          <span className="text-[11px] font-bold text-emerald-700 bg-emerald-100 px-2 py-0.5 rounded-full">V</span>
+                          <span className={`${statusPillClassName} text-emerald-700 bg-emerald-50 border-emerald-200`}>בוצע</span>
                         )}
                         <span className="text-slate-700 font-semibold text-sm">{event.title}</span>
                         {event.sendNotification !== false && (
-                          <span className="text-[10px] font-bold text-indigo-700 bg-indigo-100 px-2 py-0.5 rounded-full">התראה</span>
+                          <span className={`${statusPillClassName} text-indigo-700 bg-indigo-50 border-indigo-200`}>התראה</span>
                         )}
                         {event.requireConfirmation && (
-                          <span className="text-[10px] font-bold text-amber-700 bg-amber-100 px-2 py-0.5 rounded-full">אישור ילד</span>
+                          <span className={`${statusPillClassName} text-amber-700 bg-amber-50 border-amber-200`}>אישור ילד</span>
                         )}
                         {(event.isRecurring || event.recurringTemplateId) && (
-                          <span className="text-[10px] font-bold text-blue-700 bg-blue-100 px-2 py-0.5 rounded-full">קבוע</span>
+                          <span className={`${statusPillClassName} text-blue-700 bg-blue-50 border-blue-200`}>קבוע</span>
                         )}
                       </div>
                     </div>
