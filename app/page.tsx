@@ -1,7 +1,6 @@
 "use client";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import Image from 'next/image';
-import { useRouter } from 'next/navigation';
 import { Dog, Dumbbell, Music, GraduationCap, Trophy, Printer, Image as ImageIcon, MessageCircle, ChevronRight, ChevronLeft, X, Plus, CalendarDays, Settings, RefreshCw } from 'lucide-react';
 import html2canvas from 'html2canvas';
 
@@ -912,7 +911,6 @@ const getEventIcon = (eventType: EventType, title?: string) => {
 };
 
 export default function FamilyScheduler() {
-  const router = useRouter();
   const initialWeekStart = useMemo(() => getWeekStart(new Date()), []);
   const initialWeekKey = useMemo(() => toIsoDate(initialWeekStart), [initialWeekStart]);
 
@@ -2071,7 +2069,6 @@ export default function FamilyScheduler() {
 
   const hardRefreshScheduleAfterSuccess = async (targetWeekStart: Date) => {
     await mutateSchedule('/api/schedule', targetWeekStart);
-    router.refresh();
   };
 
   const handleClearAll = async () => {
@@ -2154,7 +2151,6 @@ export default function FamilyScheduler() {
     setWeekStart(resolvedTargetWeekStart);
     await refetchEventsFromDatabase(resolvedTargetWeekStart);
     await mutateSchedule('/api/schedule', resolvedTargetWeekStart);
-    router.refresh();
     setDbSyncStatus({ state: 'saved', message: 'Saved' });
   };
 
