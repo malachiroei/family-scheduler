@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { sql } from "@vercel/postgres";
 
 export const dynamic = "force-dynamic";
+export const runtime = "nodejs";
 
 type DebugSubscriptionRow = {
   endpoint: string;
@@ -16,32 +17,24 @@ type DebugSubscriptionRow = {
 };
 
 export async function GET() {
-  try {
-    const result = await sql<DebugSubscriptionRow>`
-      SELECT
-        endpoint,
-        user_name,
-        p256dh,
-        auth,
-        NULL::BOOLEAN AS receive_all,
-        NULL::TEXT AS watch_children,
-        NULL::INT AS reminder_lead_minutes,
-        created_at,
-        updated_at
-      FROM subscriptions
-      ORDER BY updated_at DESC
-    `;
+  const result = await sql<DebugSubscriptionRow>`
+    SELECT
+      endpoint,
+      user_name,
+      p256dh,
+      auth,
+      NULL::BOOLEAN AS receive_all,
+      NULL::TEXT AS watch_children,
+      NULL::INT AS reminder_lead_minutes,
+      created_at,
+      updated_at
+    FROM subscriptions
+    ORDER BY updated_at DESC
+  `;
 
-    return NextResponse.json({
-      total: result.rowCount || 0,
-      subscriptions: result.rows,
-      table: "subscriptions",
-    });
-  } catch {
-    return NextResponse.json({
-      total: 0,
-      subscriptions: [],
-      table: "subscriptions",
-    });
-  }
+  return NextResponse.json({
+    total: result.rowCount || 0,
+    subscriptions: result.rows,
+    table: "subscriptions",
+  });
 }
