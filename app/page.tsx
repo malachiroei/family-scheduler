@@ -117,8 +117,11 @@ const AI_OCR_SYSTEM_PROMPT = `אתה מנתח צילום מסך של אפליק�
 אם הדוגמאות הללו מופיעות בתמונה, חלץ אותן בדיוק לערכים הללו.
 החזר תמיד מערך אירועים בלבד.`;
 
+const API_BASE_URL = 'https://family-scheduler-topaz.vercel.app';
+const toApiUrl = (path: string) => `${API_BASE_URL}${path}`;
+
 const SCHEDULER_STORAGE_KEY = 'family-scheduler-state-v1';
-const SCHEDULER_STATE_ENDPOINT = '/api/state';
+const SCHEDULER_STATE_ENDPOINT = toApiUrl('/api/state');
 const PRIMARY_GEMINI_MODEL = 'gemini-1.5-flash';
 const FALLBACK_GEMINI_MODEL = 'gemini-1.5-flash';
 
@@ -167,7 +170,7 @@ const pushSoundOptions: Array<{ value: PushSoundPreset; label: string }> = [
 ];
 const defaultPushLeadMinutes: ReminderLeadMinutes = 10;
 const defaultPushSound: PushSoundPreset = '/sounds/standard.mp3';
-const SERVICE_WORKER_URL = '/sw.js?v=11';
+const SERVICE_WORKER_URL = '/sw.js?v=13';
 
 const sanitizeReminderLead = (value: unknown): ReminderLeadMinutes => {
   const numeric = Number(value);
@@ -1328,7 +1331,7 @@ export default function FamilyScheduler() {
               const serialized = oldSubscription.toJSON();
               const endpoint = serialized.endpoint || oldSubscription.endpoint || '';
               if (endpoint) {
-                await fetch('/api/notifications/subscribe', {
+                await fetch(toApiUrl('/api/notifications/subscribe'), {
                   method: 'DELETE',
                   headers: { 'Content-Type': 'application/json' },
                   body: JSON.stringify({ endpoint }),
@@ -1352,7 +1355,7 @@ export default function FamilyScheduler() {
           return;
         }
 
-        const configResponse = await fetch('/api/notifications/subscribe', { cache: 'no-store' });
+        const configResponse = await fetch(toApiUrl('/api/notifications/subscribe'), { cache: 'no-store' });
         const configPayload = await configResponse.json();
         if (!configResponse.ok || !configPayload?.enabled || !configPayload?.publicKey) {
           return;
@@ -1479,16 +1482,21 @@ export default function FamilyScheduler() {
   };
 
   const savePushSubscriptionProfile = async (serialized: PushSubscriptionJSON) => {
+    const selectedUserName = typeof pushUserName === 'string' ? pushUserName.trim() : '';
+    if (!selectedUserName) {
+      throw new Error('יש לבחור שם משתמש לפני הפעלת התראות.');
+    }
+
     const isParent = isParentPushUser(pushUserName);
     const receiveAll = isParent ? parentReceiveAll : false;
     const watchChildren = isParent && !receiveAll ? parentWatchChildren : [];
 
-    const saveResponse = await fetch('/api/notifications/subscribe', {
+    const saveResponse = await fetch(toApiUrl('/api/notifications/subscribe'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         subscription: serialized,
-        userName: pushUserName,
+        userName: selectedUserName,
         receiveAll,
         watchChildren,
         reminderLeadMinutes,
@@ -1498,6 +1506,11 @@ export default function FamilyScheduler() {
     if (!saveResponse.ok) {
       const body = await saveResponse.json().catch(() => ({}));
       throw new Error(body?.error || 'Failed to save notification subscription');
+    }
+
+    const savedBody = await saveResponse.json().catch(() => ({}));
+    if (typeof savedBody?.userName === 'string' && savedBody.userName.trim() !== selectedUserName) {
+      throw new Error('שמירת שם המשתמש בהרשמת ההתראות נכשלה.');
     }
   };
 
@@ -1551,7 +1564,7 @@ export default function FamilyScheduler() {
           return;
         }
 
-        const configResponse = await fetch('/api/notifications/subscribe', { cache: 'no-store' });
+        const configResponse = await fetch(toApiUrl('/api/notifications/subscribe'), { cache: 'no-store' });
         const configPayload = await configResponse.json();
         if (!configResponse.ok || !configPayload?.enabled || !configPayload?.publicKey) {
           setApiError('התראות אינן זמינות כרגע בשרת.');
@@ -1625,7 +1638,7 @@ export default function FamilyScheduler() {
         return;
       }
 
-      const configResponse = await fetch('/api/notifications/subscribe', { cache: 'no-store' });
+      const configResponse = await fetch(toApiUrl('/api/notifications/subscribe'), { cache: 'no-store' });
       const configPayload = await configResponse.json();
       if (!configResponse.ok || !configPayload?.enabled || !configPayload?.publicKey) {
         setApiError('התראות אינן זמינות כרגע בשרת.');
@@ -1661,7 +1674,7 @@ export default function FamilyScheduler() {
 
     setPushTestBusy(true);
     try {
-      const response = await fetch('/api/push/test', {
+      const response = await fetch(toApiUrl('/api/push/test'), {
         method: 'POST',
       });
       const payload = await response.json();
@@ -1695,7 +1708,7 @@ export default function FamilyScheduler() {
         end: weekEndIso,
       });
       console.log('[API] GET /api/schedule -> start');
-      const response = await fetch(`/api/schedule?${query.toString()}`, { cache: 'no-store' });
+      const response = await fetch(toApiUrl(`/api/schedule?${query.toString()}`), { cache: 'no-store' });
       const payload = await response.json();
       console.log('[API] GET /api/schedule ->', response.status, payload);
       if (!response.ok) {
@@ -1791,7 +1804,7 @@ export default function FamilyScheduler() {
         ? toIsoDate(parsedEventDate)
         : toIsoDate(getNextOccurrenceDate(dayIndex, new Date()));
 
-      let response = await fetch('/api/schedule', {
+      let response = await fetch(toApiUrl('/api/schedule'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -1804,7 +1817,7 @@ export default function FamilyScheduler() {
       });
 
       if (!response.ok && (response.status === 404 || response.status === 405)) {
-        response = await fetch('/api/schedule', {
+        response = await fetch(toApiUrl('/api/schedule'), {
           method: 'PUT',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -1841,7 +1854,7 @@ export default function FamilyScheduler() {
         query.set('recurringTemplateId', payload.recurringTemplateId);
       }
 
-      const response = await fetch(`/api/schedule?${query.toString()}`, {
+      const response = await fetch(toApiUrl(`/api/schedule?${query.toString()}`), {
         method: 'DELETE',
         headers: {
           'x-delete-password': deletePassword,
@@ -1861,7 +1874,7 @@ export default function FamilyScheduler() {
   const setEventCompletionInDatabase = async (eventId: string, completed: boolean) => {
     const confirmer = !isParentPushUser(pushUserName) && pushUserName ? pushUserName : undefined;
 
-    const response = await fetch('/api/schedule', {
+    const response = await fetch(toApiUrl('/api/schedule'), {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -2160,7 +2173,7 @@ export default function FamilyScheduler() {
       console.log('Action triggered:', 'delete');
       setDbSyncStatus({ state: 'saving', message: 'Clearing database...' });
       console.log('[API] DELETE /api/schedule -> start clearAll');
-      const response = await fetch('/api/schedule?clearAll=true', {
+      const response = await fetch(toApiUrl('/api/schedule?clearAll=true'), {
         method: 'DELETE',
         headers: {
           'x-delete-password': deletePassword,
@@ -2249,7 +2262,7 @@ export default function FamilyScheduler() {
 
       const imagePart = imageFile ? await fileToGenerativePart(imageFile) : undefined;
       const outgoingText = text || 'נתח את התמונה והוסף אירועים ללו״ז';
-      const response = await fetch('/api/schedule', {
+      const response = await fetch(toApiUrl('/api/schedule'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({

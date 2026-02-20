@@ -60,6 +60,32 @@ const childKeyToName: Record<string, ChildUserName> = {
   "אלין": "אלין",
 };
 
+const normalizeTaskChildNames = (rawChild: string): ChildUserName[] => {
+  const normalized = rawChild.trim().toLowerCase();
+  if (!normalized) {
+    return [];
+  }
+
+  const values = normalized
+    .split("_")
+    .map((token) => token.trim())
+    .filter(Boolean)
+    .map((token) => childKeyToName[token])
+    .filter(Boolean) as ChildUserName[];
+
+  if (/רביד/.test(rawChild)) {
+    values.push("רביד");
+  }
+  if (/עמית/.test(rawChild)) {
+    values.push("עמית");
+  }
+  if (/אלין/.test(rawChild)) {
+    values.push("אלין");
+  }
+
+  return [...new Set(values)];
+};
+
 const reminderLeadOptions = [5, 10, 15, 30] as const;
 type ReminderLeadMinutes = (typeof reminderLeadOptions)[number];
 const defaultReminderLeadMinutes: ReminderLeadMinutes = 10;
@@ -311,27 +337,7 @@ export const sendPushToParents = async (
 
 const getTaskAudienceChildren = (task: TaskRow): ChildUserName[] => {
   const rawChild = (task.child || "").trim();
-  if (!rawChild) {
-    return [];
-  }
-
-  const normalized = rawChild.toLowerCase();
-  const candidates = normalized.split("_").map((token) => token.trim()).filter(Boolean);
-  const names = candidates
-    .map((token) => childKeyToName[token])
-    .filter(Boolean) as ChildUserName[];
-
-  if (/רביד/.test(rawChild)) {
-    names.push("רביד");
-  }
-  if (/עמית/.test(rawChild)) {
-    names.push("עמית");
-  }
-  if (/אלין/.test(rawChild)) {
-    names.push("אלין");
-  }
-
-  return [...new Set(names)];
+  return normalizeTaskChildNames(rawChild);
 };
 
 const shouldSubscriptionReceiveTask = (
@@ -384,6 +390,49 @@ const parseTimeToMinutes = (value: string) => {
   }
 
   return hours * 60 + minutes;
+};
+
+const getNowInTimeZone = (timeZone: string) => {
+  const formatter = new Intl.DateTimeFormat("en-CA", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  });
+
+  const parts = formatter.formatToParts(new Date());
+  const getPart = (type: string) => parts.find((part) => part.type === type)?.value || "00";
+  const dateKey = `${getPart("year")}-${getPart("month")}-${getPart("day")}`;
+  const hours = Number(getPart("hour"));
+  const minutes = Number(getPart("minute"));
+
+  return {
+    dateKey,
+    minutes: (Number.isFinite(hours) ? hours : 0) * 60 + (Number.isFinite(minutes) ? minutes : 0),
+  };
+};
+
+const parseTaskDateKey = (value: string) => {
+  const trimmed = value.trim();
+  const isoDateTime = trimmed.match(/^(\d{4}-\d{2}-\d{2})T/);
+  if (isoDateTime) {
+    return isoDateTime[1];
+  }
+
+  const yyyyMmDd = trimmed.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (yyyyMmDd) {
+    return `${yyyyMmDd[1]}-${yyyyMmDd[2]}-${yyyyMmDd[3]}`;
+  }
+
+  const ddMmYyyy = trimmed.match(/^(\d{2})-(\d{2})-(\d{4})$/);
+  if (ddMmYyyy) {
+    return `${ddMmYyyy[3]}-${ddMmYyyy[2]}-${ddMmYyyy[1]}`;
+  }
+
+  return "";
 };
 
 const parseTaskStartUtc = (dayValue: string, timeValue: string) => {
@@ -449,6 +498,7 @@ export const sendUpcomingTaskReminders = async (
   options?: {
     windowForwardMinutes?: number;
     strictChildUserOnly?: boolean;
+    timeZone?: string;
     onAttempt?: (attempt: { userName: string; eventTitle: string }) => void;
   }
 ) => {
@@ -468,8 +518,12 @@ export const sendUpcomingTaskReminders = async (
     ? Math.max(0, Math.min(15, Math.floor(windowForwardMinutesRaw)))
     : 15;
   const strictChildUserOnly = options?.strictChildUserOnly === true;
+  const timeZone = typeof options?.timeZone === "string" && options.timeZone.trim()
+    ? options.timeZone.trim()
+    : "";
   const nowUtc = new Date();
   const nowUtcMs = nowUtc.getTime();
+  const nowInTimeZone = timeZone ? getNowInTimeZone(timeZone) : null;
 
   const subscriptionsResult = await sql<SubscriptionRow>`
     SELECT endpoint, p256dh, auth, user_name, receive_all, watch_children, reminder_lead_minutes
@@ -509,6 +563,7 @@ export const sendUpcomingTaskReminders = async (
     notifications_disabled: 0,
     type_not_eligible: 0,
     invalid_date: 0,
+    date_mismatch: 0,
     invalid_time: 0,
     outside_window: 0,
     offset_not_due: 0,
@@ -550,7 +605,18 @@ export const sendUpcomingTaskReminders = async (
       continue;
     }
 
-    const diffMinutes = Math.floor((taskStartUtc.getTime() - nowUtcMs) / 60000);
+    let diffMinutes = Math.floor((taskStartUtc.getTime() - nowUtcMs) / 60000);
+    if (nowInTimeZone) {
+      const taskDateKey = parseTaskDateKey(String(task.day || ""));
+      if (!taskDateKey || taskDateKey !== nowInTimeZone.dateKey) {
+        skippedByReason.date_mismatch += 1;
+        debugReminderLog("skip date_mismatch", { taskId: task.id, taskDateKey, nowDateKey: nowInTimeZone.dateKey });
+        continue;
+      }
+
+      diffMinutes = taskMinutes - nowInTimeZone.minutes;
+    }
+
     if (diffMinutes < 0 || diffMinutes > 45) {
       skippedByReason.outside_window += 1;
       debugReminderLog("skip outside_window", { taskId: task.id, diffMinutes, taskTime: task.time, nowUtc: nowUtc.toISOString() });
@@ -558,6 +624,7 @@ export const sendUpcomingTaskReminders = async (
     }
 
     const audienceChildren = getTaskAudienceChildren(task);
+    const taskChildNames = normalizeTaskChildNames(String(task.child || ""));
     const targetSubscriptions = subscriptions.filter((subscription) => {
       const inAudience = shouldSubscriptionReceiveTask(subscription, audienceChildren);
       if (!inAudience) {
@@ -569,7 +636,7 @@ export const sendUpcomingTaskReminders = async (
       }
 
       const userName = (subscription.user_name || "").trim();
-      return isChildUserName(userName) && audienceChildren.includes(userName);
+      return isChildUserName(userName) && taskChildNames.includes(userName);
     });
 
     if (!targetSubscriptions.length) {
@@ -599,6 +666,7 @@ export const sendUpcomingTaskReminders = async (
 
       const childSubscriptionName = (subscription.user_name || "").trim();
       const childDisplayName = isChildUserName(childSubscriptionName) ? childSubscriptionName : defaultChildName;
+      console.log("Pushing to device of:", childSubscriptionName || "(unknown)");
       options?.onAttempt?.({
         userName: childSubscriptionName || "(unknown)",
         eventTitle: String(task.text || "משימה"),
@@ -651,6 +719,7 @@ export const sendUpcomingTaskReminders = async (
     subscriptions: subscriptions.length,
     windowForwardMinutes,
     strictChildUserOnly,
+    timeZone: timeZone || null,
   });
   return {
     scanned,
@@ -660,5 +729,6 @@ export const sendUpcomingTaskReminders = async (
     subscriptions: subscriptions.length,
     windowForwardMinutes,
     strictChildUserOnly,
+    timeZone: timeZone || null,
   };
 };

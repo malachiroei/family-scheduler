@@ -12,7 +12,10 @@ export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
     const subscription = body?.subscription;
-    const userName = typeof body?.userName === "string" ? body.userName : "";
+    const userName = typeof body?.userName === "string" ? body.userName.trim() : "";
+    if (!userName) {
+      return NextResponse.json({ error: "userName is required" }, { status: 400 });
+    }
     const receiveAll = Boolean(body?.receiveAll);
     const reminderLeadMinutes = Number(body?.reminderLeadMinutes);
     const watchChildren = Array.isArray(body?.watchChildren)
@@ -27,7 +30,7 @@ export async function POST(request: NextRequest) {
       reminderLeadMinutes,
     });
 
-    return NextResponse.json({ ok: true, endpoint: saved.endpoint });
+    return NextResponse.json({ ok: true, endpoint: saved.endpoint, userName });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Failed to subscribe";
     return NextResponse.json({ error: message }, { status: 400 });

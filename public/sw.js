@@ -1,4 +1,6 @@
-const CACHE_NAME = 'family-scheduler-v12';
+const CACHE_NAME = 'family-scheduler-v13';
+const API_BASE_URL = 'https://family-scheduler-topaz.vercel.app';
+const apiUrl = (path) => `${API_BASE_URL}${path}`;
 const APP_SHELL_FILES = ['/manifest.json?v=5', '/icon-512.png'];
 const reminderLeadOptions = [5, 10, 15, 30];
 const pushSoundOptions = ['/sounds/standard.mp3', '/sounds/bell.mp3', '/sounds/modern.mp3'];
@@ -169,7 +171,7 @@ self.addEventListener('notificationclick', (event) => {
     }
 
     event.waitUntil((async () => {
-      await fetch('/api/notifications/ack', {
+      await fetch(apiUrl('/api/notifications/ack'), {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
