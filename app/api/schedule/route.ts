@@ -718,15 +718,22 @@ const upsertScheduleEvent = async (incoming: ReturnType<typeof sanitizeDbEvent>)
 
     console.log("Saved successfully:", newRow.rows[0]);
 
+    const savedDateRaw = String(saved.event_date ?? saved.day ?? "").trim();
+    const savedDate = toIsoDate(savedDateRaw) || savedDateRaw;
+    const savedChildRaw = String(saved.child ?? "").trim().toLowerCase();
+    const savedChild = allowedScheduleChildren.includes(savedChildRaw as (typeof allowedScheduleChildren)[number])
+      ? savedChildRaw
+      : "amit";
+
     return {
       ok: true as const,
       row: newRow.rows[0],
       event: {
         id: String(saved.id),
-        date: String(saved.day),
-        dayIndex: toDayIndex(String(saved.day ?? ""), incoming.dayIndex),
+        date: savedDate,
+        dayIndex: toDayIndex(savedDate, incoming.dayIndex),
         time: String(saved.time),
-        child: String(saved.child),
+        child: savedChild,
         title: String(saved.text),
         type: String(saved.type),
         isRecurring: parseBooleanValue(saved.is_recurring ?? saved.is_weekly),
@@ -785,22 +792,31 @@ export async function GET() {
     const rows = result.rows;
     console.log("Events found in DB:", rows);
 
-    const events = rows.map((row) => ({
-      id: row.id,
-      date: row.event_date,
-      dayIndex: toDayIndex(String(row.event_date ?? ""), Number.isInteger(Number(row.day_index)) ? Number(row.day_index) : 0),
-      time: row.event_time,
-      child: row.child,
-      title: row.title,
-      type: row.event_type,
-      isRecurring: parseBooleanValue(row.is_recurring),
-      recurringTemplateId: typeof row.recurring_template_id === "string" && row.recurring_template_id.trim()
-        ? row.recurring_template_id.trim()
-        : undefined,
-      completed: parseBooleanValue(row.completed),
-      sendNotification: parseBooleanValue(row.send_notification),
-      requireConfirmation: parseBooleanValue(row.needs_ack ?? row.require_confirmation),
-    }));
+    const events = rows.map((row) => {
+      const rawDate = String(row.event_date ?? "").trim();
+      const normalizedDate = toIsoDate(rawDate) || rawDate;
+      const rawChild = String(row.child ?? "").trim().toLowerCase();
+      const normalizedChild = allowedScheduleChildren.includes(rawChild as (typeof allowedScheduleChildren)[number])
+        ? rawChild
+        : "amit";
+
+      return {
+        id: row.id,
+        date: normalizedDate,
+        dayIndex: toDayIndex(normalizedDate, Number.isInteger(Number(row.day_index)) ? Number(row.day_index) : 0),
+        time: row.event_time,
+        child: normalizedChild,
+        title: row.title,
+        type: row.event_type,
+        isRecurring: parseBooleanValue(row.is_recurring),
+        recurringTemplateId: typeof row.recurring_template_id === "string" && row.recurring_template_id.trim()
+          ? row.recurring_template_id.trim()
+          : undefined,
+        completed: parseBooleanValue(row.completed),
+        sendNotification: parseBooleanValue(row.send_notification),
+        requireConfirmation: parseBooleanValue(row.needs_ack ?? row.require_confirmation),
+      };
+    });
 
     return NextResponse.json({ events });
   } catch (error) {

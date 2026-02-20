@@ -293,6 +293,12 @@ const normalizeEventDateKey = (value: string | undefined, fallbackDate: Date) =>
   return parsed ? toEventDateKey(parsed) : toEventDateKey(fallbackDate);
 };
 
+const toApiDateString = (value: string | Date, fallbackDate: Date) => {
+  const parsed = value instanceof Date ? value : parseEventDateKey(value);
+  const resolved = parsed && !Number.isNaN(parsed.getTime()) ? parsed : fallbackDate;
+  return toIsoDate(resolved);
+};
+
 const toDisplayDate = (date: Date) => {
   const d = `${date.getDate()}`.padStart(2, '0');
   const m = `${date.getMonth() + 1}`.padStart(2, '0');
@@ -420,6 +426,17 @@ const normalizeChildKey = (value: string): BaseChildKey | null => {
   if (normalized === 'ravid' || normalized === 'רביד') return 'ravid';
   if (normalized === 'alin' || normalized === 'אלין') return 'alin';
   return null;
+};
+
+const normalizeChildForSave = (value: string): ChildKey => {
+  const normalized = value.trim().toLowerCase();
+  if (normalized === 'ravid' || normalized === 'amit' || normalized === 'alin') {
+    return normalized as ChildKey;
+  }
+  if (normalized === 'amit_alin' || normalized === 'alin_ravid' || normalized === 'amit_ravid') {
+    return normalized as ChildKey;
+  }
+  return 'amit';
 };
 
 const normalizeChildFilterValue = (value: unknown): 'all' | BaseChildKey => {
@@ -1796,6 +1813,11 @@ export default function FamilyScheduler() {
     try {
       await upsertEventToDatabase(event, dayIndex);
       await refetchEventsFromDatabase(targetWeekStart);
+      try {
+        await mutateSchedule('/api/schedule', targetWeekStart);
+      } catch (error) {
+        console.error('[UI] mutate(/api/schedule) failed', error);
+      }
 
       setDbSyncStatus({ state: 'saved', message: 'Saved' });
     } catch (error) {
@@ -2034,6 +2056,14 @@ export default function FamilyScheduler() {
     setWeekStart((prev) => addDays(prev, offset * 7));
   };
 
+  const mutateSchedule = async (key: string, targetWeekStart: Date) => {
+    if (key !== '/api/schedule') {
+      return;
+    }
+
+    await refetchEventsFromDatabase(targetWeekStart);
+  };
+
   const handleClearAll = async () => {
     const confirmed = window.confirm('למחוק את כל המשימות מהלו״ז?');
     if (!confirmed) {
@@ -2095,9 +2125,9 @@ export default function FamilyScheduler() {
       const recurringTemplateId = eventData.recurringWeekly ? generateId() : undefined;
       const event: SchedulerEvent = {
         id: generateId(),
-        date: eventDate,
+        date: toApiDateString(eventDate, resolvedEventDate),
         time: normalizeTimeForPicker(eventData.time),
-        child: normalizedChild,
+        child: normalizeChildForSave(normalizedChild),
         title: eventData.title,
         type: normalizeTypeForStorage(eventData.type, eventData.title),
         isRecurring: Boolean(eventData.recurringWeekly),
@@ -2279,11 +2309,12 @@ export default function FamilyScheduler() {
     const targetWeekStart = getWeekStart(selectedDate);
     const targetDayIndex = selectedDate.getDay();
     const recurringTemplateId = creatingEvent.recurringWeekly ? generateId() : undefined;
+    const normalizedChild = normalizeChildForSave(creatingEvent.data.child);
     const eventToSave: SchedulerEvent = {
       id: generateId(),
-      date: toEventDateKey(selectedDate),
+      date: toApiDateString(selectedDate, selectedDate),
       time: normalizeTimeForPicker(creatingEvent.data.time),
-      child: creatingEvent.data.child,
+      child: normalizedChild,
       title,
       type: normalizeTypeForStorage(creatingEvent.data.type || 'lesson', title),
       isRecurring: creatingEvent.recurringWeekly,
@@ -2342,9 +2373,11 @@ export default function FamilyScheduler() {
     const targetWeekStart = getWeekStart(selectedDate);
     const targetWeekKey = toIsoDate(targetWeekStart);
     const targetDayIndex = selectedDate.getDay();
+    const normalizedChild = normalizeChildForSave(editingEvent.data.child);
     const updatedEvent: SchedulerEvent = {
       ...editingEvent.data,
-      date: toEventDateKey(selectedDate),
+      date: toApiDateString(selectedDate, selectedDate),
+      child: normalizedChild,
       title: trimmedTitle,
       time: normalizeTimeForPicker(editingEvent.data.time),
       isRecurring: editingEvent.recurringWeekly,
@@ -2887,7 +2920,7 @@ export default function FamilyScheduler() {
       </div>
 
       {creatingEvent && (
-        <div className="fixed inset-0 bg-black/35 backdrop-blur-[1px] flex items-center justify-center p-4 z-50 print:hidden">
+        <div className="fixed inset-0 bg-black/35 backdrop-blur-[1px] flex items-center justify-center p-4 z-[60] print:hidden">
           <div className="w-full max-w-lg max-h-[85vh] bg-white rounded-2xl shadow-2xl border border-slate-200 flex flex-col overflow-hidden">
             <div className="sticky top-0 z-10 bg-white border-b border-slate-200 px-5 py-4 flex justify-between items-center">
               <h2 className="text-lg font-bold text-slate-800">אירוע חדש</h2>
@@ -3049,7 +3082,7 @@ export default function FamilyScheduler() {
       )}
 
       {editingEvent && (
-        <div className="fixed inset-0 bg-black/35 backdrop-blur-[1px] flex items-center justify-center p-4 z-50 print:hidden">
+        <div className="fixed inset-0 bg-black/35 backdrop-blur-[1px] flex items-center justify-center p-4 z-[60] print:hidden">
           <div className="w-full max-w-lg max-h-[85vh] bg-white rounded-2xl shadow-2xl border border-slate-200 flex flex-col overflow-hidden">
             <div className="sticky top-0 z-10 bg-white border-b border-slate-200 px-5 py-4 flex justify-between items-center">
               <h2 className="text-lg font-bold text-slate-800">עריכת משימה</h2>
