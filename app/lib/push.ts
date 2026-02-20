@@ -448,6 +448,7 @@ const markReminderDispatched = async (dispatchKey: string) => {
 export const sendUpcomingTaskReminders = async (
   options?: {
     windowForwardMinutes?: number;
+    strictChildUserOnly?: boolean;
   }
 ) => {
   await ensurePushTables();
@@ -465,6 +466,7 @@ export const sendUpcomingTaskReminders = async (
   const windowForwardMinutes = Number.isFinite(windowForwardMinutesRaw)
     ? Math.max(0, Math.min(15, Math.floor(windowForwardMinutesRaw)))
     : 15;
+  const strictChildUserOnly = options?.strictChildUserOnly === true;
   const nowUtc = new Date();
   const nowUtcMs = nowUtc.getTime();
 
@@ -555,9 +557,19 @@ export const sendUpcomingTaskReminders = async (
     }
 
     const audienceChildren = getTaskAudienceChildren(task);
-    const targetSubscriptions = subscriptions.filter((subscription) =>
-      shouldSubscriptionReceiveTask(subscription, audienceChildren)
-    );
+    const targetSubscriptions = subscriptions.filter((subscription) => {
+      const inAudience = shouldSubscriptionReceiveTask(subscription, audienceChildren);
+      if (!inAudience) {
+        return false;
+      }
+
+      if (!strictChildUserOnly) {
+        return true;
+      }
+
+      const userName = (subscription.user_name || "").trim();
+      return isChildUserName(userName) && audienceChildren.includes(userName);
+    });
 
     if (!targetSubscriptions.length) {
       skippedByReason.no_audience_subscriptions += 1;
@@ -633,6 +645,7 @@ export const sendUpcomingTaskReminders = async (
     nowUtcIso: nowUtc.toISOString(),
     subscriptions: subscriptions.length,
     windowForwardMinutes,
+    strictChildUserOnly,
   });
   return {
     scanned,
@@ -641,5 +654,6 @@ export const sendUpcomingTaskReminders = async (
     nowUtcIso: nowUtc.toISOString(),
     subscriptions: subscriptions.length,
     windowForwardMinutes,
+    strictChildUserOnly,
   };
 };

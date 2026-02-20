@@ -23,6 +23,7 @@ const runCheck = async (request: NextRequest) => {
 
     const result = await sendUpcomingTaskReminders({
       windowForwardMinutes: 15,
+      strictChildUserOnly: true,
     });
     console.log("Current UTC Time:", currentUtcTime);
     console.log("[NOTIFICATIONS_CHECK] cron result", result);

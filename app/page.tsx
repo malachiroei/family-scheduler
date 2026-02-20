@@ -1328,7 +1328,7 @@ export default function FamilyScheduler() {
               const serialized = oldSubscription.toJSON();
               const endpoint = serialized.endpoint || oldSubscription.endpoint || '';
               if (endpoint) {
-                await fetch('/api/push/subscribe', {
+                await fetch('/api/notifications/subscribe', {
                   method: 'DELETE',
                   headers: { 'Content-Type': 'application/json' },
                   body: JSON.stringify({ endpoint }),
@@ -1352,7 +1352,7 @@ export default function FamilyScheduler() {
           return;
         }
 
-        const configResponse = await fetch('/api/push/subscribe', { cache: 'no-store' });
+        const configResponse = await fetch('/api/notifications/subscribe', { cache: 'no-store' });
         const configPayload = await configResponse.json();
         if (!configResponse.ok || !configPayload?.enabled || !configPayload?.publicKey) {
           return;
@@ -1483,7 +1483,7 @@ export default function FamilyScheduler() {
     const receiveAll = isParent ? parentReceiveAll : false;
     const watchChildren = isParent && !receiveAll ? parentWatchChildren : [];
 
-    const saveResponse = await fetch('/api/push/subscribe', {
+    const saveResponse = await fetch('/api/notifications/subscribe', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -1551,7 +1551,7 @@ export default function FamilyScheduler() {
           return;
         }
 
-        const configResponse = await fetch('/api/push/subscribe', { cache: 'no-store' });
+        const configResponse = await fetch('/api/notifications/subscribe', { cache: 'no-store' });
         const configPayload = await configResponse.json();
         if (!configResponse.ok || !configPayload?.enabled || !configPayload?.publicKey) {
           setApiError('התראות אינן זמינות כרגע בשרת.');
@@ -1625,7 +1625,7 @@ export default function FamilyScheduler() {
         return;
       }
 
-      const configResponse = await fetch('/api/push/subscribe', { cache: 'no-store' });
+      const configResponse = await fetch('/api/notifications/subscribe', { cache: 'no-store' });
       const configPayload = await configResponse.json();
       if (!configResponse.ok || !configPayload?.enabled || !configPayload?.publicKey) {
         setApiError('התראות אינן זמינות כרגע בשרת.');
