@@ -8,6 +8,27 @@ const isAuthorizedCron = (request: NextRequest) => {
     return true;
   }
 
+  const isClientFallback = request.nextUrl.searchParams.get("client") === "1";
+  if (isClientFallback) {
+    const host = request.headers.get("x-forwarded-host") || request.headers.get("host") || "";
+    const origin = request.headers.get("origin") || "";
+    const referer = request.headers.get("referer") || "";
+    const sameOriginByOrigin = host && origin === `https://${host}`;
+    let sameOriginByReferer = false;
+    if (host && referer) {
+      try {
+        const refererHost = new URL(referer).host;
+        sameOriginByReferer = refererHost === host;
+      } catch {
+        sameOriginByReferer = false;
+      }
+    }
+
+    if (sameOriginByOrigin || sameOriginByReferer) {
+      return true;
+    }
+  }
+
   const authHeader = request.headers.get("authorization") || "";
   const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7).trim() : "";
   return token === expected;

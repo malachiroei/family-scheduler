@@ -36,6 +36,7 @@ type TaskRow = {
   send_notification?: boolean;
   require_confirmation?: boolean;
   needs_ack?: boolean;
+  reminder_lead_minutes?: number | null;
 };
 
 const childUserNames = ["רביד", "עמית", "אלין"] as const;
@@ -303,6 +304,29 @@ export const sendPushToAll = async (
   return { sent, skipped: (rowsResult.rowCount || 0) - targets.length };
 };
 
+export const sendPushToEndpoint = async (endpoint: string, payload: PushPayload) => {
+  const trimmedEndpoint = endpoint.trim();
+  if (!trimmedEndpoint) {
+    return { ok: false as const, reason: "missing-endpoint" };
+  }
+
+  await ensurePushTables();
+
+  const rowResult = await sql<SubscriptionRow>`
+    SELECT endpoint, p256dh, auth, user_name, receive_all, watch_children, reminder_lead_minutes
+    FROM push_subscriptions
+    WHERE endpoint = ${trimmedEndpoint}
+    LIMIT 1
+  `;
+
+  const row = rowResult.rows[0];
+  if (!row) {
+    return { ok: false as const, reason: "endpoint-not-found" };
+  }
+
+  return sendToSubscription(row, payload);
+};
+
 export const sendPushToParents = async (
   payload: PushPayload,
   targetParents: ParentUserName[] = [...parentUserNames]
@@ -509,6 +533,7 @@ export const sendUpcomingTaskReminders = async (
     await sql`ALTER TABLE family_schedule ADD COLUMN IF NOT EXISTS send_notification BOOLEAN NOT NULL DEFAULT TRUE`;
     await sql`ALTER TABLE family_schedule ADD COLUMN IF NOT EXISTS require_confirmation BOOLEAN NOT NULL DEFAULT FALSE`;
     await sql`ALTER TABLE family_schedule ADD COLUMN IF NOT EXISTS needs_ack BOOLEAN NOT NULL DEFAULT FALSE`;
+    await sql`ALTER TABLE family_schedule ADD COLUMN IF NOT EXISTS reminder_lead_minutes INT`;
   } catch {
     // no-op: handled by schedule bootstrap route in normal flow
   }
@@ -549,7 +574,8 @@ export const sendUpcomingTaskReminders = async (
       COALESCE(notified, FALSE) AS notified,
       COALESCE(send_notification, TRUE) AS send_notification,
       COALESCE(require_confirmation, FALSE) AS require_confirmation,
-      COALESCE(needs_ack, require_confirmation, FALSE) AS needs_ack
+      COALESCE(needs_ack, require_confirmation, FALSE) AS needs_ack,
+      reminder_lead_minutes
     FROM family_schedule
     WHERE COALESCE(send_notification, TRUE) = TRUE
       AND COALESCE(completed, FALSE) = FALSE
@@ -648,10 +674,13 @@ export const sendUpcomingTaskReminders = async (
     let deliveredForTask = 0;
     let hadDueByOffset = false;
     const defaultChildName = audienceChildren[0] || "הילד";
+    const taskReminderLeadMinutes = task.reminder_lead_minutes == null
+      ? null
+      : normalizeReminderLeadMinutes(task.reminder_lead_minutes);
     for (const subscription of targetSubscriptions) {
-      const reminderLeadMinutes = normalizeReminderLeadMinutes(subscription.reminder_lead_minutes);
-      const minDue = reminderLeadMinutes;
-      const maxDue = reminderLeadMinutes + windowForwardMinutes;
+      const reminderLeadMinutes = taskReminderLeadMinutes ?? normalizeReminderLeadMinutes(subscription.reminder_lead_minutes);
+      const minDue = 0;
+      const maxDue = reminderLeadMinutes;
       if (diffMinutes < minDue || diffMinutes > maxDue) {
         continue;
       }

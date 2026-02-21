@@ -27,6 +27,7 @@ type SchedulerEvent = {
   completed?: boolean;
   sendNotification?: boolean;
   requireConfirmation?: boolean;
+  reminderLeadMinutes?: ReminderLeadMinutes;
 };
 
 type DaySchedule = {
@@ -56,6 +57,7 @@ type RecurringTemplate = {
   isRecurring?: boolean;
   sendNotification?: boolean;
   requireConfirmation?: boolean;
+  reminderLeadMinutes?: ReminderLeadMinutes;
 };
 
 type NewEventDraft = {
@@ -68,6 +70,7 @@ type NewEventDraft = {
     type: EventType;
     sendNotification: boolean;
     requireConfirmation: boolean;
+    reminderLeadMinutes: ReminderLeadMinutes;
   };
 };
 
@@ -144,6 +147,7 @@ type ScheduleApiEvent = {
   completed?: boolean;
   sendNotification?: boolean;
   requireConfirmation?: boolean;
+  reminderLeadMinutes?: ReminderLeadMinutes;
 };
 
 type BeforeInstallPromptEvent = Event & {
@@ -170,7 +174,7 @@ const pushSoundOptions: Array<{ value: PushSoundPreset; label: string }> = [
 ];
 const defaultPushLeadMinutes: ReminderLeadMinutes = 10;
 const defaultPushSound: PushSoundPreset = '/sounds/standard.mp3';
-const SERVICE_WORKER_URL = `${API_BASE_URL}/sw.js?v=13`;
+const SERVICE_WORKER_URL = `${API_BASE_URL}/sw.js?v=19`;
 
 const sanitizeReminderLead = (value: unknown): ReminderLeadMinutes => {
   const numeric = Number(value);
@@ -809,17 +813,24 @@ const getChildKeys = (key: ChildKey): BaseChildKey[] => {
   return [key];
 };
 
-const getSaturdayGroup = (weekStart: Date): ChildKey => {
+const getSaturdayJohnnyAssignment = (weekStart: Date): { morning: BaseChildKey; afternoon: BaseChildKey } => {
   const reference = new Date('2026-02-15T00:00:00');
   const weekMs = 7 * 24 * 60 * 60 * 1000;
   const diffWeeks = Math.floor((getWeekStart(weekStart).getTime() - reference.getTime()) / weekMs);
-  const cycle: ChildKey[] = ['amit_ravid', 'alin_ravid', 'amit_alin'];
+  const cycle: Array<{ morning: BaseChildKey; afternoon: BaseChildKey }> = [
+    { morning: 'alin', afternoon: 'amit' },
+    { morning: 'ravid', afternoon: 'alin' },
+    { morning: 'amit', afternoon: 'ravid' },
+    { morning: 'amit', afternoon: 'alin' },
+    { morning: 'alin', afternoon: 'ravid' },
+    { morning: 'ravid', afternoon: 'amit' },
+  ];
   const index = ((diffWeeks % cycle.length) + cycle.length) % cycle.length;
   return cycle[index];
 };
 
 const buildJohnnyEvents = (weekStart: Date): Array<{ dayIndex: number; event: SchedulerEvent }> => {
-  const saturdayGroup = getSaturdayGroup(weekStart);
+  const saturdayAssignment = getSaturdayJohnnyAssignment(weekStart);
   const dateForDay = (dayIndex: number) => toEventDateKey(addDays(weekStart, dayIndex));
   return [
     {
@@ -872,7 +883,11 @@ const buildJohnnyEvents = (weekStart: Date): Array<{ dayIndex: number; event: Sc
     },
     {
       dayIndex: 6,
-      event: createEvent({ date: dateForDay(6), time: '13:00', child: saturdayGroup, title: 'הורדת ג׳וני', type: 'dog', isRecurring: true }),
+      event: createEvent({ date: dateForDay(6), time: '08:00', child: saturdayAssignment.morning, title: 'הורדת ג׳וני (בוקר)', type: 'dog', isRecurring: true }),
+    },
+    {
+      dayIndex: 6,
+      event: createEvent({ date: dateForDay(6), time: '13:00', child: saturdayAssignment.afternoon, title: 'הורדת ג׳וני (צהריים)', type: 'dog', isRecurring: true }),
     },
   ];
 };
@@ -909,6 +924,7 @@ const createWeekDays = (weekStart: Date, includeDemo: boolean, recurringTemplate
       completed: Boolean(event.completed),
       sendNotification: event.sendNotification ?? true,
       requireConfirmation: Boolean(event.requireConfirmation),
+      reminderLeadMinutes: sanitizeReminderLead(event.reminderLeadMinutes),
     });
   };
 
@@ -928,6 +944,7 @@ const createWeekDays = (weekStart: Date, includeDemo: boolean, recurringTemplate
       recurringTemplateId: template.templateId,
       sendNotification: template.sendNotification,
       requireConfirmation: template.requireConfirmation,
+      reminderLeadMinutes: template.reminderLeadMinutes,
     });
     });
 
@@ -995,6 +1012,15 @@ export default function FamilyScheduler() {
   const [pushEnabled, setPushEnabled] = useState(false);
   const [pushBusy, setPushBusy] = useState(false);
   const [pushTestBusy, setPushTestBusy] = useState(false);
+  const [exportImageBusy, setExportImageBusy] = useState(false);
+  const [pushRavidTestBusy, setPushRavidTestBusy] = useState(false);
+  const [confirmingEventId, setConfirmingEventId] = useState('');
+  const [confirmingReminderSeen, setConfirmingReminderSeen] = useState(false);
+  const [pendingReminderConfirmation, setPendingReminderConfirmation] = useState<{
+    eventId: string;
+    childName: string;
+    eventTitle: string;
+  } | null>(null);
   const [showPushIdentityPrompt, setShowPushIdentityPrompt] = useState(false);
   const [pushUserName, setPushUserName] = useState<PushUserName | ''>('');
   const [hasConfirmedPushIdentitySelection, setHasConfirmedPushIdentitySelection] = useState(false);
@@ -1026,6 +1052,32 @@ export default function FamilyScheduler() {
     }
     setSettingsChildFilter(normalizeChildFilterValue(selectedChildFilter));
   }, [showSettingsModal, selectedChildFilter]);
+
+  useEffect(() => {
+    const readPendingConfirmationFromUrl = () => {
+      if (typeof window === 'undefined') {
+        return;
+      }
+
+      const params = new URLSearchParams(window.location.search);
+      const eventId = params.get('confirmEventId')?.trim() || '';
+      if (!eventId) {
+        return;
+      }
+
+      const childName = params.get('confirmChildName')?.trim() || '';
+      const eventTitle = params.get('confirmEventTitle')?.trim() || '';
+      setPendingReminderConfirmation({ eventId, childName, eventTitle });
+    };
+
+    readPendingConfirmationFromUrl();
+    window.addEventListener('popstate', readPendingConfirmationFromUrl);
+    window.addEventListener('focus', readPendingConfirmationFromUrl);
+    return () => {
+      window.removeEventListener('popstate', readPendingConfirmationFromUrl);
+      window.removeEventListener('focus', readPendingConfirmationFromUrl);
+    };
+  }, []);
 
   const saveSettingsChildFilter = () => {
     setSelectedChildFilter(normalizeChildFilterValue(settingsChildFilter));
@@ -1266,7 +1318,10 @@ export default function FamilyScheduler() {
     }
 
     const onWorkerMessage = (event: MessageEvent) => {
-      const data = event.data as { type?: string; payload?: { sound?: string; eventId?: string } } | undefined;
+      const data = event.data as {
+        type?: string;
+        payload?: { sound?: string; eventId?: string; childName?: string; eventTitle?: string };
+      } | undefined;
 
       if (data?.type === 'PLAY_PUSH_SOUND') {
         const selectedSound = (typeof data?.payload?.sound === 'string' && data.payload.sound)
@@ -1293,6 +1348,20 @@ export default function FamilyScheduler() {
             }));
           });
           return next;
+        });
+        return;
+      }
+
+      if (data?.type === 'CONFIRM_REQUIRED') {
+        const eventId = typeof data?.payload?.eventId === 'string' ? data.payload.eventId.trim() : '';
+        if (!eventId) {
+          return;
+        }
+
+        setPendingReminderConfirmation({
+          eventId,
+          childName: typeof data?.payload?.childName === 'string' ? data.payload.childName.trim() : '',
+          eventTitle: typeof data?.payload?.eventTitle === 'string' ? data.payload.eventTitle.trim() : '',
         });
       }
     };
@@ -1696,6 +1765,177 @@ export default function FamilyScheduler() {
     }
   };
 
+  const selectedChildForDirectTest = (!isParentPushUser(pushUserName) && pushUserName)
+    ? pushUserName
+    : '';
+
+  const sendDirectTestPushToSelectedChild = async () => {
+    if (pushRavidTestBusy) {
+      return;
+    }
+
+    if (!selectedChildForDirectTest) {
+      setApiError('בחרו קודם משתמש ילד (רביד/עמית/אלין) כדי לשלוח בדיקה ישירה.');
+      return;
+    }
+
+    setPushRavidTestBusy(true);
+    try {
+      const response = await fetch(toApiUrl(`/api/push/test-ravid?childName=${encodeURIComponent(selectedChildForDirectTest)}`), {
+        method: 'POST',
+      });
+      const payload = await response.json();
+      if (!response.ok) {
+        throw new Error(payload?.error || `שליחת בדיקה ל${selectedChildForDirectTest} נכשלה`);
+      }
+
+      setSuccessMessage(`התראת בדיקה נשלחה ל${selectedChildForDirectTest}.`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : `שליחת בדיקה ל${selectedChildForDirectTest} נכשלה`;
+      setApiError(message);
+    } finally {
+      setPushRavidTestBusy(false);
+    }
+  };
+
+  const confirmReminderSeen = async () => {
+    if (!pendingReminderConfirmation || confirmingReminderSeen) {
+      return;
+    }
+
+    setConfirmingReminderSeen(true);
+    try {
+      const response = await fetch(toApiUrl('/api/notifications/ack'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          eventId: pendingReminderConfirmation.eventId,
+          childName: pendingReminderConfirmation.childName,
+          eventTitle: pendingReminderConfirmation.eventTitle,
+        }),
+      });
+
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(payload?.error || 'שליחת אישור צפייה נכשלה');
+      }
+
+      const confirmedEventId = pendingReminderConfirmation.eventId;
+      setWeeksData((prev) => {
+        const next: Record<string, DaySchedule[]> = {};
+        Object.entries(prev).forEach(([key, scheduleDays]) => {
+          next[key] = scheduleDays.map((day) => ({
+            ...day,
+            events: day.events.map((event) => (
+              event.id === confirmedEventId ? { ...event, completed: true } : event
+            )),
+          }));
+        });
+        return next;
+      });
+
+      setPendingReminderConfirmation(null);
+      if (typeof window !== 'undefined') {
+        const nextUrl = new URL(window.location.href);
+        nextUrl.searchParams.delete('confirmEventId');
+        nextUrl.searchParams.delete('confirmChildName');
+        nextUrl.searchParams.delete('confirmEventTitle');
+        window.history.replaceState({}, '', `${nextUrl.pathname}${nextUrl.search}${nextUrl.hash}`);
+      }
+
+      setSuccessMessage('האישור נשלח בהצלחה.');
+      if (apiError) {
+        setApiError('');
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'שליחת אישור צפייה נכשלה';
+      setApiError(message);
+    } finally {
+      setConfirmingReminderSeen(false);
+    }
+  };
+
+  const confirmEventFromBoard = async (eventToConfirm: SchedulerEvent) => {
+    if (confirmingEventId === eventToConfirm.id) {
+      return;
+    }
+
+    setConfirmingEventId(eventToConfirm.id);
+    try {
+      const childName = (!isParentPushUser(pushUserName) && pushUserName)
+        ? pushUserName
+        : baseChildrenConfig[getChildKeys(eventToConfirm.child)[0]].name;
+
+      const response = await fetch(toApiUrl('/api/notifications/ack'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          eventId: eventToConfirm.id,
+          childName,
+          eventTitle: eventToConfirm.title,
+        }),
+      });
+
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(payload?.error || 'שליחת אישור נכשלה');
+      }
+
+      setWeeksData((prev) => {
+        const next: Record<string, DaySchedule[]> = {};
+        Object.entries(prev).forEach(([key, scheduleDays]) => {
+          next[key] = scheduleDays.map((day) => ({
+            ...day,
+            events: day.events.map((event) => (
+              event.id === eventToConfirm.id ? { ...event, completed: true } : event
+            )),
+          }));
+        });
+        return next;
+      });
+
+      setSuccessMessage('האישור נשלח בהצלחה.');
+      if (apiError) {
+        setApiError('');
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'שליחת אישור נכשלה';
+      setApiError(message);
+    } finally {
+      setConfirmingEventId('');
+    }
+  };
+
+  useEffect(() => {
+    let isRunning = false;
+
+    const triggerReminderCheck = async () => {
+      if (isRunning) {
+        return;
+      }
+
+      isRunning = true;
+      try {
+        await fetch(toApiUrl('/api/notifications/check?client=1'), {
+          method: 'GET',
+          cache: 'no-store',
+        });
+      } catch {
+      } finally {
+        isRunning = false;
+      }
+    };
+
+    void triggerReminderCheck();
+    const timer = setInterval(() => {
+      void triggerReminderCheck();
+    }, 60_000);
+
+    return () => {
+      clearInterval(timer);
+    };
+  }, []);
+
   const weekRangeLabel = `${toDisplayDate(weekStart)} - ${toDisplayDate(addDays(weekStart, 6))}`;
 
   const refetchEventsFromDatabase = async (targetWeekStart: Date) => {
@@ -1732,6 +1972,7 @@ export default function FamilyScheduler() {
           isRecurring: true,
           sendNotification: event.sendNotification ?? true,
           requireConfirmation: Boolean(event.requireConfirmation),
+          reminderLeadMinutes: sanitizeReminderLead(event.reminderLeadMinutes),
         });
       }
     });
@@ -1764,6 +2005,7 @@ export default function FamilyScheduler() {
           completed: Boolean(event.completed),
           sendNotification: event.sendNotification ?? true,
           requireConfirmation: Boolean(event.requireConfirmation),
+          reminderLeadMinutes: sanitizeReminderLead(event.reminderLeadMinutes),
         });
         weekDays[dayIndex].events = sortEvents(weekDays[dayIndex].events);
       });
@@ -2097,48 +2339,281 @@ export default function FamilyScheduler() {
   );
 
   const exportAsImage = async () => {
-    const scheduleElement = document.getElementById('schedule-table');
-    if (scheduleElement) {
-      const sourceCanvas = await html2canvas(scheduleElement, {
-        backgroundColor: '#ffffff',
-        scale: Math.max(3, Math.min(4, window.devicePixelRatio * 2)),
-        useCORS: true,
-        logging: false,
-        ignoreElements: (element) => element.classList?.contains('capture-ignore') ?? false,
-      });
+    if (exportImageBusy) {
+      return;
+    }
 
-      const targetRatio = 16 / 9;
-      let outputWidth = sourceCanvas.width;
-      let outputHeight = Math.round(outputWidth / targetRatio);
-
-      if (outputHeight < sourceCanvas.height) {
-        outputHeight = sourceCanvas.height;
-        outputWidth = Math.round(outputHeight * targetRatio);
-      }
+    setExportImageBusy(true);
+    try {
+      const outputWidth = 1080;
+      const outputHeight = 1080;
+      const padding = 36;
+      const titleHeight = 80;
+      const fileName = `family-schedule-${weekKey}.png`;
 
       const exportCanvas = document.createElement('canvas');
       exportCanvas.width = outputWidth;
       exportCanvas.height = outputHeight;
-
       const context = exportCanvas.getContext('2d');
       if (!context) {
+        setApiError('לא הצלחתי ליצור תמונה. נסי שוב.');
         return;
       }
 
-      context.fillStyle = '#f8fafc';
-      context.fillRect(0, 0, outputWidth, outputHeight);
-      context.imageSmoothingEnabled = true;
-      context.imageSmoothingQuality = 'high';
+      const canvasToBlob = async (canvas: HTMLCanvasElement) => {
+        const fromBlob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, 'image/png', 1));
+        if (fromBlob) {
+          return fromBlob;
+        }
 
-      const offsetX = Math.round((outputWidth - sourceCanvas.width) / 2);
-      const offsetY = Math.round((outputHeight - sourceCanvas.height) / 2);
-      context.drawImage(sourceCanvas, offsetX, offsetY);
+        const base64 = canvas.toDataURL('image/png');
+        const res = await fetch(base64);
+        return res.blob();
+      };
 
-      const image = exportCanvas.toDataURL("image/png");
-      const link = document.createElement('a');
-      link.href = image;
-      link.download = 'family-schedule.png';
-      link.click();
+      const downloadBlob = (blob: Blob) => {
+        const objectUrl = URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.href = objectUrl;
+        link.download = fileName;
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        setTimeout(() => URL.revokeObjectURL(objectUrl), 2000);
+      };
+
+      const shareOrDownload = async (blob: Blob) => {
+        const file = new File([blob], fileName, { type: 'image/png' });
+        const canUseNativeShare = typeof navigator !== 'undefined' && typeof navigator.share === 'function';
+        let shared = false;
+
+        if (canUseNativeShare) {
+          try {
+            const canShareFiles = typeof navigator.canShare === 'function'
+              ? navigator.canShare({ files: [file] })
+              : false;
+            if (canShareFiles) {
+              await navigator.share({
+                title: 'לו״ז שבועי',
+                text: `לו״ז שבועי ${weekRangeLabel}`,
+                files: [file],
+              });
+              shared = true;
+            }
+          } catch {
+            shared = false;
+          }
+        }
+
+        if (shared) {
+          setSuccessMessage('התמונה מוכנה לשיתוף בוואטסאפ.');
+          return;
+        }
+
+        downloadBlob(blob);
+        setSuccessMessage('התמונה נשמרה להורדה.');
+      };
+
+      const drawFallbackImage = () => {
+        const drawRoundedRect = (x: number, y: number, width: number, height: number, radius: number) => {
+          const r = Math.min(radius, width / 2, height / 2);
+          context.beginPath();
+          context.moveTo(x + r, y);
+          context.lineTo(x + width - r, y);
+          context.quadraticCurveTo(x + width, y, x + width, y + r);
+          context.lineTo(x + width, y + height - r);
+          context.quadraticCurveTo(x + width, y + height, x + width - r, y + height);
+          context.lineTo(x + r, y + height);
+          context.quadraticCurveTo(x, y + height, x, y + height - r);
+          context.lineTo(x, y + r);
+          context.quadraticCurveTo(x, y, x + r, y);
+          context.closePath();
+        };
+
+        const truncate = (value: string, maxLen: number) => {
+          if (value.length <= maxLen) {
+            return value;
+          }
+          return `${value.slice(0, maxLen - 1)}…`;
+        };
+
+        const childColorHex: Record<BaseChildKey, string> = {
+          ravid: '#3b82f6',
+          amit: '#22c55e',
+          alin: '#ec4899',
+        };
+
+        const dayAccent = ['#c7d2fe', '#bfdbfe', '#bbf7d0', '#fde68a', '#fecaca', '#ddd6fe', '#fbcfe8'];
+
+        context.fillStyle = '#eef2ff';
+        context.fillRect(0, 0, outputWidth, outputHeight);
+
+        drawRoundedRect(padding, padding, outputWidth - (padding * 2), titleHeight, 20);
+        context.fillStyle = '#1e293b';
+        context.fill();
+
+        context.fillStyle = '#ffffff';
+        context.font = 'bold 36px Arial';
+        context.textAlign = 'right';
+        context.textBaseline = 'middle';
+        context.fillText('לו״ז שבועי משפחתי', outputWidth - (padding + 24), padding + 30);
+
+        context.fillStyle = '#cbd5e1';
+        context.font = '22px Arial';
+        context.fillText(weekRangeLabel, outputWidth - (padding + 24), padding + 62);
+
+        const gridTop = padding + titleHeight + 16;
+        const gridHeight = outputHeight - gridTop - padding;
+        const columns = 3;
+        const rows = 3;
+        const gap = 16;
+        const cardWidth = Math.floor((outputWidth - (padding * 2) - (gap * (columns - 1))) / columns);
+        const cardHeight = Math.floor((gridHeight - (gap * (rows - 1))) / rows);
+
+        days.slice(0, 7).forEach((day, index) => {
+          const row = Math.floor(index / columns);
+          const col = index % columns;
+          const rtlCol = (columns - 1) - col;
+          const isLastSingleCard = index === 6;
+          const x = isLastSingleCard
+            ? Math.floor((outputWidth - cardWidth) / 2)
+            : padding + (rtlCol * (cardWidth + gap));
+          const y = gridTop + (row * (cardHeight + gap));
+
+          drawRoundedRect(x, y, cardWidth, cardHeight, 18);
+          context.fillStyle = '#ffffff';
+          context.fill();
+          context.strokeStyle = '#cbd5e1';
+          context.lineWidth = 2;
+          context.stroke();
+
+          drawRoundedRect(x + 2, y + 2, cardWidth - 4, 36, 14);
+          context.fillStyle = dayAccent[index % dayAccent.length] || '#dbeafe';
+          context.fill();
+
+          context.fillStyle = '#0f172a';
+          context.font = 'bold 24px Arial';
+          context.textAlign = 'right';
+          context.textBaseline = 'top';
+          context.fillText(day.dayName, x + cardWidth - 14, y + 12);
+
+          context.fillStyle = '#475569';
+          context.font = '20px Arial';
+          context.textAlign = 'left';
+          context.fillText(day.date, x + 14, y + 14);
+
+          const cardEvents = [...day.events]
+            .sort((a, b) => a.time.localeCompare(b.time))
+            .slice(0, 4);
+
+          if (cardEvents.length === 0) {
+            context.fillStyle = '#94a3b8';
+            context.font = '20px Arial';
+            context.textAlign = 'center';
+            context.fillText('אין משימות', x + (cardWidth / 2), y + (cardHeight / 2));
+            return;
+          }
+
+          let lineY = y + 50;
+          cardEvents.forEach((event) => {
+            const childKeys = getChildKeys(event.child);
+            const childName = childKeys.map((key) => baseChildrenConfig[key].name).join(' + ');
+            const eventLine = truncate(`${event.time}  ${event.title}`, 27);
+            const childLine = truncate(childName, 26);
+
+            drawRoundedRect(x + 8, lineY - 4, cardWidth - 16, 44, 10);
+            context.fillStyle = '#f8fafc';
+            context.fill();
+
+            let dotX = x + 18;
+            childKeys.forEach((childKey) => {
+              context.beginPath();
+              context.arc(dotX, lineY + 19, 5, 0, Math.PI * 2);
+              context.fillStyle = childColorHex[childKey];
+              context.fill();
+              dotX += 14;
+            });
+
+            context.fillStyle = '#0f172a';
+            context.font = 'bold 18px Arial';
+            context.textAlign = 'right';
+            context.fillText(eventLine, x + cardWidth - 12, lineY);
+
+            lineY += 22;
+            context.fillStyle = '#64748b';
+            context.font = '16px Arial';
+            context.fillText(childLine, x + cardWidth - 12, lineY);
+
+            lineY += 22;
+            context.strokeStyle = '#e2e8f0';
+            context.lineWidth = 1;
+            context.beginPath();
+            context.moveTo(x + 12, lineY);
+            context.lineTo(x + cardWidth - 12, lineY);
+            context.stroke();
+            lineY += 10;
+          });
+        });
+      };
+
+      const scheduleElement = document.getElementById('schedule-table');
+      if (scheduleElement) {
+        try {
+          if (typeof document !== 'undefined' && 'fonts' in document) {
+            await (document as Document & { fonts?: { ready?: Promise<unknown> } }).fonts?.ready;
+          }
+
+          const sourceCanvas = await html2canvas(scheduleElement, {
+            backgroundColor: '#ffffff',
+            scale: Math.max(2, Math.min(3, window.devicePixelRatio * 1.5)),
+            useCORS: true,
+            logging: false,
+            ignoreElements: (element) => element.classList?.contains('capture-ignore') ?? false,
+          });
+
+          context.fillStyle = '#f8fafc';
+          context.fillRect(0, 0, outputWidth, outputHeight);
+          context.imageSmoothingEnabled = true;
+          context.imageSmoothingQuality = 'high';
+
+          context.fillStyle = '#1e293b';
+          context.font = 'bold 40px Arial';
+          context.textAlign = 'center';
+          context.textBaseline = 'middle';
+          context.fillText('לו״ז שבועי משפחתי', outputWidth / 2, padding + 22);
+
+          const availableWidth = outputWidth - (padding * 2);
+          const availableHeight = outputHeight - (padding * 2) - titleHeight;
+          const scale = Math.min(availableWidth / sourceCanvas.width, availableHeight / sourceCanvas.height);
+          const renderWidth = Math.floor(sourceCanvas.width * scale);
+          const renderHeight = Math.floor(sourceCanvas.height * scale);
+          const offsetX = Math.floor((outputWidth - renderWidth) / 2);
+          const offsetY = padding + titleHeight + Math.floor((availableHeight - renderHeight) / 2);
+
+          context.drawImage(sourceCanvas, offsetX, offsetY, renderWidth, renderHeight);
+        } catch {
+          drawFallbackImage();
+        }
+      } else {
+        drawFallbackImage();
+      }
+
+      const blob = await canvasToBlob(exportCanvas);
+      if (!blob) {
+        setApiError('לא הצלחתי לשמור את התמונה. נסי שוב.');
+        return;
+      }
+
+      await shareOrDownload(blob);
+
+      if (apiError) {
+        setApiError('');
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'יצירת תמונה לוואטסאפ נכשלה';
+      setApiError(message || 'יצירת תמונה לוואטסאפ נכשלה');
+    } finally {
+      setExportImageBusy(false);
     }
   };
 
@@ -2364,6 +2839,7 @@ export default function FamilyScheduler() {
         type: 'lesson',
         sendNotification: true,
         requireConfirmation: false,
+        reminderLeadMinutes,
       },
     });
   };
@@ -2405,6 +2881,7 @@ export default function FamilyScheduler() {
       completed: false,
       sendNotification: Boolean(creatingEvent.data.sendNotification),
       requireConfirmation: Boolean(creatingEvent.data.requireConfirmation),
+      reminderLeadMinutes: sanitizeReminderLead(creatingEvent.data.reminderLeadMinutes),
     };
 
     const targetWeekKey = toIsoDate(targetWeekStart);
@@ -2464,6 +2941,7 @@ export default function FamilyScheduler() {
       child: normalizedChild,
       title: trimmedTitle,
       time: normalizeTimeForPicker(editingEvent.data.time),
+      reminderLeadMinutes: sanitizeReminderLead(editingEvent.data.reminderLeadMinutes),
       isRecurring: editingEvent.recurringWeekly,
       recurringTemplateId: editingEvent.recurringWeekly
         ? (editingEvent.originalRecurringTemplateId ?? editingEvent.data.recurringTemplateId ?? generateId())
@@ -2533,6 +3011,11 @@ export default function FamilyScheduler() {
 
   return (
     <div className="print-scheduler-shell h-screen overflow-y-auto bg-[#f8fafc] px-3 pt-12 pb-20 md:px-4 md:pt-14 md:pb-24 dir-rtl" dir="rtl">
+      <div className="max-w-6xl mx-auto mb-2 print:hidden">
+        <div className="rounded-xl border border-indigo-200 bg-indigo-50 px-3 py-2 text-center text-sm font-semibold text-indigo-900">
+          גרסה חדשה פעילה: V19
+        </div>
+      </div>
       <button
         type="button"
         onClick={() => setShowSettingsModal(true)}
@@ -2551,8 +3034,26 @@ export default function FamilyScheduler() {
         <RefreshCw size={14} className={isRefreshing ? 'animate-spin' : ''} />
         <span className="text-xs font-bold">רענן</span>
       </button>
+      <div className="fixed top-5 left-1/2 -translate-x-1/2 z-40 rounded-full border border-indigo-300 bg-indigo-100 px-3 py-1 text-xs font-extrabold text-indigo-900 shadow-lg print:hidden">
+        גרסה חדשה פעילה • V19
+      </div>
 
       <div className="max-w-6xl mx-auto mb-4 pb-4 print:hidden">
+        {pendingReminderConfirmation && (
+          <div className="mb-3 rounded-xl border border-indigo-200 bg-indigo-50 p-3 flex items-center justify-between gap-3">
+            <div className="text-sm text-indigo-900 font-semibold">
+              התקבלה תזכורת למשימה. לחצו לאישור צפייה.
+            </div>
+            <button
+              type="button"
+              onClick={() => { void confirmReminderSeen(); }}
+              disabled={confirmingReminderSeen}
+              className="shrink-0 rounded-lg bg-indigo-600 text-white px-3 py-1.5 text-sm font-semibold hover:bg-indigo-700 transition disabled:opacity-60 disabled:cursor-not-allowed"
+            >
+              {confirmingReminderSeen ? 'שולח אישור...' : 'אישרתי שראיתי'}
+            </button>
+          </div>
+        )}
         <div className="relative flex items-center justify-center">
         <button
           onClick={() => shiftWeek(1)}
@@ -2641,23 +3142,29 @@ export default function FamilyScheduler() {
               {visibleEvents.map((event) => {
                 const mainIconColor = baseChildrenConfig[getChildKeys(event.child)[0]].iconColor;
                 return (
-                  <button
+                  <div
                     key={event.id}
-                    type="button"
-                    onClick={() => setEditingEvent({
-                      sourceWeekKey: weekKey,
-                      dayIndex,
-                      selectedDate: day.isoDate,
-                      data: { ...event, time: normalizeTimeForPicker(event.time) },
-                      recurringWeekly: Boolean(event.recurringTemplateId),
-                      originalRecurringTemplateId: event.recurringTemplateId,
-                    })}
+                    onClick={(clickEvent) => {
+                      const target = clickEvent.target as HTMLElement;
+                      if (target.closest('[data-confirm-button="1"]')) {
+                        return;
+                      }
+
+                      setEditingEvent({
+                        sourceWeekKey: weekKey,
+                        dayIndex,
+                        selectedDate: day.isoDate,
+                        data: { ...event, time: normalizeTimeForPicker(event.time) },
+                        recurringWeekly: Boolean(event.recurringTemplateId),
+                        originalRecurringTemplateId: event.recurringTemplateId,
+                      });
+                    }}
                     className="w-full text-right flex items-center justify-between p-3 rounded-2xl bg-slate-50 border border-transparent hover:border-slate-200 transition print:pointer-events-none print-event-item"
                   >
                     <span className="text-slate-500 font-medium text-sm w-14">{event.time}</span>
                     <div className="flex-1 flex items-center gap-3">
                       {renderChildBadges(event.child)}
-                      <div className="flex items-center gap-2">
+                      <div className="flex items-center gap-2 flex-wrap">
                         {event.completed && (
                           <span className={`${statusPillClassName} text-emerald-700 bg-emerald-50 border-emerald-200`}>בוצע</span>
                         )}
@@ -2671,12 +3178,26 @@ export default function FamilyScheduler() {
                         {(event.isRecurring || event.recurringTemplateId) && (
                           <span className={`${statusPillClassName} text-blue-700 bg-blue-50 border-blue-200`}>קבוע</span>
                         )}
+                        {event.requireConfirmation && !event.completed && (
+                          <button
+                            type="button"
+                            data-confirm-button="1"
+                            onClick={(buttonEvent) => {
+                              buttonEvent.stopPropagation();
+                              void confirmEventFromBoard(event);
+                            }}
+                            disabled={confirmingEventId === event.id}
+                            className="rounded-lg bg-indigo-600 text-white px-2.5 py-1 text-xs font-semibold hover:bg-indigo-700 transition disabled:opacity-60 disabled:cursor-not-allowed"
+                          >
+                            {confirmingEventId === event.id ? 'שולח אישור...' : 'אישרתי שראיתי'}
+                          </button>
+                        )}
                       </div>
                     </div>
                     <div className={mainIconColor}>
                       {getEventIcon(event.type, event.title)}
                     </div>
-                  </button>
+                  </div>
                 );
               })}
 
@@ -2726,7 +3247,9 @@ export default function FamilyScheduler() {
                 disabled={pushBusy}
                 className="w-full flex items-center justify-center gap-2 bg-blue-50 text-blue-700 border border-blue-200 px-4 py-1.5 rounded-lg hover:bg-blue-100 transition disabled:opacity-60 disabled:cursor-not-allowed"
               >
-                {pushEnabled ? 'התראות פעילות' : (pushBusy ? 'מפעיל התראות...' : 'הפעל התראות')}
+                {pushEnabled
+                  ? `משתמש במכשיר: ${pushUserName || 'לא נבחר'}`
+                  : (pushBusy ? 'מפעיל התראות...' : 'הפעל התראות')}
               </button>
               <button
                 type="button"
@@ -2735,6 +3258,16 @@ export default function FamilyScheduler() {
                 className="w-full flex items-center justify-center gap-2 bg-indigo-50 text-indigo-700 border border-indigo-200 px-4 py-1.5 rounded-lg hover:bg-indigo-100 transition disabled:opacity-60 disabled:cursor-not-allowed"
               >
                 {pushTestBusy ? 'שולח התראה...' : 'שלח התראת ניסיון'}
+              </button>
+              <button
+                type="button"
+                onClick={() => { void sendDirectTestPushToSelectedChild(); }}
+                disabled={pushRavidTestBusy || !selectedChildForDirectTest}
+                className="w-full flex items-center justify-center gap-2 bg-indigo-50 text-indigo-700 border border-indigo-200 px-4 py-1.5 rounded-lg hover:bg-indigo-100 transition disabled:opacity-60 disabled:cursor-not-allowed"
+              >
+                {pushRavidTestBusy
+                  ? `שולח ל${selectedChildForDirectTest || 'ילד'}...`
+                  : `שלח בדיקה ל${selectedChildForDirectTest || 'ילד נבחר'}`}
               </button>
               <button
                 type="button"
@@ -2752,10 +3285,11 @@ export default function FamilyScheduler() {
               </button>
               <button
                 type="button"
-                onClick={exportAsImage}
-                className="w-full flex items-center justify-center gap-2 bg-slate-800 text-white px-4 py-1.5 rounded-lg hover:bg-slate-700 transition"
+                onClick={() => { void exportAsImage(); }}
+                disabled={exportImageBusy}
+                className="w-full flex items-center justify-center gap-2 bg-slate-800 text-white px-4 py-1.5 rounded-lg hover:bg-slate-700 transition disabled:opacity-60 disabled:cursor-not-allowed"
               >
-                <ImageIcon size={18} /> תמונה לוואטסאפ
+                <ImageIcon size={18} /> {exportImageBusy ? 'מכין תמונה...' : 'תמונה לוואטסאפ'}
               </button>
               {pushUserName && (
                 <div className="text-xs text-slate-600 bg-slate-100 border border-slate-200 rounded-lg px-2 py-2 text-center">
@@ -3132,6 +3666,22 @@ export default function FamilyScheduler() {
                 />
                 הפעל התראה למשימה זו
               </label>
+              <div>
+                <div className="text-xs text-slate-500 mb-1">מועד התראה למשימה זו</div>
+                <select
+                  value={creatingEvent.data.reminderLeadMinutes}
+                  onChange={(e) => setCreatingEvent((prev) => prev ? ({
+                    ...prev,
+                    data: { ...prev.data, reminderLeadMinutes: sanitizeReminderLead(e.target.value) },
+                  }) : prev)}
+                  disabled={!creatingEvent.data.sendNotification}
+                  className="w-full rounded-xl border border-slate-300 px-3 py-1.5 text-sm text-slate-700 outline-none focus:border-blue-400 disabled:opacity-60 disabled:cursor-not-allowed"
+                >
+                  {reminderLeadOptions.map((minutes) => (
+                    <option key={`create-event-lead-${minutes}`} value={minutes}>{minutes} דקות לפני</option>
+                  ))}
+                </select>
+              </div>
               <label className="flex items-center gap-2 text-sm text-slate-700 font-medium">
                 <input
                   type="checkbox"
@@ -3301,6 +3851,22 @@ export default function FamilyScheduler() {
                 />
                 הפעל התראה למשימה זו
               </label>
+              <div>
+                <div className="text-xs text-slate-500 mb-1">מועד התראה למשימה זו</div>
+                <select
+                  value={sanitizeReminderLead(editingEvent.data.reminderLeadMinutes)}
+                  onChange={(e) => setEditingEvent((prev) => prev ? ({
+                    ...prev,
+                    data: { ...prev.data, reminderLeadMinutes: sanitizeReminderLead(e.target.value) },
+                  }) : prev)}
+                  disabled={Boolean(editingEvent.data.completed) || !editingEvent.data.sendNotification}
+                  className="w-full rounded-xl border border-slate-300 px-3 py-1.5 text-sm text-slate-700 outline-none focus:border-blue-400 disabled:opacity-60 disabled:cursor-not-allowed"
+                >
+                  {reminderLeadOptions.map((minutes) => (
+                    <option key={`edit-event-lead-${minutes}`} value={minutes}>{minutes} דקות לפני</option>
+                  ))}
+                </select>
+              </div>
               <label className="flex items-center gap-2 text-sm text-slate-700 font-medium">
                 <input
                   type="checkbox"

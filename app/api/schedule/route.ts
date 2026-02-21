@@ -42,6 +42,20 @@ const childLabelMap: Record<string, string> = {
   alin: "אלין",
 };
 
+const childTargetLabelMap: Record<string, string> = {
+  ravid: "רביד",
+  amit: "עמית",
+  alin: "אלין",
+  amit_alin: "עמית ואלין",
+  alin_ravid: "אלין ורביד",
+  amit_ravid: "עמית ורביד",
+};
+
+const getChildTargetLabel = (rawChild: unknown) => {
+  const key = typeof rawChild === "string" ? rawChild.trim().toLowerCase() : "";
+  return childTargetLabelMap[key] || "הילדים";
+};
+
 type ChildKey = (typeof allowedChildren)[number];
 type EventType = (typeof allowedTypes)[number];
 
@@ -93,6 +107,12 @@ const parseBooleanValue = (value: unknown) => {
   return false;
 };
 
+const reminderLeadOptions = [5, 10, 15, 30] as const;
+const parseReminderLeadMinutes = (value: unknown) => {
+  const numeric = Number(value);
+  return reminderLeadOptions.includes(numeric as (typeof reminderLeadOptions)[number]) ? numeric : null;
+};
+
 const ensurePostgresEnv = () => {
   const config = ensureDatabaseConnectionString();
   if (!config?.url) {
@@ -122,6 +142,7 @@ const requiredInsertColumns = [
   "send_notification",
   "require_confirmation",
   "needs_ack",
+  "reminder_lead_minutes",
   "user_id",
   "updated_at",
 ] as const;
@@ -224,6 +245,7 @@ const ensureFamilyScheduleTable = async () => {
     await sql`ALTER TABLE family_schedule ADD COLUMN IF NOT EXISTS send_notification BOOLEAN NOT NULL DEFAULT TRUE`;
     await sql`ALTER TABLE family_schedule ADD COLUMN IF NOT EXISTS require_confirmation BOOLEAN NOT NULL DEFAULT FALSE`;
     await sql`ALTER TABLE family_schedule ADD COLUMN IF NOT EXISTS needs_ack BOOLEAN NOT NULL DEFAULT FALSE`;
+    await sql`ALTER TABLE family_schedule ADD COLUMN IF NOT EXISTS reminder_lead_minutes INT`;
     await sql`ALTER TABLE family_schedule ADD COLUMN IF NOT EXISTS user_id TEXT`;
     await sql`ALTER TABLE family_schedule ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()`;
     await sql`UPDATE family_schedule SET completed = FALSE WHERE completed IS NULL`;
@@ -406,6 +428,9 @@ const sanitizeDbEvent = (event: unknown) => {
     candidate.requireConfirmation ?? candidate.require_confirmation ?? candidate.needsAck ?? candidate.needs_ack ?? false
   );
   const needsAck = parseBooleanValue(candidate.needsAck ?? candidate.needs_ack ?? requireConfirmation);
+  const reminderLeadMinutes = parseReminderLeadMinutes(
+    candidate.reminderLeadMinutes ?? candidate.reminder_lead_minutes
+  );
   const userId = typeof candidate.userId === "string" && candidate.userId.trim()
     ? candidate.userId.trim()
     : (typeof candidate.user_id === "string" && candidate.user_id.trim() ? candidate.user_id.trim() : "system");
@@ -437,6 +462,7 @@ const sanitizeDbEvent = (event: unknown) => {
     sendNotification,
     requireConfirmation,
     needsAck,
+    reminderLeadMinutes,
     userId,
   };
 };
@@ -618,6 +644,7 @@ const upsertScheduleEvent = async (incoming: ReturnType<typeof sanitizeDbEvent>)
       send_notification: incoming.sendNotification ?? true,
       require_confirmation: incoming.requireConfirmation ?? false,
       needs_ack: incoming.needsAck ?? incoming.requireConfirmation ?? false,
+      reminder_lead_minutes: incoming.reminderLeadMinutes,
       user_id: incoming.userId ?? "system",
     };
     debugScheduleLog("Data to save:", newEvent);
@@ -646,6 +673,7 @@ const upsertScheduleEvent = async (incoming: ReturnType<typeof sanitizeDbEvent>)
           send_notification,
           require_confirmation,
           needs_ack,
+          reminder_lead_minutes,
           user_id,
           updated_at
         )
@@ -669,6 +697,7 @@ const upsertScheduleEvent = async (incoming: ReturnType<typeof sanitizeDbEvent>)
           ${newEvent.send_notification},
           ${newEvent.require_confirmation},
           ${newEvent.needs_ack},
+          ${newEvent.reminder_lead_minutes},
           ${newEvent.user_id},
           NOW()
         )
@@ -692,6 +721,7 @@ const upsertScheduleEvent = async (incoming: ReturnType<typeof sanitizeDbEvent>)
           send_notification = EXCLUDED.send_notification,
           require_confirmation = EXCLUDED.require_confirmation,
           needs_ack = EXCLUDED.needs_ack,
+          reminder_lead_minutes = EXCLUDED.reminder_lead_minutes,
           user_id = EXCLUDED.user_id,
           updated_at = NOW()
         RETURNING *
@@ -747,6 +777,7 @@ const upsertScheduleEvent = async (incoming: ReturnType<typeof sanitizeDbEvent>)
         completed: parseBooleanValue(saved.completed),
         sendNotification: parseBooleanValue(saved.send_notification),
         requireConfirmation: parseBooleanValue(saved.needs_ack ?? saved.require_confirmation),
+        reminderLeadMinutes: parseReminderLeadMinutes(saved.reminder_lead_minutes),
       },
     };
   } catch (error) {
@@ -804,7 +835,8 @@ export async function GET() {
         COALESCE(completed, FALSE) AS completed,
         COALESCE(send_notification, TRUE) AS send_notification,
         COALESCE(require_confirmation, FALSE) AS require_confirmation,
-        COALESCE(needs_ack, require_confirmation, FALSE) AS needs_ack
+        COALESCE(needs_ack, require_confirmation, FALSE) AS needs_ack,
+        reminder_lead_minutes
       FROM family_schedule
       ORDER BY COALESCE(event_time, time) ASC
     `;
@@ -836,6 +868,7 @@ export async function GET() {
         completed: parseBooleanValue(row.completed),
         sendNotification: parseBooleanValue(row.send_notification),
         requireConfirmation: parseBooleanValue(row.needs_ack ?? row.require_confirmation),
+        reminderLeadMinutes: parseReminderLeadMinutes(row.reminder_lead_minutes),
       };
     });
 
@@ -1148,7 +1181,7 @@ export async function POST(request: NextRequest) {
       await sendPushToAll(
         {
           title: "משימה חדשה נוספה",
-          body: `${flatIncoming.title} - ${flatIncoming.time}`,
+          body: `נוספה משימה ל${getChildTargetLabel(flatIncoming.child)}: ${flatIncoming.title} - ${flatIncoming.time}`,
           url: "/",
         },
         { excludeEndpoint: senderSubscriptionEndpoint }
@@ -1177,7 +1210,7 @@ export async function POST(request: NextRequest) {
       await sendPushToAll(
         {
           title: "משימה חדשה נוספה",
-          body: `${incoming.title} - ${incoming.time}`,
+          body: `נוספה משימה ל${getChildTargetLabel(incoming.child)}: ${incoming.title} - ${incoming.time}`,
           url: "/",
         },
         { excludeEndpoint: senderSubscriptionEndpoint }
@@ -1268,10 +1301,12 @@ export async function POST(request: NextRequest) {
         return NextResponse.json({ error: "No valid bulk events were found" }, { status: 400 });
       }
 
+      const bulkChildren = [...new Set(savedEvents.map((event) => getChildTargetLabel(event.child)))];
+      const bulkChildrenText = bulkChildren.length > 0 ? bulkChildren.join(", ") : "הילדים";
       await sendPushToAll(
         {
           title: "משימות חדשות נוספו",
-          body: `נוספו ${savedEvents.length} אימונים לעמית לשבוע הקרוב`,
+          body: `נוספו ${savedEvents.length} משימות עבור: ${bulkChildrenText}`,
           url: "/",
         },
         { excludeEndpoint: senderSubscriptionEndpoint }

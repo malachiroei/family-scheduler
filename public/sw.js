@@ -1,4 +1,4 @@
-const CACHE_NAME = 'family-scheduler-v13';
+const CACHE_NAME = 'family-scheduler-v19';
 const API_BASE_URL = 'https://family-scheduler-topaz.vercel.app';
 const apiUrl = (path) => `${API_BASE_URL}${path}`;
 const APP_SHELL_FILES = ['/manifest.json?v=5', '/icon-512.png'];
@@ -158,52 +158,77 @@ self.addEventListener('push', (event) => {
 self.addEventListener('notificationclick', (event) => {
   event.notification.close();
   const targetUrl = event.notification?.data?.url || '/';
+  const confirmTask = event.notification?.data?.confirmTask || null;
+  const eventId = typeof confirmTask?.eventId === 'string' ? confirmTask.eventId.trim() : '';
+  const childName = typeof confirmTask?.childName === 'string'
+    ? confirmTask.childName.trim()
+    : (typeof confirmTask?.confirmedBy === 'string' ? confirmTask.confirmedBy.trim() : '');
 
-  if (event.action === 'confirm') {
-    const confirmTask = event.notification?.data?.confirmTask || null;
-    const eventId = typeof confirmTask?.eventId === 'string' ? confirmTask.eventId.trim() : '';
-    const childName = typeof confirmTask?.childName === 'string'
-      ? confirmTask.childName.trim()
-      : (typeof confirmTask?.confirmedBy === 'string' ? confirmTask.confirmedBy.trim() : '');
-
+  const acknowledgeIfNeeded = async () => {
     if (!eventId) {
       return;
     }
 
-    event.waitUntil((async () => {
-      await fetch(apiUrl('/api/notifications/ack'), {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          eventId,
-          childName,
-          eventTitle: typeof confirmTask?.eventTitle === 'string' ? confirmTask.eventTitle : '',
-        }),
-      }).catch(() => undefined);
+    await fetch(apiUrl('/api/notifications/ack'), {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        eventId,
+        childName,
+        eventTitle: typeof confirmTask?.eventTitle === 'string' ? confirmTask.eventTitle : '',
+      }),
+    }).catch(() => undefined);
 
-      const openClients = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
-      openClients.forEach((client) => {
-        client.postMessage({
-          type: 'TASK_CONFIRMED',
-          payload: { eventId },
-        });
+    const openClients = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
+    openClients.forEach((client) => {
+      client.postMessage({
+        type: 'TASK_CONFIRMED',
+        payload: { eventId },
       });
+    });
+  };
+
+  if (event.action === 'confirm') {
+    event.waitUntil((async () => {
+      await acknowledgeIfNeeded();
     })());
     return;
   }
 
-  event.waitUntil(
-    self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then((clientsArr) => {
-      for (const client of clientsArr) {
-        if ('focus' in client) {
-          client.navigate(targetUrl);
-          return client.focus();
-        }
-      }
+  let targetWithConfirm = targetUrl;
+  if (eventId) {
+    const separator = targetUrl.includes('?') ? '&' : '?';
+    const childParam = childName ? `&confirmChildName=${encodeURIComponent(childName)}` : '';
+    const titleParam = typeof confirmTask?.eventTitle === 'string' && confirmTask.eventTitle.trim()
+      ? `&confirmEventTitle=${encodeURIComponent(confirmTask.eventTitle.trim())}`
+      : '';
+    targetWithConfirm = `${targetUrl}${separator}confirmEventId=${encodeURIComponent(eventId)}${childParam}${titleParam}`;
+  }
 
-      return self.clients.openWindow(targetUrl);
-    })
-  );
+  event.waitUntil((async () => {
+    const clientsArr = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
+    if (eventId) {
+      clientsArr.forEach((client) => {
+        client.postMessage({
+          type: 'CONFIRM_REQUIRED',
+          payload: {
+            eventId,
+            childName,
+            eventTitle: typeof confirmTask?.eventTitle === 'string' ? confirmTask.eventTitle : '',
+          },
+        });
+      });
+    }
+
+    for (const client of clientsArr) {
+      if ('focus' in client) {
+        client.navigate(targetWithConfirm);
+        return client.focus();
+      }
+    }
+
+    return self.clients.openWindow(targetWithConfirm);
+  })());
 });

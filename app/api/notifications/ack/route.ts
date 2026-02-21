@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { sql } from "@vercel/postgres";
-import { sendPushToParents } from "@/app/lib/push";
+import { sendPushToAll, sendPushToParents } from "@/app/lib/push";
 
 const childLabelMap: Record<string, string> = {
   ravid: "רביד",
@@ -44,25 +44,43 @@ export async function POST(request: NextRequest) {
       SET completed = TRUE,
           updated_at = NOW()
       WHERE id = ${eventId}
+        AND COALESCE(completed, FALSE) = FALSE
       RETURNING id, child
     `;
 
     const row = updated.rows[0];
     if (!row) {
-      return NextResponse.json({ error: "Task not found" }, { status: 404 });
+      const existing = await sql`
+        SELECT id, child, COALESCE(completed, FALSE) AS completed
+        FROM family_schedule
+        WHERE id = ${eventId}
+        LIMIT 1
+      `;
+
+      const existingRow = existing.rows[0];
+      if (!existingRow) {
+        return NextResponse.json({ error: "Task not found" }, { status: 404 });
+      }
+
+      const childFromDb = String(existingRow.child || "").trim();
+      const childName = childNameRaw || childLabelMap[childFromDb.toLowerCase()] || childLabelMap[childFromDb] || "הילד";
+      return NextResponse.json({ ok: true, eventId, childName, completed: true, alreadyConfirmed: true });
     }
 
     const childFromDb = String(row.child || "").trim();
     const childName = childNameRaw || childLabelMap[childFromDb.toLowerCase()] || childLabelMap[childFromDb] || "הילד";
 
-    await sendPushToParents(
-      {
-        title: "אישור משימה",
-        body: `${childName} אישר את המשימה`,
-        url: "/",
-      },
-      ["רועי"]
-    );
+    const parentPayload = {
+      title: "אישור משימה",
+      body: `${childName} אישר את המשימה`,
+      url: "/",
+    };
+
+    const parentSendResult = await sendPushToParents(parentPayload, ["רועי", "סיוון"]);
+
+    if ((parentSendResult.sent || 0) === 0) {
+      await sendPushToAll(parentPayload);
+    }
 
     return NextResponse.json({ ok: true, eventId, childName, completed: true });
   } catch (error) {
