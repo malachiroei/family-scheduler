@@ -1,7 +1,7 @@
 "use client";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import Image from 'next/image';
-import { Dog, Dumbbell, Music, GraduationCap, Trophy, Printer, Image as ImageIcon, MessageCircle, ChevronRight, ChevronLeft, X, Plus, CalendarDays, Settings, RefreshCw } from 'lucide-react';
+import { Dog, Dumbbell, Music, GraduationCap, Trophy, Printer, Image as ImageIcon, MessageCircle, ChevronRight, ChevronLeft, X, Plus, CalendarDays, Settings, RefreshCw, Video } from 'lucide-react';
 import html2canvas from 'html2canvas';
 
 const baseChildrenConfig = {
@@ -159,6 +159,13 @@ type PushUserName = 'רביד' | 'עמית' | 'אלין' | 'סיוון' | 'רו�
 type PushChildName = 'רביד' | 'עמית' | 'אלין';
 type ReminderLeadMinutes = 5 | 10 | 15 | 30;
 type PushSoundPreset = '/sounds/standard.mp3' | '/sounds/bell.mp3' | '/sounds/modern.mp3';
+type PresenceUser = {
+  userName: PushUserName;
+  registered: boolean;
+  hasSubscription: boolean;
+  isOnline: boolean;
+  lastSeen: string | null;
+};
 
 const pushUserOptions: PushUserName[] = ['רביד', 'עמית', 'אלין', 'סיוון', 'רועי'];
 const pushChildOptions: PushChildName[] = ['רביד', 'עמית', 'אלין'];
@@ -813,6 +820,40 @@ const getChildKeys = (key: ChildKey): BaseChildKey[] => {
   return [key];
 };
 
+const SUNDAY_AMIT_ALIN_ZOOM_URL = 'https://edu-il.zoom.us/j/85124349240#success';
+const eventUrlPattern = /(https?:\/\/[^\s]+)/gi;
+
+const hasAmitAlinPair = (child: ChildKey) => {
+  const keys = getChildKeys(child);
+  return keys.length === 2 && keys.includes('amit') && keys.includes('alin');
+};
+
+const shouldInjectZoomLink = (dayIndex: number, time: string, child: ChildKey) => {
+  return dayIndex === 0 && normalizeTimeForPicker(time) === '10:00' && hasAmitAlinPair(child);
+};
+
+const normalizeEventTitleWithZoomLink = (title: string, dayIndex: number, time: string, child: ChildKey) => {
+  const trimmedTitle = title.trim();
+  if (!shouldInjectZoomLink(dayIndex, time, child)) {
+    return trimmedTitle;
+  }
+
+  if (trimmedTitle.includes(SUNDAY_AMIT_ALIN_ZOOM_URL)) {
+    return trimmedTitle;
+  }
+
+  return `${trimmedTitle}\n${SUNDAY_AMIT_ALIN_ZOOM_URL}`;
+};
+
+const extractFirstUrl = (text: string) => {
+  const match = text.match(eventUrlPattern);
+  return match?.[0]?.trim() || '';
+};
+
+const stripUrlsFromText = (text: string) => {
+  return text.replace(eventUrlPattern, '').replace(/\s{2,}/g, ' ').trim();
+};
+
 const getSaturdayJohnnyAssignment = (weekStart: Date): { morning: BaseChildKey; afternoon: BaseChildKey } => {
   const reference = new Date('2026-02-15T00:00:00');
   const weekMs = 7 * 24 * 60 * 60 * 1000;
@@ -919,6 +960,7 @@ const createWeekDays = (weekStart: Date, includeDemo: boolean, recurringTemplate
     const fallbackDate = new Date(`${days[dayIndex].isoDate}T00:00:00`);
     days[dayIndex].events.push({
       ...event,
+      title: normalizeEventTitleWithZoomLink(event.title, dayIndex, event.time, event.child),
       date: normalizeEventDateKey(event.date, fallbackDate),
       isRecurring: event.isRecurring ?? Boolean(event.recurringTemplateId),
       completed: Boolean(event.completed),
@@ -1013,6 +1055,8 @@ export default function FamilyScheduler() {
   const [pushBusy, setPushBusy] = useState(false);
   const [pushTestBusy, setPushTestBusy] = useState(false);
   const [exportImageBusy, setExportImageBusy] = useState(false);
+  const [presenceBusy, setPresenceBusy] = useState(false);
+  const [presenceUsers, setPresenceUsers] = useState<PresenceUser[]>([]);
   const [pushRavidTestBusy, setPushRavidTestBusy] = useState(false);
   const [confirmingEventId, setConfirmingEventId] = useState('');
   const [confirmingReminderSeen, setConfirmingReminderSeen] = useState(false);
@@ -1024,6 +1068,7 @@ export default function FamilyScheduler() {
   const [showPushIdentityPrompt, setShowPushIdentityPrompt] = useState(false);
   const [pushUserName, setPushUserName] = useState<PushUserName | ''>('');
   const [hasConfirmedPushIdentitySelection, setHasConfirmedPushIdentitySelection] = useState(false);
+  const [hasLoadedPushUser, setHasLoadedPushUser] = useState(false);
   const [parentReceiveAll, setParentReceiveAll] = useState(true);
   const [parentWatchChildren, setParentWatchChildren] = useState<PushChildName[]>(['רביד', 'עמית', 'אלין']);
   const [reminderLeadMinutes, setReminderLeadMinutes] = useState<ReminderLeadMinutes>(defaultPushLeadMinutes);
@@ -1040,6 +1085,8 @@ export default function FamilyScheduler() {
   const autoRefetchWeekKeyRef = useRef<string>('');
   const dayCardRefs = useRef<Array<HTMLDivElement | null>>([]);
   const hasAutoScrolledToTodayRef = useRef(false);
+  const autoSyncPushProfileInFlightRef = useRef(false);
+  const canViewPresencePanel = isParentPushUser(pushUserName);
 
   const weekKey = toIsoDate(weekStart);
   const days = weeksData[weekKey] ?? [];
@@ -1087,6 +1134,90 @@ export default function FamilyScheduler() {
       setApiError('');
     }
   };
+
+  const formatPresenceLastSeen = (value: string | null, isOnline: boolean) => {
+    if (isOnline) {
+      return 'פעיל עכשיו';
+    }
+
+    if (!value) {
+      return 'לא נראה לאחרונה';
+    }
+
+    const diffMs = Date.now() - new Date(value).getTime();
+    if (!Number.isFinite(diffMs) || diffMs < 0) {
+      return 'נראה לאחרונה לא ידוע';
+    }
+
+    const minutes = Math.floor(diffMs / 60000);
+    if (minutes < 1) {
+      return 'נראה לאחרונה עכשיו';
+    }
+
+    if (minutes < 60) {
+      return `נראה לאחרונה לפני ${minutes} דק׳`;
+    }
+
+    const hours = Math.floor(minutes / 60);
+    if (hours < 24) {
+      return `נראה לאחרונה לפני ${hours} שעות`;
+    }
+
+    const daysAgo = Math.floor(hours / 24);
+    return `נראה לאחרונה לפני ${daysAgo} ימים`;
+  };
+
+  const refreshPresenceUsers = useCallback(async () => {
+    if (!showSettingsModal || !canViewPresencePanel) {
+      setPresenceUsers([]);
+      return;
+    }
+
+    setPresenceBusy(true);
+    try {
+      const response = await fetch(toApiUrl('/api/presence'), { cache: 'no-store' });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(payload?.error || 'טעינת סטטוס משתמשים נכשלה');
+      }
+
+      const normalized = (Array.isArray(payload?.users) ? payload.users : [])
+        .map((row: unknown) => {
+          const candidate = row && typeof row === 'object' ? row as Record<string, unknown> : {};
+          const userName = typeof candidate.userName === 'string' ? candidate.userName as PushUserName : null;
+          if (!userName || !pushUserOptions.includes(userName)) {
+            return null;
+          }
+
+          return {
+            userName,
+            registered: Boolean(candidate.registered),
+            hasSubscription: Boolean(candidate.hasSubscription),
+            isOnline: Boolean(candidate.isOnline),
+            lastSeen: typeof candidate.lastSeen === 'string' ? candidate.lastSeen : null,
+          } as PresenceUser;
+        })
+        .filter((row: PresenceUser | null): row is PresenceUser => Boolean(row));
+
+      setPresenceUsers(normalized);
+    } catch {
+      setPresenceUsers([]);
+    } finally {
+      setPresenceBusy(false);
+    }
+  }, [showSettingsModal, canViewPresencePanel]);
+
+  const sendPresenceHeartbeat = useCallback(async () => {
+    if (!pushUserName) {
+      return;
+    }
+
+    await fetch(toApiUrl('/api/presence'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ userName: pushUserName }),
+    }).catch(() => undefined);
+  }, [pushUserName]);
 
   const playPushSound = (soundUrl: string) => {
     if (typeof window === 'undefined') {
@@ -1160,6 +1291,48 @@ export default function FamilyScheduler() {
       };
     });
   }, [weekKey, weekStart, recurringTemplates]);
+
+  useEffect(() => {
+    if (!showSettingsModal) {
+      return;
+    }
+
+    void refreshPresenceUsers();
+    const timer = setInterval(() => {
+      void refreshPresenceUsers();
+    }, 30_000);
+
+    return () => {
+      clearInterval(timer);
+    };
+  }, [showSettingsModal, refreshPresenceUsers]);
+
+  useEffect(() => {
+    if (!pushUserName) {
+      return;
+    }
+
+    const ping = () => {
+      if (typeof document !== 'undefined' && document.visibilityState !== 'visible') {
+        return;
+      }
+      void sendPresenceHeartbeat();
+    };
+
+    ping();
+    const timer = setInterval(ping, 45_000);
+    const onFocus = () => ping();
+    const onVisible = () => ping();
+
+    window.addEventListener('focus', onFocus);
+    document.addEventListener('visibilitychange', onVisible);
+
+    return () => {
+      clearInterval(timer);
+      window.removeEventListener('focus', onFocus);
+      document.removeEventListener('visibilitychange', onVisible);
+    };
+  }, [pushUserName, sendPresenceHeartbeat]);
 
   useEffect(() => {
     let cancelled = false;
@@ -1524,12 +1697,15 @@ export default function FamilyScheduler() {
     try {
       const savedUser = localStorage.getItem(PUSH_USER_STORAGE_KEY);
       if (!savedUser) {
+        setHasLoadedPushUser(true);
         return;
       }
 
       if (pushUserOptions.includes(savedUser as PushUserName)) {
         const user = savedUser as PushUserName;
         setPushUserName(user);
+        setHasConfirmedPushIdentitySelection(true);
+        setShowPushIdentityPrompt(false);
         if (isParentUserOption(user)) {
           setParentReceiveAll(true);
           setParentWatchChildren(['רביד', 'עמית', 'אלין']);
@@ -1537,8 +1713,24 @@ export default function FamilyScheduler() {
       }
     } catch {
       // no-op
+    } finally {
+      setHasLoadedPushUser(true);
     }
   }, []);
+
+  useEffect(() => {
+    if (!hasLoadedPushUser) {
+      return;
+    }
+
+    if (pushUserName) {
+      setShowPushIdentityPrompt(false);
+      return;
+    }
+
+    setHasConfirmedPushIdentitySelection(false);
+    setShowPushIdentityPrompt(true);
+  }, [pushUserName, hasLoadedPushUser]);
 
   const openPushIdentityPrompt = () => {
     if (pushBusy) {
@@ -1736,13 +1928,106 @@ export default function FamilyScheduler() {
     }
   };
 
+  const ensurePushSubscriptionReady = async () => {
+    if (!pushSupported) {
+      setApiError('התראות אינן נתמכות כרגע בדפדפן במכשיר זה.');
+      return false;
+    }
+
+    if (!pushUserName) {
+      openPushIdentityPrompt();
+      return false;
+    }
+
+    const registration = await ensureServiceWorkerRegistration();
+    if (!registration) {
+      setApiError('Service Worker לא זמין בדפדפן זה.');
+      return false;
+    }
+
+    let subscription = await registration.pushManager.getSubscription();
+    if (!subscription) {
+      const hasPermission = await ensureNotificationPermission();
+      if (!hasPermission) {
+        return false;
+      }
+
+      const configResponse = await fetch(toApiUrl('/api/notifications/subscribe'), { cache: 'no-store' });
+      const configPayload = await configResponse.json();
+      if (!configResponse.ok || !configPayload?.enabled || !configPayload?.publicKey) {
+        setApiError('התראות אינן זמינות כרגע בשרת.');
+        return false;
+      }
+
+      subscription = await registration.pushManager.subscribe({
+        userVisibleOnly: true,
+        applicationServerKey: urlBase64ToUint8Array(String(configPayload.publicKey)),
+      });
+    }
+
+    const serialized = subscription.toJSON();
+    await savePushSubscriptionProfile(serialized);
+    setPushEnabled(true);
+    setSubscriptionEndpoint(serialized.endpoint || '');
+    return true;
+  };
+
+  useEffect(() => {
+    if (!pushEnabled || !pushSupported || !pushUserName || showPushIdentityPrompt) {
+      return;
+    }
+
+    if (autoSyncPushProfileInFlightRef.current) {
+      return;
+    }
+
+    autoSyncPushProfileInFlightRef.current = true;
+    const syncProfile = async () => {
+      try {
+        const registration = await ensureServiceWorkerRegistration();
+        if (!registration) {
+          return;
+        }
+
+        const existing = await registration.pushManager.getSubscription();
+        if (!existing) {
+          return;
+        }
+
+        const serialized = existing.toJSON();
+        await savePushSubscriptionProfile(serialized);
+        setSubscriptionEndpoint(serialized.endpoint || '');
+      } catch {
+        // no-op
+      } finally {
+        autoSyncPushProfileInFlightRef.current = false;
+      }
+    };
+
+    void syncProfile();
+  }, [
+    pushEnabled,
+    pushSupported,
+    pushUserName,
+    showPushIdentityPrompt,
+    parentReceiveAll,
+    parentWatchChildren,
+    reminderLeadMinutes,
+    ensureServiceWorkerRegistration,
+  ]);
+
   const sendTestPushNotification = async () => {
-    if (!pushEnabled || pushTestBusy) {
+    if (pushTestBusy) {
       return;
     }
 
     setPushTestBusy(true);
     try {
+      const ready = await ensurePushSubscriptionReady();
+      if (!ready) {
+        return;
+      }
+
       const response = await fetch(toApiUrl('/api/push/test'), {
         method: 'POST',
       });
@@ -1781,6 +2066,11 @@ export default function FamilyScheduler() {
 
     setPushRavidTestBusy(true);
     try {
+      const ready = await ensurePushSubscriptionReady();
+      if (!ready) {
+        return;
+      }
+
       const response = await fetch(toApiUrl(`/api/push/test-ravid?childName=${encodeURIComponent(selectedChildForDirectTest)}`), {
         method: 'POST',
       });
@@ -1967,7 +2257,7 @@ export default function FamilyScheduler() {
           dayIndex: event.dayIndex,
           time: normalizeTimeForPicker(event.time),
           child: event.child,
-          title: event.title,
+          title: normalizeEventTitleWithZoomLink(event.title, event.dayIndex, event.time, event.child),
           type: event.type,
           isRecurring: true,
           sendNotification: event.sendNotification ?? true,
@@ -1998,7 +2288,7 @@ export default function FamilyScheduler() {
           date: toEventDateKey(eventDate),
           time: normalizeTimeForPicker(event.time),
           child: event.child,
-          title: event.title,
+          title: normalizeEventTitleWithZoomLink(event.title, dayIndex, event.time, event.child),
           type: event.type,
           isRecurring: false,
           recurringTemplateId: undefined,
@@ -3011,11 +3301,6 @@ export default function FamilyScheduler() {
 
   return (
     <div className="print-scheduler-shell h-screen overflow-y-auto bg-[#f8fafc] px-3 pt-12 pb-20 md:px-4 md:pt-14 md:pb-24 dir-rtl" dir="rtl">
-      <div className="max-w-6xl mx-auto mb-2 print:hidden">
-        <div className="rounded-xl border border-indigo-200 bg-indigo-50 px-3 py-2 text-center text-sm font-semibold text-indigo-900">
-          גרסה חדשה פעילה: V19
-        </div>
-      </div>
       <button
         type="button"
         onClick={() => setShowSettingsModal(true)}
@@ -3091,7 +3376,7 @@ export default function FamilyScheduler() {
       </div>
 
       <div className="max-w-6xl mx-auto mb-4 print:hidden">
-        <h2 className="text-base font-bold text-slate-700">Weekly View</h2>
+        <h2 className="text-base font-bold text-slate-700">לו״ז שבועי</h2>
       </div>
 
       <div id="schedule-table" className="printable-schedule max-w-6xl mx-auto grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
@@ -3141,12 +3426,14 @@ export default function FamilyScheduler() {
               )}
               {visibleEvents.map((event) => {
                 const mainIconColor = baseChildrenConfig[getChildKeys(event.child)[0]].iconColor;
+                const eventLink = extractFirstUrl(event.title);
+                const eventDisplayTitle = stripUrlsFromText(event.title) || event.title.trim();
                 return (
                   <div
                     key={event.id}
                     onClick={(clickEvent) => {
                       const target = clickEvent.target as HTMLElement;
-                      if (target.closest('[data-confirm-button="1"]')) {
+                      if (target.closest('[data-confirm-button="1"]') || target.closest('[data-link-button="1"]')) {
                         return;
                       }
 
@@ -3162,35 +3449,52 @@ export default function FamilyScheduler() {
                     className="w-full text-right flex items-center justify-between p-3 rounded-2xl bg-slate-50 border border-transparent hover:border-slate-200 transition print:pointer-events-none print-event-item"
                   >
                     <span className="text-slate-500 font-medium text-sm w-14">{event.time}</span>
-                    <div className="flex-1 flex items-center gap-3">
+                    <div className="flex-1 min-w-0 flex items-start gap-3">
                       {renderChildBadges(event.child)}
-                      <div className="flex items-center gap-2 flex-wrap">
-                        {event.completed && (
-                          <span className={`${statusPillClassName} text-emerald-700 bg-emerald-50 border-emerald-200`}>בוצע</span>
-                        )}
-                        <span className="text-slate-700 font-semibold text-sm">{event.title}</span>
-                        {event.sendNotification !== false && (
-                          <span className={`${statusPillClassName} text-indigo-700 bg-indigo-50 border-indigo-200`}>התראה</span>
-                        )}
-                        {event.requireConfirmation && (
-                          <span className={`${statusPillClassName} text-amber-700 bg-amber-50 border-amber-200`}>אישור ילד</span>
-                        )}
-                        {(event.isRecurring || event.recurringTemplateId) && (
-                          <span className={`${statusPillClassName} text-blue-700 bg-blue-50 border-blue-200`}>קבוע</span>
-                        )}
-                        {event.requireConfirmation && !event.completed && (
-                          <button
-                            type="button"
-                            data-confirm-button="1"
-                            onClick={(buttonEvent) => {
-                              buttonEvent.stopPropagation();
-                              void confirmEventFromBoard(event);
+                      <div className="min-w-0 flex-1 space-y-2">
+                        <div className="flex items-center gap-2 flex-wrap min-w-0">
+                          {event.completed && (
+                            <span className={`${statusPillClassName} text-emerald-700 bg-emerald-50 border-emerald-200`}>בוצע</span>
+                          )}
+                          <span className="text-slate-700 font-semibold text-sm break-words whitespace-pre-wrap max-w-full">{eventDisplayTitle}</span>
+                          {event.sendNotification !== false && (
+                            <span className={`${statusPillClassName} text-indigo-700 bg-indigo-50 border-indigo-200`}>התראה</span>
+                          )}
+                          {event.requireConfirmation && (
+                            <span className={`${statusPillClassName} text-amber-700 bg-amber-50 border-amber-200`}>אישור ילד</span>
+                          )}
+                          {(event.isRecurring || event.recurringTemplateId) && (
+                            <span className={`${statusPillClassName} text-blue-700 bg-blue-50 border-blue-200`}>קבוע</span>
+                          )}
+                          {event.requireConfirmation && !event.completed && (
+                            <button
+                              type="button"
+                              data-confirm-button="1"
+                              onClick={(buttonEvent) => {
+                                buttonEvent.stopPropagation();
+                                void confirmEventFromBoard(event);
+                              }}
+                              disabled={confirmingEventId === event.id}
+                              className="rounded-lg bg-indigo-600 text-white px-2.5 py-1 text-xs font-semibold hover:bg-indigo-700 transition disabled:opacity-60 disabled:cursor-not-allowed"
+                            >
+                              {confirmingEventId === event.id ? 'שולח אישור...' : 'אישרתי שראיתי'}
+                            </button>
+                          )}
+                        </div>
+                        {eventLink && (
+                          <a
+                            href={eventLink}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            data-link-button="1"
+                            onClick={(linkEvent) => {
+                              linkEvent.stopPropagation();
                             }}
-                            disabled={confirmingEventId === event.id}
-                            className="rounded-lg bg-indigo-600 text-white px-2.5 py-1 text-xs font-semibold hover:bg-indigo-700 transition disabled:opacity-60 disabled:cursor-not-allowed"
+                            className="inline-flex items-center gap-1.5 rounded-lg bg-blue-600 text-white px-3 py-1.5 text-xs font-semibold hover:bg-blue-700 transition max-w-full"
                           >
-                            {confirmingEventId === event.id ? 'שולח אישור...' : 'אישרתי שראיתי'}
-                          </button>
+                            <Video size={14} />
+                            פתח Zoom
+                          </a>
                         )}
                       </div>
                     </div>
@@ -3254,7 +3558,7 @@ export default function FamilyScheduler() {
               <button
                 type="button"
                 onClick={() => { void sendTestPushNotification(); }}
-                disabled={!pushEnabled || pushBusy || pushTestBusy}
+                disabled={pushBusy || pushTestBusy}
                 className="w-full flex items-center justify-center gap-2 bg-indigo-50 text-indigo-700 border border-indigo-200 px-4 py-1.5 rounded-lg hover:bg-indigo-100 transition disabled:opacity-60 disabled:cursor-not-allowed"
               >
                 {pushTestBusy ? 'שולח התראה...' : 'שלח התראת ניסיון'}
@@ -3297,6 +3601,44 @@ export default function FamilyScheduler() {
                 </div>
               )}
             </div>
+
+            {canViewPresencePanel && (
+              <div className="space-y-2 border border-slate-200 rounded-xl p-2.5 bg-slate-50">
+              <div className="flex items-center justify-between gap-2">
+                <div className="text-xs font-bold text-slate-700">מי רשום ומי פעיל</div>
+                <button
+                  type="button"
+                  onClick={() => { void refreshPresenceUsers(); }}
+                  disabled={presenceBusy}
+                  className="text-[11px] rounded-lg border border-slate-300 bg-white px-2 py-1 text-slate-600 hover:bg-slate-50 disabled:opacity-60 disabled:cursor-not-allowed"
+                >
+                  {presenceBusy ? 'טוען...' : 'רענן סטטוס'}
+                </button>
+              </div>
+
+              {presenceUsers.filter((user) => user.registered).length === 0 ? (
+                <div className="text-xs text-slate-500">אין משתמשים רשומים כרגע.</div>
+              ) : (
+                <div className="space-y-1.5">
+                  {presenceUsers
+                    .filter((user) => user.registered)
+                    .map((user) => (
+                      <div key={`presence-${user.userName}`} className="flex items-center justify-between rounded-lg border border-slate-200 bg-white px-2.5 py-2">
+                        <div className="text-sm font-semibold text-slate-700">{user.userName}</div>
+                        <div className="flex flex-col items-end gap-0.5">
+                          <div className={`text-[11px] font-bold ${user.hasSubscription ? 'text-indigo-600' : 'text-rose-600'}`}>
+                            {user.hasSubscription ? 'פוש פעיל' : 'ללא פוש פעיל'}
+                          </div>
+                          <div className={`text-xs font-bold ${user.isOnline ? 'text-emerald-600' : 'text-slate-500'}`}>
+                            {formatPresenceLastSeen(user.lastSeen, user.isOnline)}
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                </div>
+              )}
+                </div>
+              )}
 
             {notificationsApproved && (
               <div className="space-y-2 border border-slate-200 rounded-xl p-2.5 bg-slate-50">
@@ -3368,20 +3710,22 @@ export default function FamilyScheduler() {
           <div className="w-full max-w-md bg-white rounded-2xl shadow-2xl border border-slate-200 p-5 space-y-4">
             <div className="flex justify-between items-center">
               <h3 className="text-lg font-bold text-slate-800">מי משתמש במכשיר זה?</h3>
-              <button
-                type="button"
-                onClick={() => {
-                  setShowPushIdentityPrompt(false);
-                  setHasConfirmedPushIdentitySelection(false);
-                }}
-                className="text-slate-500 hover:text-slate-700"
-                aria-label="סגור"
-              >
-                <X size={18} />
-              </button>
+              {pushUserName && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowPushIdentityPrompt(false);
+                    setHasConfirmedPushIdentitySelection(false);
+                  }}
+                  className="text-slate-500 hover:text-slate-700"
+                  aria-label="סגור"
+                >
+                  <X size={18} />
+                </button>
+              )}
             </div>
 
-            <p className="text-xs text-slate-500">יש לבחור שם לפני המשך הפעלת התראות.</p>
+            <p className="text-xs text-slate-500">יש לבחור שם משתמש למכשיר כדי שסטטוס הפעילות יעבוד בצורה מדויקת.</p>
 
             <div className="grid grid-cols-2 gap-2">
               {pushUserOptions.map((option) => (

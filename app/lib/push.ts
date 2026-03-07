@@ -48,9 +48,36 @@ type AllowedUserName = ChildUserName | ParentUserName;
 
 const childNameSet = new Set<string>(childUserNames);
 const parentNameSet = new Set<string>(parentUserNames);
+const allowedUserNames = [...childUserNames, ...parentUserNames] as const;
 
 const isChildUserName = (value: string): value is ChildUserName => childNameSet.has(value);
 const isParentUserName = (value: string): value is ParentUserName => parentNameSet.has(value);
+
+const normalizeAllowedUserName = (value: unknown): AllowedUserName | null => {
+  if (typeof value !== "string") {
+    return null;
+  }
+
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return null;
+  }
+
+  if (childNameSet.has(trimmed) || parentNameSet.has(trimmed)) {
+    return trimmed as AllowedUserName;
+  }
+
+  try {
+    const decoded = Buffer.from(trimmed, "latin1").toString("utf8").trim();
+    if (childNameSet.has(decoded) || parentNameSet.has(decoded)) {
+      return decoded as AllowedUserName;
+    }
+  } catch {
+    // no-op
+  }
+
+  return null;
+};
 
 const childKeyToName: Record<string, ChildUserName> = {
   ravid: "רביד",
@@ -154,6 +181,22 @@ export const ensurePushTables = async () => {
   await sql`ALTER TABLE push_subscriptions ADD COLUMN IF NOT EXISTS watch_children TEXT`;
   await sql`ALTER TABLE push_subscriptions ADD COLUMN IF NOT EXISTS reminder_lead_minutes INT NOT NULL DEFAULT 10`;
 
+  for (const userName of allowedUserNames) {
+    try {
+      const mojibake = Buffer.from(userName, "utf8").toString("latin1");
+      if (mojibake !== userName) {
+        await sql`
+          UPDATE push_subscriptions
+          SET user_name = ${userName},
+              updated_at = NOW()
+          WHERE user_name = ${mojibake}
+        `;
+      }
+    } catch {
+      // no-op
+    }
+  }
+
   await sql`
     CREATE TABLE IF NOT EXISTS push_reminder_dispatches (
       dispatch_key TEXT PRIMARY KEY,
@@ -180,10 +223,7 @@ export const savePushSubscription = async (subscription: unknown) => {
   await ensurePushTables();
 
   const meta = (subscription as Record<string, unknown>) ?? {};
-  const userNameRaw = typeof meta.userName === "string" ? meta.userName.trim() : "";
-  const userName = (childNameSet.has(userNameRaw) || parentNameSet.has(userNameRaw))
-    ? (userNameRaw as AllowedUserName)
-    : null;
+  const userName = normalizeAllowedUserName(meta.userName);
 
   const receiveAllRaw = Boolean(meta.receiveAll);
   const incomingWatchChildren = Array.isArray(meta.watchChildren)
@@ -340,8 +380,8 @@ export const sendPushToParents = async (
 
   const targetSet = new Set<string>(targetParents);
   const targets = rowsResult.rows.filter((row) => {
-    const userName = (row.user_name || "").trim();
-    return isParentUserName(userName) && targetSet.has(userName);
+    const userName = normalizeAllowedUserName(row.user_name);
+    return Boolean(userName && isParentUserName(userName) && targetSet.has(userName));
   });
 
   if (!targets.length) {
@@ -372,7 +412,7 @@ const shouldSubscriptionReceiveTask = (
     return false;
   }
 
-  const userName = (subscription.user_name || "").trim();
+  const userName = normalizeAllowedUserName(subscription.user_name);
   if (!userName) {
     return true;
   }
@@ -661,8 +701,8 @@ export const sendUpcomingTaskReminders = async (
         return true;
       }
 
-      const userName = (subscription.user_name || "").trim();
-      return isChildUserName(userName) && taskChildNames.includes(userName);
+      const userName = normalizeAllowedUserName(subscription.user_name);
+      return Boolean(userName && isChildUserName(userName) && taskChildNames.includes(userName));
     });
 
     if (!targetSubscriptions.length) {
@@ -693,7 +733,7 @@ export const sendUpcomingTaskReminders = async (
         continue;
       }
 
-      const childSubscriptionName = (subscription.user_name || "").trim();
+      const childSubscriptionName = normalizeAllowedUserName(subscription.user_name) || "";
       const childDisplayName = isChildUserName(childSubscriptionName) ? childSubscriptionName : defaultChildName;
       console.log("Pushing to device of:", childSubscriptionName || "(unknown)");
       options?.onAttempt?.({
