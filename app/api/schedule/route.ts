@@ -135,6 +135,7 @@ const requiredInsertColumns = [
   "day_index",
   "event_time",
   "title",
+  "zoom_link",
   "event_type",
   "is_recurring",
   "recurring_template_id",
@@ -238,6 +239,7 @@ const ensureFamilyScheduleTable = async () => {
     await sql`ALTER TABLE family_schedule ADD COLUMN IF NOT EXISTS day_index INT`;
     await sql`ALTER TABLE family_schedule ADD COLUMN IF NOT EXISTS event_time TEXT`;
     await sql`ALTER TABLE family_schedule ADD COLUMN IF NOT EXISTS title TEXT`;
+    await sql`ALTER TABLE family_schedule ADD COLUMN IF NOT EXISTS zoom_link TEXT`;
     await sql`ALTER TABLE family_schedule ADD COLUMN IF NOT EXISTS event_type TEXT`;
     await sql`ALTER TABLE family_schedule ADD COLUMN IF NOT EXISTS is_recurring BOOLEAN NOT NULL DEFAULT FALSE`;
     await sql`ALTER TABLE family_schedule ADD COLUMN IF NOT EXISTS recurring_template_id TEXT`;
@@ -412,6 +414,9 @@ const sanitizeDbEvent = (event: unknown) => {
   const title = typeof candidate.title === "string"
     ? candidate.title.trim()
     : (typeof candidate.text === "string" ? candidate.text.trim() : "");
+  const zoomLink = typeof candidate.zoomLink === "string"
+    ? candidate.zoomLink.trim()
+    : (typeof candidate.zoom_link === "string" ? candidate.zoom_link.trim() : "");
   const type = typeof candidate.type === "string"
     ? candidate.type.trim().toLowerCase()
     : (typeof candidate.event_type === "string" ? candidate.event_type.trim().toLowerCase() : "");
@@ -455,6 +460,7 @@ const sanitizeDbEvent = (event: unknown) => {
     time,
     child,
     title,
+    zoomLink: zoomLink || undefined,
     type,
     isRecurring,
     recurringTemplateId,
@@ -473,6 +479,9 @@ const createIncomingFromFlatBody = (body: Record<string, unknown>) => {
   const child = typeof body.child === "string" ? body.child.trim() : "";
   const type = typeof body.type === "string" ? body.type.trim() : "";
   const text = typeof body.text === "string" ? body.text.trim() : "";
+  const zoomLink = typeof body.zoomLink === "string"
+    ? body.zoomLink.trim()
+    : (typeof body.zoom_link === "string" ? body.zoom_link.trim() : "");
   const id = typeof body.id === "string" && body.id.trim()
     ? body.id.trim()
     : (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
@@ -494,6 +503,7 @@ const createIncomingFromFlatBody = (body: Record<string, unknown>) => {
     time,
     child,
     title: text,
+    zoomLink,
     type,
     isRecurring: false,
     completed: false,
@@ -637,6 +647,7 @@ const upsertScheduleEvent = async (incoming: ReturnType<typeof sanitizeDbEvent>)
       day_index: incoming.dayIndex,
       event_time: incoming.time,
       title: incoming.title,
+      zoom_link: incoming.zoomLink ?? null,
       event_type: incoming.type,
       is_recurring: incoming.isRecurring ?? false,
       recurring_template_id: incoming.recurringTemplateId ?? null,
@@ -666,6 +677,7 @@ const upsertScheduleEvent = async (incoming: ReturnType<typeof sanitizeDbEvent>)
           day_index,
           event_time,
           title,
+          zoom_link,
           event_type,
           is_recurring,
           recurring_template_id,
@@ -690,6 +702,7 @@ const upsertScheduleEvent = async (incoming: ReturnType<typeof sanitizeDbEvent>)
           ${newEvent.day_index},
           ${newEvent.event_time},
           ${newEvent.title},
+          ${newEvent.zoom_link},
           ${newEvent.event_type},
           ${newEvent.is_recurring},
           ${newEvent.recurring_template_id},
@@ -714,6 +727,7 @@ const upsertScheduleEvent = async (incoming: ReturnType<typeof sanitizeDbEvent>)
           day_index = EXCLUDED.day_index,
           event_time = EXCLUDED.event_time,
           title = EXCLUDED.title,
+          zoom_link = EXCLUDED.zoom_link,
           event_type = EXCLUDED.event_type,
           is_recurring = EXCLUDED.is_recurring,
           recurring_template_id = EXCLUDED.recurring_template_id,
@@ -769,6 +783,9 @@ const upsertScheduleEvent = async (incoming: ReturnType<typeof sanitizeDbEvent>)
         time: String(saved.time),
         child: savedChild,
         title: String(saved.text),
+        zoomLink: typeof saved.zoom_link === "string" && saved.zoom_link.trim()
+          ? saved.zoom_link.trim()
+          : undefined,
         type: String(saved.type),
         isRecurring: parseBooleanValue(saved.is_recurring ?? saved.is_weekly),
         recurringTemplateId: typeof saved.recurring_template_id === "string" && saved.recurring_template_id.trim()
@@ -829,6 +846,7 @@ export async function GET() {
         COALESCE(event_time, time) AS event_time,
         child,
         COALESCE(title, text) AS title,
+        zoom_link,
         COALESCE(event_type, type) AS event_type,
         COALESCE(is_recurring, is_weekly, FALSE) AS is_recurring,
         recurring_template_id,
@@ -860,6 +878,9 @@ export async function GET() {
         time: row.event_time,
         child: normalizedChild,
         title: row.title,
+        zoomLink: typeof row.zoom_link === "string" && row.zoom_link.trim()
+          ? row.zoom_link.trim()
+          : undefined,
         type: row.event_type,
         isRecurring: parseBooleanValue(row.is_recurring),
         recurringTemplateId: typeof row.recurring_template_id === "string" && row.recurring_template_id.trim()

@@ -21,6 +21,7 @@ type SchedulerEvent = {
   time: string;
   child: ChildKey;
   title: string;
+  zoomLink?: string;
   type: EventType;
   isRecurring?: boolean;
   recurringTemplateId?: string;
@@ -53,6 +54,7 @@ type RecurringTemplate = {
   time: string;
   child: ChildKey;
   title: string;
+  zoomLink?: string;
   type: EventType;
   isRecurring?: boolean;
   sendNotification?: boolean;
@@ -141,6 +143,7 @@ type ScheduleApiEvent = {
   time: string;
   child: ChildKey;
   title: string;
+  zoomLink?: string;
   type: EventType;
   isRecurring?: boolean;
   recurringTemplateId?: string;
@@ -820,38 +823,155 @@ const getChildKeys = (key: ChildKey): BaseChildKey[] => {
   return [key];
 };
 
-const SUNDAY_AMIT_ALIN_ZOOM_URL = 'https://edu-il.zoom.us/j/85124349240#success';
-const eventUrlPattern = /(https?:\/\/[^\s]+)/gi;
+const remoteLearningTemplates: RecurringTemplate[] = [
+  {
+    templateId: 'remote-learning-0-1200-amit-alin',
+    dayIndex: 0,
+    time: '12:00',
+    child: 'amit_alin',
+    title: 'למידה מרחוק',
+    zoomLink: 'https://edu-il.zoom.us/j/85124349240#success',
+    type: 'lesson',
+    isRecurring: true,
+    sendNotification: true,
+    requireConfirmation: false,
+  },
+  {
+    templateId: 'remote-learning-1-1000-amit-alin',
+    dayIndex: 1,
+    time: '10:00',
+    child: 'amit_alin',
+    title: 'למידה מרחוק',
+    zoomLink: 'https://edu-il.zoom.us/j/6205065886?pwd=RmlLdazm4FYC2zaBsTA5q0QbRtX43K.1#success',
+    type: 'lesson',
+    isRecurring: true,
+    sendNotification: true,
+    requireConfirmation: false,
+  },
+  {
+    templateId: 'remote-learning-1-1200-amit-alin',
+    dayIndex: 1,
+    time: '12:00',
+    child: 'amit_alin',
+    title: 'למידה מרחוק',
+    zoomLink: 'https://edu-il.zoom.us/j/3055190951#success',
+    type: 'lesson',
+    isRecurring: true,
+    sendNotification: true,
+    requireConfirmation: false,
+  },
+  {
+    templateId: 'remote-learning-2-1000-amit-alin',
+    dayIndex: 2,
+    time: '10:00',
+    child: 'amit_alin',
+    title: 'למידה מרחוק',
+    zoomLink: 'https://edu-il.zoom.us/j/85124349240#success',
+    type: 'lesson',
+    isRecurring: true,
+    sendNotification: true,
+    requireConfirmation: false,
+  },
+  {
+    templateId: 'remote-learning-2-1200-amit-alin',
+    dayIndex: 2,
+    time: '12:00',
+    child: 'amit_alin',
+    title: 'למידה מרחוק',
+    zoomLink: 'https://edu-il.zoom.us/j/85124349240#success',
+    type: 'lesson',
+    isRecurring: true,
+    sendNotification: true,
+    requireConfirmation: false,
+  },
+  {
+    templateId: 'remote-learning-3-1000-amit-alin',
+    dayIndex: 3,
+    time: '10:00',
+    child: 'amit_alin',
+    title: 'למידה מרחוק',
+    zoomLink: 'https://edu-il.zoom.us/j/3055190951#success',
+    type: 'lesson',
+    isRecurring: true,
+    sendNotification: true,
+    requireConfirmation: false,
+  },
+  {
+    templateId: 'remote-learning-3-1200-amit-alin',
+    dayIndex: 3,
+    time: '12:00',
+    child: 'amit_alin',
+    title: 'למידה מרחוק',
+    zoomLink: 'https://edu-il.zoom.us/j/3055190951#success',
+    type: 'lesson',
+    isRecurring: true,
+    sendNotification: true,
+    requireConfirmation: false,
+  },
+  {
+    templateId: 'remote-learning-4-1000-amit-alin',
+    dayIndex: 4,
+    time: '10:00',
+    child: 'amit_alin',
+    title: 'למידה מרחוק',
+    zoomLink: 'https://edu-il.zoom.us/j/85124349240#success',
+    type: 'lesson',
+    isRecurring: true,
+    sendNotification: true,
+    requireConfirmation: false,
+  },
+  {
+    templateId: 'english-1-1500-amit',
+    dayIndex: 1,
+    time: '15:00',
+    child: 'amit',
+    title: 'אנגלית',
+    type: 'lesson',
+    isRecurring: true,
+    sendNotification: true,
+    requireConfirmation: false,
+  },
+  {
+    templateId: 'english-2-1900-alin',
+    dayIndex: 2,
+    time: '19:00',
+    child: 'alin',
+    title: 'אנגלית',
+    type: 'lesson',
+    isRecurring: true,
+    sendNotification: true,
+    requireConfirmation: false,
+  },
+  {
+    templateId: 'english-4-1400-amit',
+    dayIndex: 4,
+    time: '14:00',
+    child: 'amit',
+    title: 'אנגלית',
+    type: 'lesson',
+    isRecurring: true,
+    sendNotification: true,
+    requireConfirmation: false,
+  },
+];
 
-const hasAmitAlinPair = (child: ChildKey) => {
-  const keys = getChildKeys(child);
-  return keys.length === 2 && keys.includes('amit') && keys.includes('alin');
-};
+const mergeRecurringTemplatesWithDefaults = (templates: RecurringTemplate[]) => {
+  const dedupeKey = (template: RecurringTemplate) => {
+    const normalizedZoom = (template.zoomLink || '').trim();
+    return `${template.dayIndex}|${normalizeTimeForPicker(template.time)}|${template.child}|${template.title.trim()}|${normalizedZoom}`;
+  };
 
-const shouldInjectZoomLink = (dayIndex: number, time: string, child: ChildKey) => {
-  return dayIndex === 0 && normalizeTimeForPicker(time) === '10:00' && hasAmitAlinPair(child);
-};
+  const merged = [...templates];
+  const existingKeys = new Set(templates.map(dedupeKey));
+  remoteLearningTemplates.forEach((template) => {
+    const key = dedupeKey(template);
+    if (!existingKeys.has(key)) {
+      merged.push(template);
+      existingKeys.add(key);
+    }
+  });
 
-const normalizeEventTitleWithZoomLink = (title: string, dayIndex: number, time: string, child: ChildKey) => {
-  const trimmedTitle = title.trim();
-  if (!shouldInjectZoomLink(dayIndex, time, child)) {
-    return trimmedTitle;
-  }
-
-  if (trimmedTitle.includes(SUNDAY_AMIT_ALIN_ZOOM_URL)) {
-    return trimmedTitle;
-  }
-
-  return `${trimmedTitle}\n${SUNDAY_AMIT_ALIN_ZOOM_URL}`;
-};
-
-const extractFirstUrl = (text: string) => {
-  const match = text.match(eventUrlPattern);
-  return match?.[0]?.trim() || '';
-};
-
-const stripUrlsFromText = (text: string) => {
-  return text.replace(eventUrlPattern, '').replace(/\s{2,}/g, ' ').trim();
+  return merged;
 };
 
 const getSaturdayJohnnyAssignment = (weekStart: Date): { morning: BaseChildKey; afternoon: BaseChildKey } => {
@@ -946,6 +1066,7 @@ const sortEvents = (events: SchedulerEvent[]) => {
 };
 
 const createWeekDays = (weekStart: Date, includeDemo: boolean, recurringTemplates: RecurringTemplate[]): DaySchedule[] => {
+  const mergedRecurringTemplates = mergeRecurringTemplatesWithDefaults(recurringTemplates);
   const days: DaySchedule[] = dayNames.map((dayName, idx) => {
     const date = addDays(weekStart, idx);
     return {
@@ -960,7 +1081,6 @@ const createWeekDays = (weekStart: Date, includeDemo: boolean, recurringTemplate
     const fallbackDate = new Date(`${days[dayIndex].isoDate}T00:00:00`);
     days[dayIndex].events.push({
       ...event,
-      title: normalizeEventTitleWithZoomLink(event.title, dayIndex, event.time, event.child),
       date: normalizeEventDateKey(event.date, fallbackDate),
       isRecurring: event.isRecurring ?? Boolean(event.recurringTemplateId),
       completed: Boolean(event.completed),
@@ -972,7 +1092,7 @@ const createWeekDays = (weekStart: Date, includeDemo: boolean, recurringTemplate
 
   buildJohnnyEvents(weekStart).forEach(({ dayIndex, event }) => addEvent(dayIndex, event));
 
-  recurringTemplates
+  mergedRecurringTemplates
     .filter((template) => !template.title.includes('ג׳וני') && !template.title.includes("ג'וני"))
     .forEach((template) => {
     addEvent(template.dayIndex, {
@@ -981,6 +1101,7 @@ const createWeekDays = (weekStart: Date, includeDemo: boolean, recurringTemplate
       time: template.time,
       child: template.child,
       title: template.title,
+      zoomLink: template.zoomLink,
       type: template.type,
       isRecurring: template.isRecurring,
       recurringTemplateId: template.templateId,
@@ -2257,7 +2378,8 @@ export default function FamilyScheduler() {
           dayIndex: event.dayIndex,
           time: normalizeTimeForPicker(event.time),
           child: event.child,
-          title: normalizeEventTitleWithZoomLink(event.title, event.dayIndex, event.time, event.child),
+          title: event.title,
+          zoomLink: event.zoomLink,
           type: event.type,
           isRecurring: true,
           sendNotification: event.sendNotification ?? true,
@@ -2288,7 +2410,8 @@ export default function FamilyScheduler() {
           date: toEventDateKey(eventDate),
           time: normalizeTimeForPicker(event.time),
           child: event.child,
-          title: normalizeEventTitleWithZoomLink(event.title, dayIndex, event.time, event.child),
+          title: event.title,
+          zoomLink: event.zoomLink,
           type: event.type,
           isRecurring: false,
           recurringTemplateId: undefined,
@@ -3426,8 +3549,7 @@ export default function FamilyScheduler() {
               )}
               {visibleEvents.map((event) => {
                 const mainIconColor = baseChildrenConfig[getChildKeys(event.child)[0]].iconColor;
-                const eventLink = extractFirstUrl(event.title);
-                const eventDisplayTitle = stripUrlsFromText(event.title) || event.title.trim();
+                const eventLink = typeof event.zoomLink === 'string' ? event.zoomLink.trim() : '';
                 return (
                   <div
                     key={event.id}
@@ -3456,7 +3578,7 @@ export default function FamilyScheduler() {
                           {event.completed && (
                             <span className={`${statusPillClassName} text-emerald-700 bg-emerald-50 border-emerald-200`}>בוצע</span>
                           )}
-                          <span className="text-slate-700 font-semibold text-sm break-words whitespace-pre-wrap max-w-full">{eventDisplayTitle}</span>
+                          <span className="text-slate-700 font-semibold text-sm break-words whitespace-pre-wrap max-w-full">{event.title}</span>
                           {event.sendNotification !== false && (
                             <span className={`${statusPillClassName} text-indigo-700 bg-indigo-50 border-indigo-200`}>התראה</span>
                           )}
