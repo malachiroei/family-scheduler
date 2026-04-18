@@ -2582,14 +2582,9 @@ export default function FamilyScheduler() {
         if (!eventDate) {
           return;
         }
-        let eventWeekKey = toIsoDate(getWeekStart(eventDate));
-        if (eventWeekKey !== targetWeekKey && apiDay !== null) {
-          const anchored = addDays(targetWeekStart, apiDay);
-          if (toIsoDate(getWeekStart(anchored)) === targetWeekKey) {
-            eventDate = anchored;
-            eventWeekKey = targetWeekKey;
-          }
-        }
+        /** Calendar week of the stored date only — do not "slide" one-off rows into the viewed week by dayIndex
+         *  (that made every non-recurring task appear on the same weekday in every week). */
+        const eventWeekKey = toIsoDate(getWeekStart(eventDate));
         if (eventWeekKey !== targetWeekKey) {
           return;
         }
