@@ -1,7 +1,7 @@
 "use client";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import Image from 'next/image';
-import { Dog, Dumbbell, Music, GraduationCap, Trophy, Printer, Image as ImageIcon, MessageCircle, ChevronRight, ChevronLeft, X, Plus, CalendarDays, Settings, RefreshCw, Video } from 'lucide-react';
+import { Dog, Dumbbell, Music, GraduationCap, Trophy, Printer, Image as ImageIcon, MessageCircle, ChevronRight, ChevronLeft, X, Plus, CalendarDays, Settings, RefreshCw, Video, ClipboardList, Trash2 } from 'lucide-react';
 import html2canvas from 'html2canvas';
 
 const baseChildrenConfig = {
@@ -337,6 +337,14 @@ const toDisplayDate = (date: Date) => {
   return `${d}.${m}`;
 };
 
+const formatUpcomingListDayLabel = (dateStr: string) => {
+  const d = parseEventDateKey(dateStr);
+  if (!d) {
+    return dateStr;
+  }
+  return `${dayNames[d.getDay()]} · ${toDisplayDate(d)}`;
+};
+
 const generateId = () => {
   if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
     return crypto.randomUUID();
@@ -529,6 +537,25 @@ const minutesFromClock = (value: string) => {
   }
   const [hours, minutes] = normalized.split(':').map(Number);
   return hours * 60 + minutes;
+};
+
+const compareScheduleApiEventsByDateTime = (a: ScheduleApiEvent, b: ScheduleApiEvent) => {
+  const da = parseEventDateKey(a.date);
+  const db = parseEventDateKey(b.date);
+  if (!da && !db) {
+    return 0;
+  }
+  if (!da) {
+    return 1;
+  }
+  if (!db) {
+    return -1;
+  }
+  const c = da.getTime() - db.getTime();
+  if (c !== 0) {
+    return c;
+  }
+  return minutesFromClock(a.time) - minutesFromClock(b.time);
 };
 
 /** שעת אירוע עיקרי לעומת שעת הסעה (שתי שעות באותה שורה — המשחק/אירוע הוא בדרך כלל המאוחרת) */
@@ -796,14 +823,15 @@ const normalizePersistedState = (
     ? getWeekStart(parsedWeekStart)
     : fallbackWeekStart;
 
-  const safeTemplates = Array.isArray(payload?.recurringTemplates) ? payload.recurringTemplates : [];
   const safeWeeksData = {
     [toIsoDate(safeWeekStart)]: createEmptyWeekDays(safeWeekStart),
   };
 
   return {
     weekStart: safeWeekStart,
-    recurringTemplates: safeTemplates,
+    // DB GET /api/schedule (refetch) is the source of truth for recurring templates.
+    // Ignoring persisted recurringTemplates avoids resurrecting deleted series after refresh or on another device.
+    recurringTemplates: [] as RecurringTemplate[],
     weeksData: safeWeeksData,
   };
 };
@@ -822,6 +850,32 @@ const johnnyStableEventId = (weekStart: Date, dayIndex: number, time: string): s
 
 /** Persisted row title so refetch hides built-in Johnny slots after delete (see upsertJohnnyTombstone). */
 const JOHNNY_SUPPRESSED_TITLE = '__JOHNNY_SUPPRESSED__';
+
+const isScheduleEventUpcoming = (event: ScheduleApiEvent, now: Date): boolean => {
+  if (!event?.date || event.title === JOHNNY_SUPPRESSED_TITLE) {
+    return false;
+  }
+  const d = parseEventDateKey(event.date);
+  if (!d) {
+    return false;
+  }
+  const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const eventDay = new Date(d.getFullYear(), d.getMonth(), d.getDate());
+  if (eventDay.getTime() > todayStart.getTime()) {
+    return true;
+  }
+  if (eventDay.getTime() < todayStart.getTime()) {
+    return false;
+  }
+  const t = normalizeTimeForPicker(event.time);
+  const match = t.match(/^(\d{1,2}):(\d{2})$/);
+  if (!match) {
+    return true;
+  }
+  const at = new Date(d.getFullYear(), d.getMonth(), d.getDate());
+  at.setHours(Number(match[1]), Number(match[2]), 0, 0);
+  return at.getTime() >= now.getTime();
+};
 
 const isJohnnyScheduleTitle = (title: string) => /ג׳וני|ג'וני/i.test(`${title}`);
 
@@ -1256,6 +1310,9 @@ export default function FamilyScheduler() {
   const [creatingEvent, setCreatingEvent] = useState<NewEventDraft | null>(null);
   const [isChatOpen, setIsChatOpen] = useState(false);
   const [showSettingsModal, setShowSettingsModal] = useState(false);
+  const [showUpcomingListModal, setShowUpcomingListModal] = useState(false);
+  const [upcomingListLoading, setUpcomingListLoading] = useState(false);
+  const [upcomingListEvents, setUpcomingListEvents] = useState<ScheduleApiEvent[]>([]);
   const [deletePasswordModalOpen, setDeletePasswordModalOpen] = useState(false);
   const [deletePasswordInput, setDeletePasswordInput] = useState('');
   const deletePasswordResolverRef = useRef<((value: string | null) => void) | null>(null);
@@ -1497,7 +1554,9 @@ export default function FamilyScheduler() {
       }
       return {
         ...prev,
-        [weekKey]: createWeekDays(weekStart, false, recurringTemplates),
+        [weekKey]: createWeekDays(weekStart, false, recurringTemplates, {
+          skipDefaultRecurringTemplates: true,
+        }),
       };
     });
   }, [weekKey, weekStart, recurringTemplates]);
@@ -2813,6 +2872,17 @@ export default function FamilyScheduler() {
         deletePassword,
       );
 
+      void fetch(toApiUrl('/api/state'), {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          eventId: trimmedEventId || undefined,
+          recurringTemplateId: trimmedTemplateId || undefined,
+        }),
+      }).catch(() => {
+        // Server snapshot cleanup is best-effort; schedule DB is authoritative.
+      });
+
       const src = payload.sourceEvent;
       const srcDay = payload.sourceDayIndex;
       let johnnySlotId: string | null = null;
@@ -2865,6 +2935,60 @@ export default function FamilyScheduler() {
       throw error;
     }
   };
+
+  const loadUpcomingList = useCallback(async () => {
+    setUpcomingListLoading(true);
+    setApiError('');
+    try {
+      const response = await fetch(toApiUrl('/api/schedule'), { cache: 'no-store' });
+      const payload = await response.json();
+      if (!response.ok) {
+        throw new Error(payload?.error || 'טעינת המשימות נכשלה');
+      }
+      const raw = (Array.isArray(payload?.events) ? payload.events : []) as ScheduleApiEvent[];
+      const now = new Date();
+      const next = raw
+        .filter((e) => isScheduleEventUpcoming(e, now))
+        .sort(compareScheduleApiEventsByDateTime);
+      setUpcomingListEvents(next);
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : 'טעינה נכשלה';
+      setApiError(msg);
+      setUpcomingListEvents([]);
+    } finally {
+      setUpcomingListLoading(false);
+    }
+  }, []);
+
+  const deleteFromUpcomingList = useCallback(
+    async (event: ScheduleApiEvent) => {
+      const parsed = parseEventDateKey(event.date);
+      if (!parsed) {
+        return;
+      }
+      const ws = getWeekStart(parsed);
+      const tid = event.recurringTemplateId?.trim();
+      try {
+        const ok = await handleDelete(
+          { eventId: event.id.trim(), recurringTemplateId: tid || undefined },
+          ws,
+        );
+        if (ok) {
+          setSuccessMessage('המשימה נמחקה.');
+          await loadUpcomingList();
+        }
+      } catch {
+        // handleDelete / deleteEventFromDatabase מסמנים שגיאה
+      }
+    },
+    [handleDelete, loadUpcomingList],
+  );
+
+  useEffect(() => {
+    if (showUpcomingListModal) {
+      void loadUpcomingList();
+    }
+  }, [showUpcomingListModal, loadUpcomingList]);
 
   useEffect(() => {
     if (!isHydrated) {
@@ -3676,6 +3800,14 @@ export default function FamilyScheduler() {
       </button>
       <button
         type="button"
+        onClick={() => setShowUpcomingListModal(true)}
+        className="fixed top-[5.5rem] left-5 md:left-6 z-40 h-10 w-10 rounded-full bg-indigo-600 text-white shadow-lg hover:bg-indigo-700 transition print:hidden flex items-center justify-center"
+        aria-label="כל המשימות העתידיות"
+      >
+        <ClipboardList size={18} />
+      </button>
+      <button
+        type="button"
         onClick={() => { void handleManualRefresh(); }}
         disabled={isRefreshing}
         className="fixed top-5 right-5 md:top-6 md:right-6 z-40 h-9 rounded-full bg-white border border-slate-200 text-slate-700 shadow-lg hover:bg-slate-50 transition print:hidden flex items-center justify-center gap-1.5 px-3 disabled:opacity-60 disabled:cursor-not-allowed"
@@ -3890,6 +4022,94 @@ export default function FamilyScheduler() {
           </div>
         )})}
       </div>
+      )}
+
+      {showUpcomingListModal && (
+        <div className="fixed inset-0 z-[60] bg-black/35 backdrop-blur-[1px] flex items-start sm:items-center justify-center p-3 pt-6 print:hidden">
+          <div className="w-full max-w-2xl max-h-[90vh] overflow-hidden flex flex-col bg-white rounded-2xl shadow-2xl border border-slate-200">
+            <div className="shrink-0 flex justify-between items-center border-b border-slate-200 px-4 py-3 gap-2">
+              <div>
+                <h3 className="text-lg font-bold text-slate-800">כל המשימות העתידיות</h3>
+                <p className="text-xs text-slate-500 mt-0.5">לפי מסד הנתונים — כולל משימות חד-פעמיות וקבועות. ממוין לפי תאריך ושעה.</p>
+              </div>
+              <div className="flex items-center gap-1">
+                <button
+                  type="button"
+                  onClick={() => { void loadUpcomingList(); }}
+                  disabled={upcomingListLoading}
+                  className="h-9 px-2 rounded-lg text-slate-600 hover:bg-slate-100 text-xs font-bold disabled:opacity-50"
+                >
+                  רענון
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setShowUpcomingListModal(false)}
+                  className="h-8 w-8 rounded-full bg-slate-100 text-slate-700 hover:bg-slate-200 flex items-center justify-center"
+                  aria-label="סגור"
+                >
+                  <X size={18} />
+                </button>
+              </div>
+            </div>
+            <div className="flex-1 overflow-y-auto px-4 py-3 min-h-0">
+              {upcomingListLoading ? (
+                <div className="flex flex-col items-center justify-center py-16 gap-2 text-slate-500">
+                  <RefreshCw size={22} className="animate-spin text-indigo-600" />
+                  <span className="text-sm font-semibold">טוען...</span>
+                </div>
+              ) : upcomingListEvents.length === 0 ? (
+                <p className="text-center text-slate-500 py-12 text-sm">אין משימות עתידיות (מהיום והלאה).</p>
+              ) : (
+                <ul className="space-y-2">
+                  {upcomingListEvents.map((ev) => {
+                    const childKey = normalizeChildKey(String(ev.child));
+                    const childName = childKey ? baseChildrenConfig[childKey].name : String(ev.child);
+                    return (
+                      <li
+                        key={ev.id}
+                        className="flex items-start gap-2 rounded-xl border border-slate-200 bg-slate-50/80 p-3 text-right"
+                      >
+                        <button
+                          type="button"
+                          onClick={() => { void deleteFromUpcomingList(ev); }}
+                          disabled={dbSyncStatus.state === 'saving'}
+                          className="shrink-0 mt-0.5 h-9 w-9 rounded-lg border border-red-200 bg-white text-red-600 hover:bg-red-50 flex items-center justify-center disabled:opacity-50"
+                          title="מחק משימה"
+                          aria-label={`מחק ${ev.title}`}
+                        >
+                          <Trash2 size={16} />
+                        </button>
+                        <div className="flex-1 min-w-0">
+                          <div className="flex flex-wrap items-center gap-2 justify-end">
+                            <span className="text-sm font-extrabold text-slate-900 break-words">{ev.title}</span>
+                            {ev.isRecurring && (
+                              <span className="text-[10px] font-bold px-2 py-0.5 rounded-full border border-blue-200 bg-blue-50 text-blue-800">קבוע</span>
+                            )}
+                          </div>
+                          <div className="text-xs text-slate-600 mt-1 flex flex-wrap items-center gap-x-2 gap-y-0.5 justify-end">
+                            <span className="font-semibold">{formatUpcomingListDayLabel(ev.date)}</span>
+                            <span>·</span>
+                            <span>{normalizeTimeForPicker(ev.time)}</span>
+                            <span>·</span>
+                            <span className={`inline-flex items-center gap-1 ${childKey ? baseChildrenConfig[childKey].iconColor : 'text-slate-600'}`}>
+                              <span className={`h-2 w-2 rounded-full ${childKey ? baseChildrenConfig[childKey].color : 'bg-slate-400'}`} />
+                              {childName}
+                            </span>
+                          </div>
+                        </div>
+                      </li>
+                    );
+                  })}
+                </ul>
+              )}
+            </div>
+            <div className="shrink-0 border-t border-slate-100 px-4 py-2.5 bg-slate-50 rounded-b-2xl">
+              <p className="text-[11px] text-slate-500 text-center">
+                מחיקה: לחיצה על הפח פותחת אישור סיסמת מחיקה (כמו בלוח השבועי).
+              </p>
+            </div>
+          </div>
+        </div>
       )}
 
       {showSettingsModal && (
