@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { NextRequest } from "next/server";
-import { sql } from "@vercel/postgres";
+import { sql } from "@/app/lib/db";
 import { ensurePushTables, sendPushToEndpoint } from "@/app/lib/push";
 
 type EndpointRow = {

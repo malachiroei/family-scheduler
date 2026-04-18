@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { sql } from "@vercel/postgres";
+import { sql } from "@/app/lib/db";
 import { ensurePushTables } from "@/app/lib/push";
 
 type SubscriptionRow = {
