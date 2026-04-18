@@ -43,4 +43,7 @@ export const ensureDatabaseConnectionString = () => {
   return config.url ? config : null;
 };
 
+/** Supabase table for calendar events (`public.schedule`). See `scheduleTable.ts` for metadata JSON shape. */
+export const SCHEDULE_TABLE_NAME = "schedule" as const;
+
 export { sql };

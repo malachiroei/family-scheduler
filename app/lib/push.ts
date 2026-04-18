@@ -1,4 +1,5 @@
-import { sql } from "@vercel/postgres";
+import { sql } from "@/app/lib/db";
+import { ensureScheduleMetadataColumn, parseScheduleMetadata } from "@/app/lib/scheduleTable";
 import webpush from "web-push";
 
 type PushPayload = {
@@ -568,14 +569,9 @@ export const sendUpcomingTaskReminders = async (
 ) => {
   await ensurePushTables();
   try {
-    await sql`ALTER TABLE family_schedule ADD COLUMN IF NOT EXISTS completed BOOLEAN NOT NULL DEFAULT FALSE`;
-    await sql`ALTER TABLE family_schedule ADD COLUMN IF NOT EXISTS notified BOOLEAN NOT NULL DEFAULT FALSE`;
-    await sql`ALTER TABLE family_schedule ADD COLUMN IF NOT EXISTS send_notification BOOLEAN NOT NULL DEFAULT TRUE`;
-    await sql`ALTER TABLE family_schedule ADD COLUMN IF NOT EXISTS require_confirmation BOOLEAN NOT NULL DEFAULT FALSE`;
-    await sql`ALTER TABLE family_schedule ADD COLUMN IF NOT EXISTS needs_ack BOOLEAN NOT NULL DEFAULT FALSE`;
-    await sql`ALTER TABLE family_schedule ADD COLUMN IF NOT EXISTS reminder_lead_minutes INT`;
+    await ensureScheduleMetadataColumn();
   } catch {
-    // no-op: handled by schedule bootstrap route in normal flow
+    // no-op: schedule route also ensures metadata column
   }
 
   const windowForwardMinutesRaw = Number(options?.windowForwardMinutes);
@@ -601,26 +597,36 @@ export const sendUpcomingTaskReminders = async (
     return { scanned: 0, sent: 0 };
   }
 
-  const tasksResult = await sql<TaskRow>`
-    SELECT
-      id,
-      COALESCE(title, text) AS text,
-      COALESCE(event_date, day) AS day,
-      COALESCE(event_time, time) AS time,
-      child,
-      COALESCE(event_type, type) AS type,
-      COALESCE(is_recurring, is_weekly, FALSE) AS is_weekly,
-      completed,
-      COALESCE(notified, FALSE) AS notified,
-      COALESCE(send_notification, TRUE) AS send_notification,
-      COALESCE(require_confirmation, FALSE) AS require_confirmation,
-      COALESCE(needs_ack, require_confirmation, FALSE) AS needs_ack,
-      reminder_lead_minutes
-    FROM family_schedule
-    WHERE COALESCE(send_notification, TRUE) = TRUE
-      AND COALESCE(completed, FALSE) = FALSE
-      AND COALESCE(notified, FALSE) = FALSE
+  const tasksRaw = await sql`
+    SELECT id, title, "date", metadata
+    FROM schedule
+    WHERE COALESCE((metadata->'sendNotification')::boolean, true) = true
+      AND COALESCE((metadata->'completed')::boolean, false) = false
+      AND COALESCE((metadata->'notified')::boolean, false) = false
   `;
+
+  const tasksResult = {
+    rows: tasksRaw.rows.map((row) => {
+      const r = row as { id: string; title: string; date: string; metadata: unknown };
+      const m = parseScheduleMetadata(r.metadata);
+      return {
+        id: r.id,
+        text: r.title,
+        day: r.date,
+        time: m.time,
+        child: m.child,
+        type: m.type,
+        is_weekly: m.isRecurring,
+        completed: m.completed,
+        notified: m.notified,
+        send_notification: m.sendNotification,
+        require_confirmation: m.requireConfirmation,
+        needs_ack: m.needsAck,
+        reminder_lead_minutes: m.reminderLeadMinutes,
+      } as TaskRow;
+    }),
+    rowCount: tasksRaw.rowCount,
+  };
 
   let sent = 0;
   const skippedByReason: Record<string, number> = {
@@ -766,9 +772,13 @@ export const sendUpcomingTaskReminders = async (
 
     if (deliveredForTask > 0) {
       await sql`
-        UPDATE family_schedule
-        SET notified = TRUE,
-            updated_at = NOW()
+        UPDATE schedule
+        SET metadata = jsonb_set(
+          COALESCE(metadata, '{}'::jsonb),
+          '{notified}',
+          'true'::jsonb,
+          true
+        )
         WHERE id = ${task.id}
       `;
       sent += deliveredForTask;

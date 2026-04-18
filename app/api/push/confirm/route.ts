@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
-import { sql } from "@vercel/postgres";
+import { sql } from "@/app/lib/db";
+import { ensureScheduleMetadataColumn, parseScheduleMetadata } from "@/app/lib/scheduleTable";
 import { sendPushToParents } from "@/app/lib/push";
 
 const childLabelMap: Record<string, string> = {
@@ -11,25 +12,9 @@ const childLabelMap: Record<string, string> = {
   "אלין": "אלין",
 };
 
-const ensureFamilyScheduleTable = async () => {
-  await sql`
-    CREATE TABLE IF NOT EXISTS family_schedule (
-      id TEXT PRIMARY KEY,
-      text TEXT NOT NULL,
-      day TEXT NOT NULL,
-      time TEXT NOT NULL,
-      type TEXT NOT NULL,
-      child TEXT NOT NULL,
-      is_weekly BOOLEAN NOT NULL DEFAULT FALSE
-    )
-  `;
-  await sql`ALTER TABLE family_schedule ADD COLUMN IF NOT EXISTS completed BOOLEAN NOT NULL DEFAULT FALSE`;
-  await sql`ALTER TABLE family_schedule ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()`;
-};
-
 export async function POST(request: NextRequest) {
   try {
-    await ensureFamilyScheduleTable();
+    await ensureScheduleMetadataColumn();
 
     const body = await request.json().catch(() => ({}));
     const eventId = typeof body?.eventId === "string" ? body.eventId.trim() : "";
@@ -40,19 +25,24 @@ export async function POST(request: NextRequest) {
     }
 
     const updated = await sql`
-      UPDATE family_schedule
-      SET completed = TRUE,
-          updated_at = NOW()
+      UPDATE schedule
+      SET metadata = jsonb_set(
+        COALESCE(metadata, '{}'::jsonb),
+        '{completed}',
+        'true'::jsonb,
+        true
+      )
       WHERE id = ${eventId}
-      RETURNING id, COALESCE(title, text) AS title, child, completed
+      RETURNING id, title, metadata
     `;
 
-    const row = updated.rows[0];
+    const row = updated.rows[0] as { id?: string; title?: string; metadata?: unknown } | undefined;
     if (!row) {
       return NextResponse.json({ error: "Task not found" }, { status: 404 });
     }
 
-    const childFromDb = String(row.child || "").trim();
+    const meta = parseScheduleMetadata(row.metadata);
+    const childFromDb = meta.child.trim();
     const childName = childNameRaw || childLabelMap[childFromDb.toLowerCase()] || childLabelMap[childFromDb] || "הילד";
     const taskTitle = String(row.title || "משימה").trim() || "משימה";
 

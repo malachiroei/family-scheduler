@@ -1,5 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
 import { ensureDatabaseConnectionString, getDatabaseConfig, sql } from "@/app/lib/db";
+import {
+  buildMetadataFromIncoming,
+  ensureScheduleMetadataColumn,
+  parseScheduleMetadata,
+} from "@/app/lib/scheduleTable";
 import { sendPushToAll, sendPushToParents, sendUpcomingTaskReminders } from "@/app/lib/push";
 
 export const revalidate = 0;
@@ -122,61 +127,6 @@ const ensurePostgresEnv = () => {
   return null;
 };
 
-const requiredInsertColumns = [
-  "id",
-  "text",
-  "day",
-  "time",
-  "type",
-  "child",
-  "is_weekly",
-  "event_id",
-  "event_date",
-  "day_index",
-  "event_time",
-  "title",
-  "zoom_link",
-  "event_type",
-  "is_recurring",
-  "recurring_template_id",
-  "completed",
-  "send_notification",
-  "require_confirmation",
-  "needs_ack",
-  "reminder_lead_minutes",
-  "user_id",
-  "updated_at",
-] as const;
-
-const ensureInsertColumnsExist = async () => {
-  try {
-    const result = await sql`
-      SELECT column_name
-      FROM information_schema.columns
-      WHERE table_name = 'family_schedule'
-    `;
-
-    const existingColumns = new Set(result.rows.map((row) => String(row.column_name || "").trim().toLowerCase()));
-    const missingColumns = requiredInsertColumns.filter((columnName) => !existingColumns.has(columnName));
-
-    if (missingColumns.length > 0) {
-      return {
-        ok: false as const,
-        code: "MISSING_TABLE_COLUMNS",
-        error: `family_schedule is missing required columns: ${missingColumns.join(", ")}`,
-      };
-    }
-
-    return { ok: true as const };
-  } catch (error) {
-    return {
-      ok: false as const,
-      code: "COLUMN_VERIFICATION_FAILED",
-      error: `Failed to verify family_schedule columns: ${getErrorMessage(error)}`,
-    };
-  }
-};
-
 const formatDbError = (error: unknown) => {
   if (!error || typeof error !== "object") {
     return getErrorMessage(error);
@@ -210,90 +160,21 @@ const formatDbError = (error: unknown) => {
   return details.length ? details.join(" | ") : getErrorMessage(error);
 };
 
-const ensureFamilyScheduleTable = async () => {
+/** Supabase: use pre-created `public.schedule` (id, title, date) + JSONB metadata. No CREATE TABLE here. */
+const ensureScheduleTableReady = async () => {
   const envError = ensurePostgresEnv();
   if (envError) {
     return { ok: false as const, code: envError, error: envError };
   }
 
   try {
-    await sql`
-      CREATE TABLE IF NOT EXISTS family_schedule (
-        id TEXT PRIMARY KEY,
-        text TEXT NOT NULL,
-        day TEXT NOT NULL,
-        time TEXT NOT NULL,
-        type TEXT NOT NULL,
-        child TEXT NOT NULL,
-        is_weekly BOOLEAN NOT NULL DEFAULT FALSE
-      )
-    `;
-    await sql`ALTER TABLE family_schedule ADD COLUMN IF NOT EXISTS id TEXT`;
-    await sql`ALTER TABLE family_schedule ADD COLUMN IF NOT EXISTS text TEXT`;
-    await sql`ALTER TABLE family_schedule ADD COLUMN IF NOT EXISTS day TEXT`;
-    await sql`ALTER TABLE family_schedule ADD COLUMN IF NOT EXISTS time TEXT`;
-    await sql`ALTER TABLE family_schedule ADD COLUMN IF NOT EXISTS type TEXT`;
-    await sql`ALTER TABLE family_schedule ADD COLUMN IF NOT EXISTS child TEXT`;
-    await sql`ALTER TABLE family_schedule ADD COLUMN IF NOT EXISTS event_id TEXT`;
-    await sql`ALTER TABLE family_schedule ADD COLUMN IF NOT EXISTS event_date TEXT`;
-    await sql`ALTER TABLE family_schedule ADD COLUMN IF NOT EXISTS day_index INT`;
-    await sql`ALTER TABLE family_schedule ADD COLUMN IF NOT EXISTS event_time TEXT`;
-    await sql`ALTER TABLE family_schedule ADD COLUMN IF NOT EXISTS title TEXT`;
-    await sql`ALTER TABLE family_schedule ADD COLUMN IF NOT EXISTS zoom_link TEXT`;
-    await sql`ALTER TABLE family_schedule ADD COLUMN IF NOT EXISTS event_type TEXT`;
-    await sql`ALTER TABLE family_schedule ADD COLUMN IF NOT EXISTS is_recurring BOOLEAN NOT NULL DEFAULT FALSE`;
-    await sql`ALTER TABLE family_schedule ADD COLUMN IF NOT EXISTS recurring_template_id TEXT`;
-    await sql`ALTER TABLE family_schedule ADD COLUMN IF NOT EXISTS completed BOOLEAN NOT NULL DEFAULT FALSE`;
-    await sql`ALTER TABLE family_schedule ADD COLUMN IF NOT EXISTS send_notification BOOLEAN NOT NULL DEFAULT TRUE`;
-    await sql`ALTER TABLE family_schedule ADD COLUMN IF NOT EXISTS require_confirmation BOOLEAN NOT NULL DEFAULT FALSE`;
-    await sql`ALTER TABLE family_schedule ADD COLUMN IF NOT EXISTS needs_ack BOOLEAN NOT NULL DEFAULT FALSE`;
-    await sql`ALTER TABLE family_schedule ADD COLUMN IF NOT EXISTS reminder_lead_minutes INT`;
-    await sql`ALTER TABLE family_schedule ADD COLUMN IF NOT EXISTS user_id TEXT`;
-    await sql`ALTER TABLE family_schedule ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()`;
-    await sql`UPDATE family_schedule SET completed = FALSE WHERE completed IS NULL`;
-    await sql`ALTER TABLE family_schedule ALTER COLUMN completed SET DEFAULT FALSE`;
-    await sql`ALTER TABLE family_schedule ALTER COLUMN completed SET NOT NULL`;
-    await sql`UPDATE family_schedule SET send_notification = TRUE WHERE send_notification IS NULL`;
-    await sql`ALTER TABLE family_schedule ALTER COLUMN send_notification SET DEFAULT TRUE`;
-    await sql`ALTER TABLE family_schedule ALTER COLUMN send_notification SET NOT NULL`;
-    await sql`UPDATE family_schedule SET require_confirmation = FALSE WHERE require_confirmation IS NULL`;
-    await sql`ALTER TABLE family_schedule ALTER COLUMN require_confirmation SET DEFAULT FALSE`;
-    await sql`ALTER TABLE family_schedule ALTER COLUMN require_confirmation SET NOT NULL`;
-    await sql`UPDATE family_schedule SET needs_ack = COALESCE(needs_ack, require_confirmation, FALSE)`;
-    await sql`ALTER TABLE family_schedule ALTER COLUMN needs_ack SET DEFAULT FALSE`;
-    await sql`ALTER TABLE family_schedule ALTER COLUMN needs_ack SET NOT NULL`;
-    await sql`UPDATE family_schedule SET require_confirmation = COALESCE(needs_ack, require_confirmation, FALSE)`;
-    await sql`UPDATE family_schedule SET user_id = 'system' WHERE user_id IS NULL OR BTRIM(user_id) = ''`;
-    await sql`ALTER TABLE family_schedule ALTER COLUMN user_id SET DEFAULT 'system'`;
-    await sql`ALTER TABLE family_schedule ALTER COLUMN user_id SET NOT NULL`;
-    await sql`
-      ALTER TABLE family_schedule
-      ADD COLUMN IF NOT EXISTS is_weekly BOOLEAN NOT NULL DEFAULT FALSE
-    `;
-    try {
-      await sql`
-        UPDATE family_schedule
-        SET
-          id = COALESCE(id, event_id),
-          text = COALESCE(text, title),
-          day = COALESCE(day, event_date),
-          time = COALESCE(time, event_time),
-          type = COALESCE(type, event_type),
-          is_weekly = COALESCE(is_weekly, is_recurring, FALSE)
-      `;
-    } catch {
-    }
-    await sql`
-      CREATE UNIQUE INDEX IF NOT EXISTS family_schedule_id_unique
-      ON family_schedule(id)
-    `;
-
+    await ensureScheduleMetadataColumn();
     return { ok: true as const };
   } catch (error) {
     return {
       ok: false as const,
       code: "TABLE_BOOTSTRAP_FAILED",
-      error: `Failed to ensure family_schedule table: ${getErrorMessage(error)}`,
+      error: `Failed to ensure schedule.metadata column: ${getErrorMessage(error)}`,
     };
   }
 };
@@ -624,129 +505,52 @@ const upsertScheduleEvent = async (incoming: ReturnType<typeof sanitizeDbEvent>)
     return { ok: false as const, error: "Invalid event payload" };
   }
 
-  const tableStatus = await ensureFamilyScheduleTable();
+  const tableStatus = await ensureScheduleTableReady();
   if (!tableStatus.ok) {
     return tableStatus;
   }
 
-  const columnsStatus = await ensureInsertColumnsExist();
-  if (!columnsStatus.ok) {
-    return columnsStatus;
-  }
-
   try {
-    const newEvent = {
-      id: incoming.eventId,
-      text: incoming.title,
-      day: incoming.date,
-      time: incoming.time,
-      type: incoming.type,
-      child: incoming.child,
-      is_weekly: incoming.isRecurring ?? false,
-      event_id: incoming.eventId,
-      event_date: incoming.date,
-      day_index: incoming.dayIndex,
-      event_time: incoming.time,
-      title: incoming.title,
-      zoom_link: incoming.zoomLink ?? null,
-      event_type: incoming.type,
-      is_recurring: incoming.isRecurring ?? false,
-      recurring_template_id: incoming.recurringTemplateId ?? null,
-      completed: incoming.completed ?? false,
-      send_notification: incoming.sendNotification ?? true,
-      require_confirmation: incoming.requireConfirmation ?? false,
-      needs_ack: incoming.needsAck ?? incoming.requireConfirmation ?? false,
-      reminder_lead_minutes: incoming.reminderLeadMinutes,
-      user_id: incoming.userId ?? "system",
-    };
-    debugScheduleLog("Data to save:", newEvent);
-    console.log("Inserting event:", newEvent);
+    const existingRow = await sql`
+      SELECT metadata FROM schedule WHERE id = ${incoming.eventId} LIMIT 1
+    `;
+    const previousMeta =
+      existingRow.rows[0] && existingRow.rows[0].metadata != null
+        ? parseScheduleMetadata(existingRow.rows[0].metadata)
+        : null;
+
+    const metadataPayload = buildMetadataFromIncoming({
+      ...incoming,
+      notified: previousMeta?.notified ?? false,
+    });
+
+    const payloadJson = JSON.stringify(metadataPayload);
+    debugScheduleLog("Data to save:", { id: incoming.eventId, title: incoming.title, date: incoming.date, metadataPayload });
+    console.log("Inserting event:", incoming.eventId);
 
     let newRow;
     try {
       newRow = await sql`
-        INSERT INTO family_schedule (
-          id,
-          text,
-          day,
-          time,
-          type,
-          child,
-          is_weekly,
-          event_id,
-          event_date,
-          day_index,
-          event_time,
-          title,
-          zoom_link,
-          event_type,
-          is_recurring,
-          recurring_template_id,
-          completed,
-          send_notification,
-          require_confirmation,
-          needs_ack,
-          reminder_lead_minutes,
-          user_id,
-          updated_at
-        )
+        INSERT INTO schedule (id, title, "date", metadata)
         VALUES (
-          ${newEvent.id},
-          ${newEvent.text},
-          ${newEvent.day},
-          ${newEvent.time},
-          ${newEvent.type},
-          ${newEvent.child},
-          ${newEvent.is_weekly},
-          ${newEvent.event_id},
-          ${newEvent.event_date},
-          ${newEvent.day_index},
-          ${newEvent.event_time},
-          ${newEvent.title},
-          ${newEvent.zoom_link},
-          ${newEvent.event_type},
-          ${newEvent.is_recurring},
-          ${newEvent.recurring_template_id},
-          ${newEvent.completed},
-          ${newEvent.send_notification},
-          ${newEvent.require_confirmation},
-          ${newEvent.needs_ack},
-          ${newEvent.reminder_lead_minutes},
-          ${newEvent.user_id},
-          NOW()
+          ${incoming.eventId},
+          ${incoming.title},
+          ${incoming.date},
+          ${payloadJson}::jsonb
         )
         ON CONFLICT (id)
         DO UPDATE SET
-          text = EXCLUDED.text,
-          day = EXCLUDED.day,
-          time = EXCLUDED.time,
-          type = EXCLUDED.type,
-          child = EXCLUDED.child,
-          is_weekly = EXCLUDED.is_weekly,
-          event_id = EXCLUDED.event_id,
-          event_date = EXCLUDED.event_date,
-          day_index = EXCLUDED.day_index,
-          event_time = EXCLUDED.event_time,
           title = EXCLUDED.title,
-          zoom_link = EXCLUDED.zoom_link,
-          event_type = EXCLUDED.event_type,
-          is_recurring = EXCLUDED.is_recurring,
-          recurring_template_id = EXCLUDED.recurring_template_id,
-          completed = EXCLUDED.completed,
-          send_notification = EXCLUDED.send_notification,
-          require_confirmation = EXCLUDED.require_confirmation,
-          needs_ack = EXCLUDED.needs_ack,
-          reminder_lead_minutes = EXCLUDED.reminder_lead_minutes,
-          user_id = EXCLUDED.user_id,
-          updated_at = NOW()
+          "date" = EXCLUDED."date",
+          metadata = EXCLUDED.metadata
         RETURNING *
       `;
     } catch (error) {
       const dbError = formatDbError(error);
-      console.error("[API] SQL insert into family_schedule failed", {
+      console.error("[API] SQL insert into schedule failed", {
         dbError,
         rawError: error,
-        newEvent,
+        incoming,
       });
       return {
         ok: false as const,
@@ -760,42 +564,39 @@ const upsertScheduleEvent = async (incoming: ReturnType<typeof sanitizeDbEvent>)
       return { ok: false as const, error: "Insert did not return a positive DB response" };
     }
 
-    const saved = newRow.rows[0];
+    const saved = newRow.rows[0] as Record<string, unknown>;
     if (!saved) {
       return { ok: false as const, error: "Saved row was not found" };
     }
 
-    debugScheduleLog("Saved successfully:", newRow.rows[0]);
+    debugScheduleLog("Saved successfully:", saved);
 
-    const savedDateRaw = String(saved.event_date ?? saved.day ?? "").trim();
+    const savedDateRaw = String(saved.date ?? "").trim();
     const savedDate = toIsoDate(savedDateRaw) || savedDateRaw;
-    const savedChildRaw = String(saved.child ?? "").trim().toLowerCase();
+    const meta = parseScheduleMetadata(saved.metadata);
+    const savedChildRaw = meta.child.trim().toLowerCase();
     const savedChild = allowedScheduleChildren.includes(savedChildRaw as (typeof allowedScheduleChildren)[number])
       ? savedChildRaw
       : "amit";
 
     return {
       ok: true as const,
-      row: newRow.rows[0],
+      row: saved,
       event: {
         id: String(saved.id),
         date: savedDate,
-        dayIndex: toDayIndex(savedDate, incoming.dayIndex),
-        time: String(saved.time),
+        dayIndex: toDayIndex(savedDate, meta.dayIndex),
+        time: meta.time,
         child: savedChild,
-        title: String(saved.text),
-        zoomLink: typeof saved.zoom_link === "string" && saved.zoom_link.trim()
-          ? saved.zoom_link.trim()
-          : undefined,
-        type: String(saved.type),
-        isRecurring: parseBooleanValue(saved.is_recurring ?? saved.is_weekly),
-        recurringTemplateId: typeof saved.recurring_template_id === "string" && saved.recurring_template_id.trim()
-          ? saved.recurring_template_id.trim()
-          : undefined,
-        completed: parseBooleanValue(saved.completed),
-        sendNotification: parseBooleanValue(saved.send_notification),
-        requireConfirmation: parseBooleanValue(saved.needs_ack ?? saved.require_confirmation),
-        reminderLeadMinutes: parseReminderLeadMinutes(saved.reminder_lead_minutes),
+        title: String(saved.title),
+        zoomLink: meta.zoomLink?.trim() ? meta.zoomLink.trim() : undefined,
+        type: meta.type,
+        isRecurring: meta.isRecurring,
+        recurringTemplateId: meta.recurringTemplateId?.trim() ? meta.recurringTemplateId.trim() : undefined,
+        completed: meta.completed,
+        sendNotification: meta.sendNotification,
+        requireConfirmation: meta.needsAck ?? meta.requireConfirmation,
+        reminderLeadMinutes: parseReminderLeadMinutes(meta.reminderLeadMinutes),
       },
     };
   } catch (error) {
@@ -823,7 +624,7 @@ const runReminderSweep = async (source: string) => {
 export async function GET() {
   try {
     debugScheduleLog('[API] GET /api/schedule');
-    const tableStatus = await ensureFamilyScheduleTable();
+    const tableStatus = await ensureScheduleTableReady();
     if (!tableStatus.ok) {
       if (tableStatus.code === "MISSING_POSTGRES_ENV") {
         return NextResponse.json([]);
@@ -842,24 +643,9 @@ export async function GET() {
     );
 
     const result = await sql`
-      SELECT
-        id,
-        COALESCE(event_date, day) AS event_date,
-        day_index,
-        COALESCE(event_time, time) AS event_time,
-        child,
-        COALESCE(title, text) AS title,
-        zoom_link,
-        COALESCE(event_type, type) AS event_type,
-        COALESCE(is_recurring, is_weekly, FALSE) AS is_recurring,
-        recurring_template_id,
-        COALESCE(completed, FALSE) AS completed,
-        COALESCE(send_notification, TRUE) AS send_notification,
-        COALESCE(require_confirmation, FALSE) AS require_confirmation,
-        COALESCE(needs_ack, require_confirmation, FALSE) AS needs_ack,
-        reminder_lead_minutes
-      FROM family_schedule
-      ORDER BY COALESCE(event_time, time) ASC
+      SELECT id, title, "date", metadata
+      FROM schedule
+      ORDER BY "date" ASC, COALESCE(metadata->>'time', '00:00') ASC
     `;
     debugScheduleLog("DB Action Success:", result.rowCount);
 
@@ -867,32 +653,30 @@ export async function GET() {
     debugScheduleLog("Events found in DB:", rows);
 
     const events = rows.map((row) => {
-      const rawDate = String(row.event_date ?? "").trim();
+      const r = row as { id: string; title: string; date: string; metadata: unknown };
+      const rawDate = String(r.date ?? "").trim();
       const normalizedDate = toIsoDate(rawDate) || rawDate;
-      const rawChild = String(row.child ?? "").trim().toLowerCase();
+      const meta = parseScheduleMetadata(r.metadata);
+      const rawChild = meta.child.trim().toLowerCase();
       const normalizedChild = allowedScheduleChildren.includes(rawChild as (typeof allowedScheduleChildren)[number])
         ? rawChild
         : "amit";
 
       return {
-        id: row.id,
+        id: r.id,
         date: normalizedDate,
-        dayIndex: toDayIndex(normalizedDate, Number.isInteger(Number(row.day_index)) ? Number(row.day_index) : 0),
-        time: row.event_time,
+        dayIndex: toDayIndex(normalizedDate, meta.dayIndex),
+        time: meta.time,
         child: normalizedChild,
-        title: row.title,
-        zoomLink: typeof row.zoom_link === "string" && row.zoom_link.trim()
-          ? row.zoom_link.trim()
-          : undefined,
-        type: row.event_type,
-        isRecurring: parseBooleanValue(row.is_recurring),
-        recurringTemplateId: typeof row.recurring_template_id === "string" && row.recurring_template_id.trim()
-          ? row.recurring_template_id.trim()
-          : undefined,
-        completed: parseBooleanValue(row.completed),
-        sendNotification: parseBooleanValue(row.send_notification),
-        requireConfirmation: parseBooleanValue(row.needs_ack ?? row.require_confirmation),
-        reminderLeadMinutes: parseReminderLeadMinutes(row.reminder_lead_minutes),
+        title: r.title,
+        zoomLink: meta.zoomLink?.trim() ? meta.zoomLink.trim() : undefined,
+        type: meta.type,
+        isRecurring: meta.isRecurring,
+        recurringTemplateId: meta.recurringTemplateId?.trim() ? meta.recurringTemplateId.trim() : undefined,
+        completed: meta.completed,
+        sendNotification: meta.sendNotification,
+        requireConfirmation: meta.needsAck ?? meta.requireConfirmation,
+        reminderLeadMinutes: parseReminderLeadMinutes(meta.reminderLeadMinutes),
       };
     });
 
@@ -932,7 +716,7 @@ export async function PUT(request: NextRequest) {
 export async function DELETE(request: NextRequest) {
   try {
     console.log('[API] DELETE /api/schedule');
-    const tableStatus = await ensureFamilyScheduleTable();
+    const tableStatus = await ensureScheduleTableReady();
     if (!tableStatus.ok) {
       if (tableStatus.code === "MISSING_POSTGRES_ENV") {
         return NextResponse.json([]);
@@ -974,27 +758,24 @@ export async function DELETE(request: NextRequest) {
     }
 
     if (clearAll) {
-      await sql`DELETE FROM family_schedule`;
+      await sql`DELETE FROM schedule`;
       return NextResponse.json({ ok: true });
     }
 
     if (recurringTemplateId) {
-      // Instance rows use ids like `${templateId}-${weekKey}`; the template id lives in recurring_template_id.
-      // Deleting only by id missed those rows, so tasks reappeared after refetch.
       const removed = await sql`
-        DELETE FROM family_schedule
+        DELETE FROM schedule
         WHERE id = ${recurringTemplateId}
            OR id = ${eventId}
-           OR event_id = ${eventId}
-           OR recurring_template_id = ${recurringTemplateId}
+           OR metadata->>'recurringTemplateId' = ${recurringTemplateId}
         RETURNING id
       `;
       return NextResponse.json({ ok: true, deleted: removed.rowCount ?? removed.rows?.length ?? 0 });
     }
 
     const removed = await sql`
-      DELETE FROM family_schedule
-      WHERE id = ${eventId} OR event_id = ${eventId}
+      DELETE FROM schedule
+      WHERE id = ${eventId}
       RETURNING id
     `;
     return NextResponse.json({ ok: true, deleted: removed.rowCount ?? removed.rows?.length ?? 0 });
@@ -1006,7 +787,7 @@ export async function DELETE(request: NextRequest) {
 
 export async function PATCH(request: NextRequest) {
   try {
-    const tableStatus = await ensureFamilyScheduleTable();
+    const tableStatus = await ensureScheduleTableReady();
     if (!tableStatus.ok) {
       if (tableStatus.code === "MISSING_POSTGRES_ENV") {
         return NextResponse.json({ error: "Missing database configuration" }, { status: 500 });
@@ -1033,23 +814,29 @@ export async function PATCH(request: NextRequest) {
     const confirmedByRaw = typeof body?.confirmedBy === "string" ? body.confirmedBy.trim() : "";
     const nextCompleted = action === "confirm";
 
+    const completedJson = JSON.stringify(nextCompleted);
     const updated = await sql`
-      UPDATE family_schedule
-      SET completed = ${nextCompleted},
-          updated_at = NOW()
+      UPDATE schedule
+      SET metadata = jsonb_set(
+        COALESCE(metadata, '{}'::jsonb),
+        '{completed}',
+        ${completedJson}::jsonb,
+        true
+      )
       WHERE id = ${eventId}
-      RETURNING id, COALESCE(title, text) AS title, child, completed
+      RETURNING id, title, metadata
     `;
 
-    const row = updated.rows[0];
+    const row = updated.rows[0] as { id?: string; title?: string; metadata?: unknown } | undefined;
     if (!row) {
       return NextResponse.json({ error: "Task not found" }, { status: 404 });
     }
 
-    const childKey = String(row.child || "").trim().toLowerCase();
+    const meta = parseScheduleMetadata(row.metadata);
+    const childKey = meta.child.trim().toLowerCase();
     const fallbackConfirmer = childLabelMap[childKey] || "הילד";
     const confirmer = confirmedByRaw || fallbackConfirmer;
-    const taskTitle = String(row.title || "משימה").trim() || "משימה";
+    const taskTitle = String(row?.title || "משימה").trim() || "משימה";
 
     if (nextCompleted) {
       await sendPushToParents({
@@ -1130,7 +917,7 @@ export async function POST(request: NextRequest) {
   console.log('[API] POST /api/schedule');
 
   try {
-    const tableStatus = await ensureFamilyScheduleTable();
+    const tableStatus = await ensureScheduleTableReady();
     if (!tableStatus.ok) {
       if (tableStatus.code === "MISSING_POSTGRES_ENV") {
         return NextResponse.json({ error: "Missing database configuration" }, { status: 500 });
