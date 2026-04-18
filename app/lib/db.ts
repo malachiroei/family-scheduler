@@ -7,12 +7,24 @@ export type DatabaseUrlSource =
   | "DATABASE_URL"
   | "MISSING";
 
-// Resolve connection string (Supabase envs first). Works with Supabase / Neon / any Postgres — not tied to Vercel Postgres.
+/**
+ * Trim and strip one pair of surrounding quotes only. Does not encode — passwords with `!` must
+ * already be percent-encoded in env (e.g. %21) like on Vercel; we never run encodeURIComponent on the URL.
+ */
+const normalizeConnectionString = (raw: string | undefined): string => {
+  let s = (raw ?? "").trim();
+  if (s.length >= 2 && ((s.startsWith('"') && s.endsWith('"')) || (s.startsWith("'") && s.endsWith("'")))) {
+    s = s.slice(1, -1);
+  }
+  return s.trim();
+};
+
+// Resolve connection string (Supabase envs first). Works with Supabase / Neon / any Postgres.
 const resolveDatabaseUrl = (): { url: string; source: DatabaseUrlSource } => {
-  const supabasePostgres = process.env.SUPABASE_POSTGRES_URL?.trim();
-  const supabaseDatabase = process.env.SUPABASE_DATABASE_URL?.trim();
-  const postgresUrl = process.env.POSTGRES_URL?.trim();
-  const databaseUrl = process.env.DATABASE_URL?.trim();
+  const supabasePostgres = normalizeConnectionString(process.env.SUPABASE_POSTGRES_URL);
+  const supabaseDatabase = normalizeConnectionString(process.env.SUPABASE_DATABASE_URL);
+  const postgresUrl = normalizeConnectionString(process.env.POSTGRES_URL);
+  const databaseUrl = normalizeConnectionString(process.env.DATABASE_URL);
 
   if (supabasePostgres) {
     return { url: supabasePostgres, source: "SUPABASE_POSTGRES_URL" };
