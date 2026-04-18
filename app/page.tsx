@@ -503,7 +503,7 @@ const detectChildFromText = (text: string): BaseChildKey | null => {
     return normalizeChildKey(match[1]);
   }
 
-  if (/(בית\s*דני|משחק)/i.test(text)) {
+  if (/בית\s*דני/i.test(text)) {
     return 'amit';
   }
 
@@ -514,20 +514,24 @@ const detectChildFromText = (text: string): BaseChildKey | null => {
   return null;
 };
 
-/** "הלוז הזה הוא של עמית" / "הלוז השבועי של עמית" וכו׳ — שיוך ברירת מחדל לכל השורות בטקסט */
+/** "הלוז הזה הוא של עמית" / "לו״ז של רביד" וכו׳ — שיוך ברירת מחדל לכל השורות בטקסט */
 const detectDefaultChildFromScheduleHeader = (text: string): BaseChildKey | null => {
   const head = text.slice(0, 1200);
   if (
-    /הלוז\s+(?:הזה\s+|השבועי\s+)?(?:הוא\s+)?של\s*עמית|הלוז\s+[^.\n]{0,100}\bשל\s*עמית|לעמית\b|עמית\s+לשבוע|for\s*amit\b/i.test(
+    /הלוז\s+(?:הזה\s+|השבועי\s+)?(?:הוא\s+)?של\s*עמית|הלוז\s+[^.\n]{0,100}\bשל\s*עמית|לעמית\b|עמית\s+לשבוע|לו["׳']?ז\s+של\s*עמית|for\s*amit\b/i.test(
       head,
     )
   ) {
     return 'amit';
   }
-  if (/של\s*אלין|לאלין\b|for\s*alin\b/i.test(head)) {
+  if (/של\s*אלין|לאלין\b|לו["׳']?ז\s+של\s*אלין|for\s*alin\b/i.test(head)) {
     return 'alin';
   }
-  if (/של\s*רביד|לרביד\b|for\s*ravid\b/i.test(head)) {
+  if (
+    /של\s*רביד|לרביד\b|לו["׳']?ז\s+של\s*רביד|לוז\s+של\s*רביד|הלוז\s+של\s*רביד|for\s*ravid\b/i.test(
+      head,
+    )
+  ) {
     return 'ravid';
   }
   return null;
@@ -589,6 +593,10 @@ const insertBulkScheduleLineBreaks = (raw: string): string => {
     /([^\n])\s+(?=(?:ראשון|שני|שלישי|רביעי|חמישי|שישי|שבת)\s+\d{1,2}[:：]\d{2})/g,
     '$1\n',
   );
+  t = t.replace(
+    /([^\n])\s+(?=(?:ראשון|שני|שלישי|רביעי|חמישי|שישי|שבת)\s+\d{3,4}(?:\s|$|[,\u0590-\u05FF]))/g,
+    '$1\n',
+  );
   return t;
 };
 
@@ -614,9 +622,9 @@ const parseComplexWhatsAppMessage = (
     const events: AiEvent[] = [];
     const seen = new Set<string>();
 
-    /** `\b` after Hebrew day names fails in JS (word chars are ASCII-only). English days use `\b`. */
+    /** Times: 18:30, 1830, or "17 עד 1830" (first segment after the weekday is the slot start). */
     const hebrewDayTimePair =
-      /(?:^|\s)(?:יום\s+)?(ראשון|שני|שלישי|רביעי|חמישי|שישי|שבת)\s*[^\d]*(\d{1,2}:\d{2}|\d{3,4})/g;
+      /(?:^|\s)(?:יום\s+)?(ראשון|שני|שלישי|רביעי|חמישי|שישי|שבת)\s*[^\d]*?(\d{1,2}:\d{2}|\d{4}|\d{1,2}(?=\s*(?:עד|עד־|עד-|־|–|—)))/g;
     const englishDayTimePair =
       /(?:^|\s)(Sunday|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday)\s*[^\d]*(\d{1,2}:\d{2}|\d{3,4})/gi;
     const dayToIndex: Record<string, number> = {
@@ -646,6 +654,10 @@ const parseComplexWhatsAppMessage = (
     };
 
     for (const line of lines) {
+      if (/^שבת\s+שלום\b/i.test(line.trim()) || /^שלום\s*$/i.test(line.trim())) {
+        continue;
+      }
+
       if (getDayIndexFromText(line) !== null && !/\d/.test(line) && /יום הזיכרון|יום העצמאות/.test(line)) {
         continue;
       }
@@ -672,11 +684,19 @@ const parseComplexWhatsAppMessage = (
           const mainTime = timeFromPair;
 
           const { type, title: baseTitle } = detectTypeAndTitle(lineFromMatch);
-          const resolvedTitle =
+          let resolvedTitle =
             shuttleTime && shuttleTime !== mainTime
               ? `${baseTitle} — הסעה יוצאת ${shuttleTime}`
               : baseTitle;
-          const child = detectChildFromText(lineFromMatch) || headerChild || detectChildFromText(line) || 'amit';
+          const rangeTimes = extractTimesFromLine(lineFromMatch);
+          if (rangeTimes.length >= 2 && /עד|[-–—]\s*\d/.test(lineFromMatch)) {
+            resolvedTitle = `${resolvedTitle} (${rangeTimes[0]}–${rangeTimes[rangeTimes.length - 1]})`;
+          }
+          const child =
+            headerChild ??
+            detectChildFromText(lineFromMatch) ??
+            detectChildFromText(line) ??
+            'amit';
 
           const targetDate = addDays(targetWeekStart, dayIndex);
           const key = `${dayIndex}|${mainTime}|${resolvedTitle}|${child}`;
@@ -708,12 +728,16 @@ const parseComplexWhatsAppMessage = (
       }
 
       const { type, title: baseTitle } = detectTypeAndTitle(line);
-      const resolvedTitle =
+      let resolvedTitle =
         shuttleTime && mainTime !== shuttleTime
           ? `${baseTitle} — הסעה יוצאת ${shuttleTime}`
           : baseTitle;
+      const rangeTimesB = extractTimesFromLine(line);
+      if (rangeTimesB.length >= 2 && /עד|[-–—]\s*\d/.test(line)) {
+        resolvedTitle = `${resolvedTitle} (${rangeTimesB[0]}–${rangeTimesB[rangeTimesB.length - 1]})`;
+      }
 
-      const child = detectChildFromText(line) || headerChild || 'amit';
+      const child = headerChild ?? detectChildFromText(line) ?? 'amit';
 
       const targetDate = addDays(targetWeekStart, dayIndex);
       const key = `${dayIndex}|${mainTime}|${resolvedTitle}|${child}`;
