@@ -1,0 +1,12 @@
+---
+description: After code changes in this repo, commit and push to origin when the user did not forbid it.
+alwaysApply: true
+---
+
+# Git: push after updates
+
+When you finish implementing or fixing something in this project (non-trivial edits, not a one-line typo the user will commit themselves):
+
+1. If there are unstaged or uncommitted changes that belong to the work, stage them, commit with a short clear message, then run `git push` to `origin` on the current branch (usually `main`).
+2. Do this **without** being asked, unless the user explicitly said not to commit/push or the repo is in a dirty state they are managing (e.g. merge in progress).
+3. If `git push` fails, report the error and suggest next steps; do not claim the push succeeded.
