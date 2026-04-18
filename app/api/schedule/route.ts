@@ -292,7 +292,8 @@ const sanitizeDbEvent = (event: unknown) => {
     ? candidate.type.trim().toLowerCase()
     : (typeof candidate.event_type === "string" ? candidate.event_type.trim().toLowerCase() : "");
 
-  const isRecurring = parseBooleanValue(candidate.isRecurring ?? candidate.is_recurring ?? candidate.is_weekly);
+  /** Do not read `is_weekly` — legacy key can wrongly mark rows as recurring. */
+  const isRecurring = parseBooleanValue(candidate.isRecurring ?? candidate.is_recurring);
   const recurringTemplateId = typeof candidate.recurringTemplateId === "string" && candidate.recurringTemplateId.trim()
     ? candidate.recurringTemplateId.trim()
     : (typeof candidate.recurring_template_id === "string" && candidate.recurring_template_id.trim()

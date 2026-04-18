@@ -869,6 +869,26 @@ const isScheduleEventUpcoming = (event: ScheduleApiEvent, now: Date): boolean =>
   return at.getTime() >= now.getTime();
 };
 
+/** For list UI: whether the scheduled start is before now (ignores `completed`). */
+const isEventStartInPast = (event: ScheduleApiEvent, now: Date): boolean => {
+  if (!event?.date) {
+    return true;
+  }
+  const d = parseEventDateKey(event.date);
+  if (!d) {
+    return true;
+  }
+  const t = normalizeTimeForPicker(event.time);
+  const match = t.match(/^(\d{1,2}):(\d{2})$/);
+  const at = new Date(d.getFullYear(), d.getMonth(), d.getDate());
+  if (match) {
+    at.setHours(Number(match[1]), Number(match[2]), 0, 0);
+  } else {
+    at.setHours(23, 59, 59, 999);
+  }
+  return at.getTime() < now.getTime();
+};
+
 const isJohnnyScheduleTitle = (title: string) => /ג׳וני|ג'וני/i.test(`${title}`);
 
 const createJohnnyEvent = (weekStart: Date, dayIndex: number, base: Omit<SchedulerEvent, 'id'>): SchedulerEvent => ({
@@ -1305,8 +1325,6 @@ export default function FamilyScheduler() {
   const [showUpcomingListModal, setShowUpcomingListModal] = useState(false);
   const [upcomingListLoading, setUpcomingListLoading] = useState(false);
   const [upcomingListEvents, setUpcomingListEvents] = useState<ScheduleApiEvent[]>([]);
-  /** True when API returned rows but all were filtered out (past date/time or completed). */
-  const [upcomingListAllFilteredOut, setUpcomingListAllFilteredOut] = useState(false);
   const [deletePasswordModalOpen, setDeletePasswordModalOpen] = useState(false);
   const [deletePasswordInput, setDeletePasswordInput] = useState('');
   const deletePasswordResolverRef = useRef<((value: string | null) => void) | null>(null);
@@ -2647,6 +2665,8 @@ export default function FamilyScheduler() {
             ...event,
             date: normalizedApiDate,
             dayIndex,
+            isRecurring: Boolean(event.isRecurring),
+            recurringTemplateId: event.isRecurring ? event.recurringTemplateId : undefined,
           },
         }),
       });
@@ -2660,6 +2680,8 @@ export default function FamilyScheduler() {
               ...event,
               date: normalizedApiDate,
               dayIndex,
+              isRecurring: Boolean(event.isRecurring),
+              recurringTemplateId: event.isRecurring ? event.recurringTemplateId : undefined,
             },
           }),
         });
@@ -2940,17 +2962,14 @@ export default function FamilyScheduler() {
         throw new Error(payload?.error || 'טעינת המשימות נכשלה');
       }
       const raw = (Array.isArray(payload?.events) ? payload.events : []) as ScheduleApiEvent[];
-      const now = new Date();
       const next = raw
-        .filter((e) => isScheduleEventUpcoming(e, now))
+        .filter((e) => e.title !== JOHNNY_SUPPRESSED_TITLE)
         .sort(compareScheduleApiEventsByDateTime);
       setUpcomingListEvents(next);
-      setUpcomingListAllFilteredOut(raw.length > 0 && next.length === 0);
     } catch (error) {
       const msg = error instanceof Error ? error.message : 'טעינה נכשלה';
       setApiError(msg);
       setUpcomingListEvents([]);
-      setUpcomingListAllFilteredOut(false);
     } finally {
       setUpcomingListLoading(false);
     }
@@ -3798,7 +3817,7 @@ export default function FamilyScheduler() {
         type="button"
         onClick={() => setShowUpcomingListModal(true)}
         className="fixed top-[5.5rem] left-5 md:left-6 z-40 h-10 w-10 rounded-full bg-indigo-600 text-white shadow-lg hover:bg-indigo-700 transition print:hidden flex items-center justify-center"
-        aria-label="כל המשימות העתידיות"
+        aria-label="כל המשימות מהמסד"
       >
         <ClipboardList size={18} />
       </button>
@@ -3813,7 +3832,7 @@ export default function FamilyScheduler() {
         <span className="text-xs font-bold">רענן</span>
       </button>
       <div className="fixed top-5 left-1/2 -translate-x-1/2 z-40 rounded-full border border-indigo-300 bg-indigo-100 px-3 py-1 text-xs font-extrabold text-indigo-900 shadow-lg print:hidden">
-        גרסה חדשה פעילה • V19
+        גרסה חדשה פעילה • V20
       </div>
 
       <div className="max-w-6xl mx-auto mb-4 pb-4 print:hidden">
@@ -4025,9 +4044,9 @@ export default function FamilyScheduler() {
           <div className="w-full max-w-2xl max-h-[90vh] overflow-hidden flex flex-col bg-white rounded-2xl shadow-2xl border border-slate-200">
             <div className="shrink-0 flex justify-between items-center border-b border-slate-200 px-4 py-3 gap-2">
               <div>
-                <h3 className="text-lg font-bold text-slate-800">כל המשימות העתידיות</h3>
+                <h3 className="text-lg font-bold text-slate-800">כל המשימות (מהמסד)</h3>
                 <p className="text-xs text-slate-500 mt-0.5">
-                  לפי מסד הנתונים — מוצגות רק משימות שעדיין לא התרחשו (תאריך + שעה מעכשיו ואילך). משימות שבוצעו, או מתאריך/שעה שכבר עברו — לא מופיעות.
+                  רשימה מלאה לפי מסד הנתונים — עבר, היום ועתיד, לסידור ומחיקה. ממוין לפי תאריך ושעה.
                 </p>
               </div>
               <div className="flex items-center gap-1">
@@ -4056,27 +4075,24 @@ export default function FamilyScheduler() {
                   <span className="text-sm font-semibold">טוען...</span>
                 </div>
               ) : upcomingListEvents.length === 0 ? (
-                <div className="text-center py-10 px-2 space-y-3">
-                  <p className="text-slate-600 text-sm font-semibold">אין משימות עתידיות להצגה.</p>
-                  {upcomingListAllFilteredOut ? (
-                    <p className="text-xs text-slate-500 max-w-md mx-auto leading-relaxed">
-                      במסד יש משימות, אבל כולן כבר עברו לפי תאריך ושעה (למשל יום מוקדם יותר בשבוע שכבר חלף), או מסומנות כבוצעו. בלוח השבועי עדיין אפשר לראות אותן אם עוברים לשבוע הרלוונטי.
-                    </p>
-                  ) : (
-                    <p className="text-xs text-slate-400 max-w-md mx-auto">
-                      כשתוסיפי משימות חדשות עם תאריך ושעה עתידיים — הן יופיעו כאן.
-                    </p>
-                  )}
-                </div>
+                <p className="text-center text-slate-500 py-12 text-sm">אין משימות במסד (או שהרשימה ריקה).</p>
               ) : (
                 <ul className="space-y-2">
                   {upcomingListEvents.map((ev) => {
                     const childKey = normalizeChildKey(String(ev.child));
                     const childName = childKey ? baseChildrenConfig[childKey].name : String(ev.child);
+                    const now = new Date();
+                    const past = isEventStartInPast(ev, now);
                     return (
                       <li
                         key={ev.id}
-                        className="flex items-start gap-2 rounded-xl border border-slate-200 bg-slate-50/80 p-3 text-right"
+                        className={`flex items-start gap-2 rounded-xl border p-3 text-right ${
+                          ev.completed
+                            ? 'border-slate-200 bg-slate-100/90 opacity-80'
+                            : past
+                              ? 'border-slate-200 bg-slate-50/80'
+                              : 'border-emerald-200 bg-emerald-50/40'
+                        }`}
                       >
                         <button
                           type="button"
@@ -4091,6 +4107,15 @@ export default function FamilyScheduler() {
                         <div className="flex-1 min-w-0">
                           <div className="flex flex-wrap items-center gap-2 justify-end">
                             <span className="text-sm font-extrabold text-slate-900 break-words">{ev.title}</span>
+                            {ev.completed && (
+                              <span className="text-[10px] font-bold px-2 py-0.5 rounded-full border border-emerald-200 bg-emerald-50 text-emerald-800">בוצע</span>
+                            )}
+                            {!ev.completed && past && (
+                              <span className="text-[10px] font-bold px-2 py-0.5 rounded-full border border-slate-300 bg-white text-slate-600">עבר</span>
+                            )}
+                            {!ev.completed && !past && (
+                              <span className="text-[10px] font-bold px-2 py-0.5 rounded-full border border-emerald-200 bg-white text-emerald-800">עתידי</span>
+                            )}
                             {ev.isRecurring && (
                               <span className="text-[10px] font-bold px-2 py-0.5 rounded-full border border-blue-200 bg-blue-50 text-blue-800">קבוע</span>
                             )}

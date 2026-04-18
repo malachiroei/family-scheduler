@@ -45,10 +45,9 @@ export const parseScheduleMetadata = (raw: unknown): ScheduleEventMetadata => {
   const dayIndex = Number(o.dayIndex ?? o.day_index);
   const reminderRaw = o.reminderLeadMinutes ?? o.reminder_lead_minutes;
   const reminderNum = Number(reminderRaw);
+  /** Ignore `is_weekly` in JSON — legacy / push payloads may set it incorrectly. */
   const isRecurring =
-    parseMetadataBoolean(o.isRecurring) ||
-    parseMetadataBoolean(o.is_recurring) ||
-    parseMetadataBoolean(o.is_weekly);
+    parseMetadataBoolean(o.isRecurring) || parseMetadataBoolean(o.is_recurring);
   const recurringTemplateIdRaw =
     typeof o.recurringTemplateId === "string" && o.recurringTemplateId.trim()
       ? o.recurringTemplateId.trim()
