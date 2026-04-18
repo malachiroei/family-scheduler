@@ -701,9 +701,16 @@ const detectChildFromText = (text: string): BaseChildKey | null => {
   return null;
 };
 
+/** מרכאות/גרשיים עבריים (U+05F4) ומירכאות "חכמות" — בלי זה `לו״ז` מהמקלדת לא נתפס כ-`לו"ז`. */
+const normalizeScheduleHeaderQuotes = (s: string) =>
+  s
+    .replace(/\u05F4/g, '"')
+    .replace(/\u05F3/g, "'")
+    .replace(/[\u201C\u201D\u201E\u2033\u00AB\u00BB]/g, '"');
+
 /** "הלוז הזה הוא של עמית" / "לו״ז של רביד" וכו׳ — שיוך ברירת מחדל לכל השורות בטקסט */
 const detectDefaultChildFromScheduleHeader = (text: string): BaseChildKey | null => {
-  const head = text.slice(0, 1200);
+  const head = normalizeScheduleHeaderQuotes(text.slice(0, 1200));
   if (
     /הלוז\s+(?:הזה\s+|השבועי\s+)?(?:הוא\s+)?של\s*עמית|הלוז\s+[^.\n]{0,100}\bשל\s*עמית|לעמית\b|עמית\s+לשבוע|לו["׳']?ז\s+של\s*עמית|לו["׳']?ז\s+עמית\b|לוז\s+עמית\b|for\s*amit\b/i.test(
       head,
