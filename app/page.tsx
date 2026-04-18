@@ -469,6 +469,14 @@ const detectTypeAndTitle = (text: string): { type: EventType; title: string } =>
   if (/אימון/.test(text)) {
     return { type: 'gym', title: 'אימון' };
   }
+  /** כדורסל/אולם בלי "משחק" מפורש = אימון; אחרת כל שורת זמנים הייתה נופלת ל"משחק". */
+  if (
+    /(אולם|מגרש|כדורסל)/.test(text) &&
+    !/(משחק|צפייה|בוגרות|משחקי)/.test(text) &&
+    !/(שיעור|תגבור|אנגלית)/.test(text)
+  ) {
+    return { type: 'gym', title: 'אימון כדורסל' };
+  }
   if (/(משחק|ספורט|כדורסל)/.test(text)) {
     return { type: 'sport', title: /משחק/.test(text) ? 'משחק' : 'משחק/ספורט' };
   }
@@ -480,9 +488,6 @@ const detectTypeAndTitle = (text: string): { type: EventType; title: string } =>
   }
   if (/(כלב|ג׳וני|ג'וני)/.test(text)) {
     return { type: 'dog', title: 'הורדת ג׳וני' };
-  }
-  if (/(אולם|מגרש|כדורסל|אימון\s*כדורסל)/.test(text) && !/(שיעור|תגבור|אנגלית)/.test(text)) {
-    return { type: 'gym', title: 'אימון כדורסל' };
   }
   return { type: 'lesson', title: 'פעילות' };
 };
@@ -498,7 +503,7 @@ const isGenericPailutTitle = (title: string) => {
   return /^פעילות\s*[\(（]/u.test(t);
 };
 
-/** "פעילות" גנרית → משחק (רמז למשחק בטקסט המלא) או אימון כדורסל. */
+/** "פעילות" גנרית — רמזים מאותה שורה בלבד; לא מהלוז המלא (מילת "משחק" משורה אחרת הייתה מזהמת הכל). */
 const upgradeGenericBulkTitle = (
   title: string,
   type: EventType,
@@ -508,6 +513,7 @@ const upgradeGenericBulkTitle = (
   if (!isGenericPailutTitle(title)) {
     return { title, type };
   }
+  const lineCtx = `${contextLine}\n${title}`;
   const broadCtx = `${scheduleFullText}\n${contextLine}\n${title}`;
   if (
     /(שיעור|אנגלית|תגבור|מבחן|Karl|Rachel|מורה|ריקוד|מוזיק|התור של ג|ג׳וני|ג'וני)/i.test(
@@ -516,7 +522,7 @@ const upgradeGenericBulkTitle = (
   ) {
     return { title, type };
   }
-  if (/(משחק|בוגרות|משחקי|צפייה|מגרש|ספורט)/i.test(broadCtx)) {
+  if (/(משחק|בוגרות|משחקי|צפייה)/i.test(lineCtx)) {
     return {
       title: title.replace(/^([\s\u200e\u200f]*)פעילות/u, '$1משחק'),
       type: 'sport',
@@ -754,6 +760,23 @@ const inferScheduleHeaderChild = (text: string): BaseChildKey | null => {
       }
     }
   }
+  /** שורת פתיחה חופשית: "רביד לשבוע", "לרביד לשבוע", לו"ז … רביד באותה שורה וכו'. */
+  if (
+    /(?:לו\s*["׳'\u05F3\u05F4]?\s*ז|לוז)\s+[^\n]{0,48}\bרביד\b/i.test(head) ||
+    /\bלרביד\s+לשבוע/i.test(head) ||
+    /\bרביד\s+לשבוע/i.test(head)
+  ) {
+    return 'ravid';
+  }
+  if (
+    /(?:לו\s*["׳'\u05F3\u05F4]?\s*ז|לוז)\s+[^\n]{0,48}\bעמית\b/i.test(head) ||
+    /\bעמית\s+לשבוע/i.test(head)
+  ) {
+    return 'amit';
+  }
+  if (/(?:לו\s*["׳'\u05F3\u05F4]?\s*ז|לוז)\s+[^\n]{0,48}\bאלין\b/i.test(head) || /\bאלין\s+לשבוע/i.test(head)) {
+    return 'alin';
+  }
   return null;
 };
 
@@ -769,6 +792,9 @@ const minutesFromClock = (value: string) => {
   const [hours, minutes] = normalized.split(':').map(Number);
   return hours * 60 + minutes;
 };
+
+const sortTimesChronologically = (times: string[]): string[] =>
+  [...times].sort((a, b) => minutesFromClock(a) - minutesFromClock(b));
 
 const compareScheduleApiEventsByDateTime = (a: ScheduleApiEvent, b: ScheduleApiEvent) => {
   const da = parseEventDateKey(a.date);
@@ -929,7 +955,7 @@ const parseComplexWhatsAppMessage = (
             shuttleTime && shuttleTime !== mainTime
               ? `${resolvedTitle} — הסעה יוצאת ${shuttleTime}`
               : resolvedTitle;
-          const rangeTimes = extractTimesFromLine(lineFromMatch);
+          const rangeTimes = sortTimesChronologically(extractTimesFromLine(lineFromMatch));
           if (rangeTimes.length >= 2 && /עד|[-–—]\s*\d/.test(lineFromMatch)) {
             resolvedTitle = `${resolvedTitle} (${rangeTimes[0]}–${rangeTimes[rangeTimes.length - 1]})`;
           }
@@ -978,7 +1004,7 @@ const parseComplexWhatsAppMessage = (
         shuttleTime && mainTime !== shuttleTime
           ? `${resolvedTitle} — הסעה יוצאת ${shuttleTime}`
           : resolvedTitle;
-      const rangeTimesB = extractTimesFromLine(line);
+      const rangeTimesB = sortTimesChronologically(extractTimesFromLine(line));
       if (rangeTimesB.length >= 2 && /עד|[-–—]\s*\d/.test(line)) {
         resolvedTitle = `${resolvedTitle} (${rangeTimesB[0]}–${rangeTimesB[rangeTimesB.length - 1]})`;
       }
