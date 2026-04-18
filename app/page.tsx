@@ -417,8 +417,9 @@ const detectTypeAndTitle = (text: string): { type: EventType; title: string } =>
   if (/אימון\s*מצוינות/.test(text)) {
     return { type: 'אימון מצוינות', title: 'אימון מצוינות' };
   }
+  /** No `\b` after Hebrew — JS word boundaries are ASCII-only. */
   if (
-    /^(?:ראשון|שני|שלישי|רביעי|חמישי|שישי|שבת)\b/.test(text.trim()) &&
+    /^(?:ראשון|שני|שלישי|רביעי|חמישי|שישי|שבת)(?=\s|\d)/.test(text.trim()) &&
     /\d{1,2}:\d{2}/.test(text) &&
     /Thursday|Sunday|Monday|Tuesday|Wednesday|Friday|Saturday/i.test(text) &&
     !/משחק|שיעור|Karl|Rachel|RAVHEL|מורה/i.test(text)
@@ -452,6 +453,13 @@ const getDayIndexFromText = (text: string): number | null => {
     { regex: /(?:^|\s|ב)חמישי(?:\s|$)/, dayIndex: 4 },
     { regex: /(?:^|\s|ב)שישי(?:\s|$)/, dayIndex: 5 },
     { regex: /(?:^|\s|ב)שבת(?:\s|$)/, dayIndex: 6 },
+    { regex: /\bSunday\b/i, dayIndex: 0 },
+    { regex: /\bMonday\b/i, dayIndex: 1 },
+    { regex: /\bTuesday\b/i, dayIndex: 2 },
+    { regex: /\bWednesday\b/i, dayIndex: 3 },
+    { regex: /\bThursday\b/i, dayIndex: 4 },
+    { regex: /\bFriday\b/i, dayIndex: 5 },
+    { regex: /\bSaturday\b/i, dayIndex: 6 },
   ];
 
   for (const item of dayMatchers) {
@@ -592,7 +600,11 @@ const parseComplexWhatsAppMessage = (
     const events: AiEvent[] = [];
     const seen = new Set<string>();
 
-    const pairRegex = /(?:^|\s)(?:יום\s+)?(ראשון|שני|שלישי|רביעי|חמישי|שישי|שבת)\b[^\d]*(\d{1,2}:\d{2}|\d{3,4})/g;
+    /** `\b` after Hebrew day names fails in JS (word chars are ASCII-only). English days use `\b`. */
+    const hebrewDayTimePair =
+      /(?:^|\s)(?:יום\s+)?(ראשון|שני|שלישי|רביעי|חמישי|שישי|שבת)\s*[^\d]*(\d{1,2}:\d{2}|\d{3,4})/g;
+    const englishDayTimePair =
+      /(?:^|\s)(Sunday|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday)\s*[^\d]*(\d{1,2}:\d{2}|\d{3,4})/gi;
     const dayToIndex: Record<string, number> = {
       ראשון: 0,
       שני: 1,
@@ -601,6 +613,22 @@ const parseComplexWhatsAppMessage = (
       חמישי: 4,
       שישי: 5,
       שבת: 6,
+      sunday: 0,
+      monday: 1,
+      tuesday: 2,
+      wednesday: 3,
+      thursday: 4,
+      friday: 5,
+      saturday: 6,
+    };
+
+    const resolveBulkDayIndex = (dayWord: string): number | null => {
+      const w = dayWord.trim();
+      if (Object.prototype.hasOwnProperty.call(dayToIndex, w)) {
+        return dayToIndex[w];
+      }
+      const lower = w.toLowerCase();
+      return Object.prototype.hasOwnProperty.call(dayToIndex, lower) ? dayToIndex[lower] : null;
     };
 
     for (const line of lines) {
@@ -608,11 +636,15 @@ const parseComplexWhatsAppMessage = (
         continue;
       }
 
-      const pairMatches = [...line.matchAll(pairRegex)];
+      const pairMatches = [
+        ...line.matchAll(hebrewDayTimePair),
+        ...line.matchAll(englishDayTimePair),
+      ];
+      let addedFromDayTimePairs = 0;
       if (pairMatches.length > 0) {
         for (const pairMatch of pairMatches) {
           const dayWord = (pairMatch[1] || '').trim();
-          const dayIndex = Object.prototype.hasOwnProperty.call(dayToIndex, dayWord) ? dayToIndex[dayWord] : null;
+          const dayIndex = resolveBulkDayIndex(dayWord);
           const { mainTime, shuttleTime } = pickMainTimeAndShuttle(line);
 
           if (dayIndex === null || !mainTime) {
@@ -641,9 +673,12 @@ const parseComplexWhatsAppMessage = (
             title: resolvedTitle,
             type,
           });
+          addedFromDayTimePairs += 1;
         }
 
-        continue;
+        if (addedFromDayTimePairs > 0) {
+          continue;
+        }
       }
 
       const dayIndex = getDayIndexFromText(line);
@@ -3850,21 +3885,23 @@ export default function FamilyScheduler() {
         )}
         <div className="relative flex items-center justify-center">
         <button
+          type="button"
           onClick={() => shiftWeek(1)}
-          className="absolute right-0 h-9 w-9 rounded-full bg-white border border-slate-200 shadow-sm hover:bg-slate-50 text-slate-700 transition flex items-center justify-center"
+          className="absolute left-0 h-9 w-9 rounded-full bg-white border border-slate-200 shadow-sm hover:bg-slate-50 text-slate-700 transition flex items-center justify-center"
           aria-label="שבוע הבא"
         >
-          <ChevronRight size={18} />
+          <ChevronLeft size={18} />
         </button>
         <div className="w-[80%] rounded-full bg-white border border-slate-200 shadow-sm px-6 py-3 text-center text-slate-800 font-extrabold text-xl tracking-tight">
           {weekRangeLabel}
         </div>
         <button
+          type="button"
           onClick={() => shiftWeek(-1)}
-          className="absolute left-0 h-9 w-9 rounded-full bg-white border border-slate-200 shadow-sm hover:bg-slate-50 text-slate-700 transition flex items-center justify-center"
+          className="absolute right-0 h-9 w-9 rounded-full bg-white border border-slate-200 shadow-sm hover:bg-slate-50 text-slate-700 transition flex items-center justify-center"
           aria-label="שבוע קודם"
         >
-          <ChevronLeft size={18} />
+          <ChevronRight size={18} />
         </button>
         </div>
       </div>
