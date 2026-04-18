@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getDatabaseConfig, sql } from "@/app/lib/db";
+import { parseMetadataBoolean } from "@/app/lib/scheduleTime";
 
 console.log("Current ENV keys:", Object.keys(process.env));
 
@@ -103,10 +104,14 @@ const normalizeWeeksData = (weeksData: unknown) => {
           .filter((event) => isObject(event))
           .map((event) => {
             const eventDate = parseDateCandidate(event.date) ?? fallbackDate;
+            const ev = event as Record<string, unknown>;
+            /** Do not infer recurring from `recurringTemplateId` alone — synthetic instances always carry a template id. */
+            const isRecurring =
+              parseMetadataBoolean(ev.isRecurring) || parseMetadataBoolean(ev.is_recurring);
             return {
               ...event,
               date: toDdMmYyyy(eventDate),
-              isRecurring: Boolean((event as Record<string, unknown>).isRecurring ?? (event as Record<string, unknown>).recurringTemplateId),
+              isRecurring,
             };
           }),
       };

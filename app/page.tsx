@@ -2538,7 +2538,7 @@ export default function FamilyScheduler() {
           .map((e) => e.id),
       );
       const allEvents = allEventsRaw.filter((e) => e.title !== JOHNNY_SUPPRESSED_TITLE);
-      const recurringRows = allEvents.filter((event) => event.isRecurring);
+      const recurringRows = allEvents.filter((event) => event.isRecurring === true);
 
     const templatesMap = new Map<string, RecurringTemplate>();
     recurringRows.forEach((event) => {
@@ -2571,7 +2571,7 @@ export default function FamilyScheduler() {
       }));
 
       allEvents
-      .filter((event) => !event.isRecurring)
+      .filter((event) => event.isRecurring !== true)
       .forEach((event) => {
         let eventDate = parseEventDateKey(event.date);
         const apiDay =
