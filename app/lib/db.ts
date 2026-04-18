@@ -61,6 +61,10 @@ type PgRow = Record<string, unknown>;
 
 let pg: ReturnType<typeof postgres> | null = null;
 
+/** Supabase transaction pooler (port 6543) does not support prepared statements — see Supabase docs. */
+const isSupabaseTransactionPort = (url: string) =>
+  /db\.[^/]+\.supabase\.co:6543\b/i.test(url) || /:6543(\/|\?|$)/.test(url);
+
 function getPostgres() {
   const { url } = resolveDatabaseUrl();
   if (!url) {
@@ -68,11 +72,13 @@ function getPostgres() {
   }
   if (!pg) {
     const needsSsl = !/^postgres(ql)?:\/\/[^@]+@(localhost|127\.0\.0\.1)(:\d+)?\//i.test(url);
+    const transactionPooler = isSupabaseTransactionPort(url);
     pg = postgres(url, {
       max: 1,
       idle_timeout: 20,
       connect_timeout: 30,
       ...(needsSsl ? { ssl: "require" as const } : {}),
+      ...(transactionPooler ? { prepare: false } : {}),
     });
   }
   return pg;
