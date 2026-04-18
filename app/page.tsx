@@ -733,37 +733,26 @@ const detectDefaultChildFromScheduleHeader = (text: string): BaseChildKey | null
 };
 
 /**
- * כש־detectDefaultChildFromScheduleHeader מפספס (רווחים, שורה נפרדת, וריאציות), עדיין לתפוס
- * "לו"ז רביד" בשורות הראשונות — בלי זה כל השורות נופלות לעמית חוץ מהשורה עם "אולם".
+ * גיבוי לזיהוי כותרת לו"ז — חיפוש גמיש בטקסט (בלי ^), תווי כיווניות, מקף בין לו ל-ז.
+ * בלי זה שורות בלי "אולם" נופלות לעמית למרות "לו"ז רביד" בראש.
  */
 const inferScheduleHeaderChild = (text: string): BaseChildKey | null => {
-  const head = normalizeScheduleHeaderQuotes(text.slice(0, 1600));
-  const lines = head.split(/\r?\n/).slice(0, 12);
-  const linePatterns = [
-    /^לו["׳']?ז\s+ל\s*(עמית|רביד|אלין)\b/i,
-    /^לו["׳']?ז\s+(עמית|רביד|אלין)\b/i,
-    /^לוז\s+(עמית|רביד|אלין)\b/i,
+  let head = normalizeScheduleHeaderQuotes(text.slice(0, 2200));
+  head = head.replace(/[\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, '');
+  const patterns = [
+    /לו\s*["׳'\u05F3\u05F4]?\s*ז\s+ל\s*(עמית|רביד|אלין)\b/i,
+    /לו\s*["׳'\u05F3\u05F4]?\s*ז\s+(עמית|רביד|אלין)\b/i,
+    /לוז\s+(עמית|רביד|אלין)\b/i,
+    /לו\s*ז\s+(עמית|רביד|אלין)\b/i,
   ];
-  for (const raw of lines) {
-    const line = raw.trim();
-    if (!line) {
-      continue;
-    }
-    for (const p of linePatterns) {
-      const m = line.match(p);
-      if (m) {
-        const c = normalizeChildKey(m[1]);
-        if (c) {
-          return c;
-        }
+  for (const p of patterns) {
+    const m = head.match(p);
+    if (m) {
+      const c = normalizeChildKey(m[1]);
+      if (c) {
+        return c;
       }
     }
-  }
-  const compact = head.replace(/\s+/g, ' ');
-  const inline = compact.match(/(?:לו["׳']?ז\s+ל\s*|לו["׳']?ז\s+|לוז\s+)(עמית|רביד|אלין)\b/i);
-  if (inline) {
-    const c = normalizeChildKey(inline[1]);
-    return c ?? null;
   }
   return null;
 };
@@ -857,6 +846,7 @@ const parseComplexWhatsAppMessage = (
     rawText: string,
     headerChild: BaseChildKey | null,
   ): { targetWeekStart: Date; events: AiEvent[] } | null => {
+    const effectiveHeaderChild = headerChild ?? inferScheduleHeaderChild(rawText);
     const targetWeekStart = getWeekStart(weekStart);
     const lines = insertBulkScheduleLineBreaks(rawText)
       .split(/\r?\n|•|\u2022|\||;/)
@@ -943,7 +933,7 @@ const parseComplexWhatsAppMessage = (
             resolvedTitle = `${resolvedTitle} (${rangeTimes[0]}–${rangeTimes[rangeTimes.length - 1]})`;
           }
           const child =
-            headerChild ??
+            effectiveHeaderChild ??
             detectChildFromText(lineFromMatch) ??
             detectChildFromText(line) ??
             'amit';
@@ -992,7 +982,7 @@ const parseComplexWhatsAppMessage = (
         resolvedTitle = `${resolvedTitle} (${rangeTimesB[0]}–${rangeTimesB[rangeTimesB.length - 1]})`;
       }
 
-      const child = headerChild ?? detectChildFromText(line) ?? 'amit';
+      const child = effectiveHeaderChild ?? detectChildFromText(line) ?? 'amit';
 
       const targetDate = addDays(targetWeekStart, dayIndex);
       const key = `${dayIndex}|${mainTime}|${resolvedTitle}|${child}`;
@@ -1026,7 +1016,8 @@ const parseComplexWhatsAppMessage = (
   const globalChild =
     detectChildFromText(text) ||
     (/בית\s*דני/.test(text) ? 'amit' : null) ||
-    defaultChildFromHeader;
+    defaultChildFromHeader ||
+    inferScheduleHeaderChild(text);
   const expandedText = text
     .replace(/(ראשון|שני|שלישי|רביעי|חמישי|שישי|שבת)\s*[-:]/g, '\n$1 -')
     .replace(/(?:^|\s)(יום\s+[א-ת"׳']+)\s*[-:]/g, '\n$1 -');
