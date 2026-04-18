@@ -1,6 +1,9 @@
 const CACHE_NAME = 'family-scheduler-v19';
-const API_BASE_URL = 'https://family-scheduler-topaz.vercel.app';
-const apiUrl = (path) => `${API_BASE_URL}${path}`;
+/** Same origin as the registered app (localhost or production) — avoids CORS when SW calls the API. */
+const apiUrl = (path) => {
+  const normalized = path.startsWith('/') ? path : `/${path}`;
+  return new URL(normalized, self.location.origin).href;
+};
 const APP_SHELL_FILES = ['/manifest.json?v=5', '/icon-512.png'];
 const reminderLeadOptions = [5, 10, 15, 30];
 const pushSoundOptions = ['/sounds/standard.mp3', '/sounds/bell.mp3', '/sounds/modern.mp3'];

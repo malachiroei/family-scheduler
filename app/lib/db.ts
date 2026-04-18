@@ -1,5 +1,13 @@
 import { sql } from "@vercel/postgres";
 
+// @vercel/postgres reads POSTGRES_URL only. Sync from DATABASE_URL as soon as this module loads
+// (before any sql`…`), so API routes always see a connection string when .env.local defines DATABASE_URL.
+const dbUrl = process.env.DATABASE_URL?.trim();
+const pgUrl = process.env.POSTGRES_URL?.trim();
+if (dbUrl && !pgUrl) {
+  process.env.POSTGRES_URL = dbUrl;
+}
+
 const resolveDatabaseUrl = () => {
   const postgresUrl = process.env.POSTGRES_URL?.trim();
   const databaseUrl = process.env.DATABASE_URL?.trim();

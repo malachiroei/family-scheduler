@@ -122,11 +122,20 @@ const AI_OCR_SYSTEM_PROMPT = `אתה מנתח צילום מסך של אפליק�
 אם הדוגמאות הללו מופיעות בתמונה, חלץ אותן בדיוק לערכים הללו.
 החזר תמיד מערך אירועים בלבד.`;
 
-const API_BASE_URL = 'https://family-scheduler-topaz.vercel.app';
-const toApiUrl = (path: string) => `${API_BASE_URL}${path}`;
+/**
+ * API calls use the same origin as the app (e.g. /api/schedule on localhost or Vercel) so the browser does not block DELETE/POST with CORS.
+ * Set NEXT_PUBLIC_API_BASE_URL only if the UI is served from a different host than the API.
+ */
+function toApiUrl(path: string): string {
+  const normalized = path.startsWith('/') ? path : `/${path}`;
+  const base = process.env.NEXT_PUBLIC_API_BASE_URL?.trim();
+  if (base) {
+    return `${base.replace(/\/$/, '')}${normalized}`;
+  }
+  return normalized;
+}
 
 const SCHEDULER_STORAGE_KEY = 'family-scheduler-state-v1';
-const SCHEDULER_STATE_ENDPOINT = toApiUrl('/api/state');
 const PRIMARY_GEMINI_MODEL = 'gemini-1.5-flash';
 const FALLBACK_GEMINI_MODEL = 'gemini-1.5-flash';
 
@@ -184,7 +193,7 @@ const pushSoundOptions: Array<{ value: PushSoundPreset; label: string }> = [
 ];
 const defaultPushLeadMinutes: ReminderLeadMinutes = 10;
 const defaultPushSound: PushSoundPreset = '/sounds/standard.mp3';
-const SERVICE_WORKER_URL = `${API_BASE_URL}/sw.js?v=19`;
+const SERVICE_WORKER_URL = toApiUrl('/sw.js?v=19');
 
 const sanitizeReminderLead = (value: unknown): ReminderLeadMinutes => {
   const numeric = Number(value);
@@ -746,6 +755,17 @@ const getEnglishOcrFallbackEvents = (): AiEvent[] => [
   { dayIndex: 2, time: '14:00', child: 'alin', title: 'שיעור יחיד - Rachel', type: 'lesson' },
 ];
 
+const createEmptyWeekDays = (weekStart: Date): DaySchedule[] =>
+  dayNames.map((dayName, idx) => {
+    const date = addDays(weekStart, idx);
+    return {
+      date: toDisplayDate(date),
+      dayName,
+      isoDate: toIsoDate(date),
+      events: [],
+    };
+  });
+
 const normalizePersistedState = (
   payload: PersistedStatePayload | null | undefined,
   fallbackWeekStart: Date
@@ -756,9 +776,9 @@ const normalizePersistedState = (
     : fallbackWeekStart;
 
   const safeTemplates = Array.isArray(payload?.recurringTemplates) ? payload.recurringTemplates : [];
-  const safeWeeksData = payload?.weeksData && typeof payload.weeksData === 'object'
-    ? normalizeWeekEventsWithDate(payload.weeksData)
-    : { [toIsoDate(safeWeekStart)]: createWeekDays(safeWeekStart, false, safeTemplates) };
+  const safeWeeksData = {
+    [toIsoDate(safeWeekStart)]: createEmptyWeekDays(safeWeekStart),
+  };
 
   return {
     weekStart: safeWeekStart,
@@ -770,6 +790,23 @@ const normalizePersistedState = (
 const createEvent = (payload: Omit<SchedulerEvent, 'id'>): SchedulerEvent => ({
   id: generateId(),
   ...payload,
+});
+
+/** Stable id per week + day + time so DB upserts replace the same slot; avoids duplicates after refetch. */
+const johnnyStableEventId = (weekStart: Date, dayIndex: number, time: string): string => {
+  const weekKey = toIsoDate(weekStart);
+  const t = normalizeTimeForPicker(time).replace(':', '');
+  return `johnny-${weekKey}-${dayIndex}-${t}`;
+};
+
+/** Persisted row title so refetch hides built-in Johnny slots after delete (see upsertJohnnyTombstone). */
+const JOHNNY_SUPPRESSED_TITLE = '__JOHNNY_SUPPRESSED__';
+
+const isJohnnyScheduleTitle = (title: string) => /ג׳וני|ג'וני/i.test(`${title}`);
+
+const createJohnnyEvent = (weekStart: Date, dayIndex: number, base: Omit<SchedulerEvent, 'id'>): SchedulerEvent => ({
+  ...createEvent(base),
+  id: johnnyStableEventId(weekStart, dayIndex, base.time),
 });
 
 const statusPillClassName = "text-[10px] font-bold px-2 py-0.5 rounded-full border";
@@ -814,6 +851,14 @@ const getDefaultTitleFromType = (eventType: string) => {
   if (normalized === 'tutoring') return 'תגבור';
   if (normalized === 'other') return 'אחר';
   return eventType.trim();
+};
+
+const formatSchedulePersistenceError = (error: unknown): string => {
+  const msg = error instanceof Error ? error.message : String(error);
+  if (msg.includes('Missing database configuration')) {
+    return 'אין חיבור למסד נתונים. בפיתוח מקומי: צרי קובץ .env.local בשורש הפרויקט והוסיפי POSTGRES_URL= או DATABASE_URL= עם מחרוזת החיבור ל-Postgres (למשל מ-Neon), שמרי את הקובץ והפעילי מחדש את שרת הפיתוח (npm run dev).';
+  }
+  return 'שמירה לשרת נכשלה. נסי שוב.';
 };
 
 const getChildKeys = (key: ChildKey): BaseChildKey[] => {
@@ -990,67 +1035,71 @@ const getSaturdayJohnnyAssignment = (weekStart: Date): { morning: BaseChildKey; 
   return cycle[index];
 };
 
-const buildJohnnyEvents = (weekStart: Date): Array<{ dayIndex: number; event: SchedulerEvent }> => {
+const buildJohnnyEvents = (
+  weekStart: Date,
+  suppressedIds?: Set<string>,
+): Array<{ dayIndex: number; event: SchedulerEvent }> => {
   const saturdayAssignment = getSaturdayJohnnyAssignment(weekStart);
   const dateForDay = (dayIndex: number) => toEventDateKey(addDays(weekStart, dayIndex));
-  return [
+  const slots: Array<{ dayIndex: number; event: SchedulerEvent }> = [
     {
       dayIndex: 0,
-      event: createEvent({ date: dateForDay(0), time: '08:00', child: 'amit', title: 'התור של ג׳וני (בוקר)', type: 'dog', isRecurring: true }),
+      event: createJohnnyEvent(weekStart, 0, { date: dateForDay(0), time: '08:00', child: 'amit', title: 'התור של ג׳וני (בוקר)', type: 'dog', isRecurring: true }),
     },
     {
       dayIndex: 0,
-      event: createEvent({ date: dateForDay(0), time: '13:00', child: 'amit', title: 'התור של ג׳וני (צהריים)', type: 'dog', isRecurring: true }),
+      event: createJohnnyEvent(weekStart, 0, { date: dateForDay(0), time: '13:00', child: 'amit', title: 'התור של ג׳וני (צהריים)', type: 'dog', isRecurring: true }),
     },
     {
       dayIndex: 1,
-      event: createEvent({ date: dateForDay(1), time: '08:00', child: 'alin', title: 'התור של ג׳וני (בוקר)', type: 'dog', isRecurring: true }),
+      event: createJohnnyEvent(weekStart, 1, { date: dateForDay(1), time: '08:00', child: 'alin', title: 'התור של ג׳וני (בוקר)', type: 'dog', isRecurring: true }),
     },
     {
       dayIndex: 1,
-      event: createEvent({ date: dateForDay(1), time: '13:00', child: 'ravid', title: 'התור של ג׳וני (צהריים)', type: 'dog', isRecurring: true }),
+      event: createJohnnyEvent(weekStart, 1, { date: dateForDay(1), time: '13:00', child: 'ravid', title: 'התור של ג׳וני (צהריים)', type: 'dog', isRecurring: true }),
     },
     {
       dayIndex: 2,
-      event: createEvent({ date: dateForDay(2), time: '08:00', child: 'amit', title: 'התור של ג׳וני (בוקר)', type: 'dog', isRecurring: true }),
+      event: createJohnnyEvent(weekStart, 2, { date: dateForDay(2), time: '08:00', child: 'amit', title: 'התור של ג׳וני (בוקר)', type: 'dog', isRecurring: true }),
     },
     {
       dayIndex: 2,
-      event: createEvent({ date: dateForDay(2), time: '13:00', child: 'amit', title: 'התור של ג׳וני (צהריים)', type: 'dog', isRecurring: true }),
+      event: createJohnnyEvent(weekStart, 2, { date: dateForDay(2), time: '13:00', child: 'amit', title: 'התור של ג׳וני (צהריים)', type: 'dog', isRecurring: true }),
     },
     {
       dayIndex: 3,
-      event: createEvent({ date: dateForDay(3), time: '08:00', child: 'alin', title: 'התור של ג׳וני (בוקר)', type: 'dog', isRecurring: true }),
+      event: createJohnnyEvent(weekStart, 3, { date: dateForDay(3), time: '08:00', child: 'alin', title: 'התור של ג׳וני (בוקר)', type: 'dog', isRecurring: true }),
     },
     {
       dayIndex: 3,
-      event: createEvent({ date: dateForDay(3), time: '13:00', child: 'ravid', title: 'התור של ג׳וני (צהריים)', type: 'dog', isRecurring: true }),
+      event: createJohnnyEvent(weekStart, 3, { date: dateForDay(3), time: '13:00', child: 'ravid', title: 'התור של ג׳וני (צהריים)', type: 'dog', isRecurring: true }),
     },
     {
       dayIndex: 4,
-      event: createEvent({ date: dateForDay(4), time: '08:00', child: 'amit', title: 'התור של ג׳וני (בוקר)', type: 'dog', isRecurring: true }),
+      event: createJohnnyEvent(weekStart, 4, { date: dateForDay(4), time: '08:00', child: 'amit', title: 'התור של ג׳וני (בוקר)', type: 'dog', isRecurring: true }),
     },
     {
       dayIndex: 4,
-      event: createEvent({ date: dateForDay(4), time: '13:00', child: 'ravid', title: 'התור של ג׳וני (צהריים)', type: 'dog', isRecurring: true }),
+      event: createJohnnyEvent(weekStart, 4, { date: dateForDay(4), time: '13:00', child: 'ravid', title: 'התור של ג׳וני (צהריים)', type: 'dog', isRecurring: true }),
     },
     {
       dayIndex: 5,
-      event: createEvent({ date: dateForDay(5), time: '08:00', child: 'alin', title: 'התור של ג׳וני (בוקר)', type: 'dog', isRecurring: true }),
+      event: createJohnnyEvent(weekStart, 5, { date: dateForDay(5), time: '08:00', child: 'alin', title: 'התור של ג׳וני (בוקר)', type: 'dog', isRecurring: true }),
     },
     {
       dayIndex: 5,
-      event: createEvent({ date: dateForDay(5), time: '13:00', child: 'ravid', title: 'התור של ג׳וני (צהריים)', type: 'dog', isRecurring: true }),
+      event: createJohnnyEvent(weekStart, 5, { date: dateForDay(5), time: '13:00', child: 'ravid', title: 'התור של ג׳וני (צהריים)', type: 'dog', isRecurring: true }),
     },
     {
       dayIndex: 6,
-      event: createEvent({ date: dateForDay(6), time: '08:00', child: saturdayAssignment.morning, title: 'הורדת ג׳וני (בוקר)', type: 'dog', isRecurring: true }),
+      event: createJohnnyEvent(weekStart, 6, { date: dateForDay(6), time: '08:00', child: saturdayAssignment.morning, title: 'הורדת ג׳וני (בוקר)', type: 'dog', isRecurring: true }),
     },
     {
       dayIndex: 6,
-      event: createEvent({ date: dateForDay(6), time: '13:00', child: saturdayAssignment.afternoon, title: 'הורדת ג׳וני (צהריים)', type: 'dog', isRecurring: true }),
+      event: createJohnnyEvent(weekStart, 6, { date: dateForDay(6), time: '13:00', child: saturdayAssignment.afternoon, title: 'הורדת ג׳וני (צהריים)', type: 'dog', isRecurring: true }),
     },
   ];
+  return slots.filter((item) => !suppressedIds?.has(item.event.id));
 };
 
 const sortEvents = (events: SchedulerEvent[]) => {
@@ -1065,8 +1114,22 @@ const sortEvents = (events: SchedulerEvent[]) => {
   return [...events].sort((a, b) => score(a.time) - score(b.time));
 };
 
-const createWeekDays = (weekStart: Date, includeDemo: boolean, recurringTemplates: RecurringTemplate[]): DaySchedule[] => {
-  const mergedRecurringTemplates = mergeRecurringTemplatesWithDefaults(recurringTemplates);
+type CreateWeekDaysOptions = {
+  /** When true, only use templates from the caller (e.g. DB refetch). Skips merging built-in defaults like remote-learning — otherwise deleted recurring items would reappear after every refresh. */
+  skipDefaultRecurringTemplates?: boolean;
+  /** Slots whose built-in Johnny row was deleted — ids are `johnny-${weekKey}-…` from johnnyStableEventId. */
+  johnnySuppressedIds?: Set<string>;
+};
+
+const createWeekDays = (
+  weekStart: Date,
+  includeDemo: boolean,
+  recurringTemplates: RecurringTemplate[],
+  options?: CreateWeekDaysOptions
+): DaySchedule[] => {
+  const mergedRecurringTemplates = options?.skipDefaultRecurringTemplates
+    ? recurringTemplates
+    : mergeRecurringTemplatesWithDefaults(recurringTemplates);
   const days: DaySchedule[] = dayNames.map((dayName, idx) => {
     const date = addDays(weekStart, idx);
     return {
@@ -1090,7 +1153,7 @@ const createWeekDays = (weekStart: Date, includeDemo: boolean, recurringTemplate
     });
   };
 
-  buildJohnnyEvents(weekStart).forEach(({ dayIndex, event }) => addEvent(dayIndex, event));
+  buildJohnnyEvents(weekStart, options?.johnnySuppressedIds).forEach(({ dayIndex, event }) => addEvent(dayIndex, event));
 
   mergedRecurringTemplates
     .filter((template) => !template.title.includes('ג׳וני') && !template.title.includes("ג'וני"))
@@ -1158,8 +1221,9 @@ export default function FamilyScheduler() {
   const [weekStart, setWeekStart] = useState(initialWeekStart);
   const [recurringTemplates, setRecurringTemplates] = useState<RecurringTemplate[]>([]);
   const [weeksData, setWeeksData] = useState<Record<string, DaySchedule[]>>(() => ({
-    [initialWeekKey]: createWeekDays(initialWeekStart, false, []),
+    [initialWeekKey]: createEmptyWeekDays(initialWeekStart),
   }));
+  const [scheduleLoadedWeekKey, setScheduleLoadedWeekKey] = useState<string | null>(null);
   const [editingEvent, setEditingEvent] = useState<{
     sourceWeekKey: string;
     dayIndex: number;
@@ -1171,6 +1235,9 @@ export default function FamilyScheduler() {
   const [creatingEvent, setCreatingEvent] = useState<NewEventDraft | null>(null);
   const [isChatOpen, setIsChatOpen] = useState(false);
   const [showSettingsModal, setShowSettingsModal] = useState(false);
+  const [deletePasswordModalOpen, setDeletePasswordModalOpen] = useState(false);
+  const [deletePasswordInput, setDeletePasswordInput] = useState('');
+  const deletePasswordResolverRef = useRef<((value: string | null) => void) | null>(null);
   const [pushSupported, setPushSupported] = useState(false);
   const [pushEnabled, setPushEnabled] = useState(false);
   const [pushBusy, setPushBusy] = useState(false);
@@ -1211,6 +1278,7 @@ export default function FamilyScheduler() {
 
   const weekKey = toIsoDate(weekStart);
   const days = weeksData[weekKey] ?? [];
+  const showScheduleLoading = isHydrated && scheduleLoadedWeekKey !== weekKey;
   const activeChildFilter = normalizeChildFilterValue(selectedChildFilter);
   const notificationsApproved = pushEnabled || (typeof Notification !== 'undefined' && Notification.permission === 'granted');
 
@@ -1460,7 +1528,7 @@ export default function FamilyScheduler() {
 
     const hydrateState = async () => {
       try {
-        const response = await fetch(SCHEDULER_STATE_ENDPOINT, { cache: 'no-store' });
+        const response = await fetch(toApiUrl('/api/state'), { cache: 'no-store' });
         if (response.ok) {
           const payload = await response.json() as { state?: PersistedStatePayload };
           if (payload?.state && !cancelled) {
@@ -1490,7 +1558,7 @@ export default function FamilyScheduler() {
           setWeekStart(fallbackWeek);
           setRecurringTemplates([]);
           setWeeksData({
-            [toIsoDate(fallbackWeek)]: createWeekDays(fallbackWeek, false, []),
+            [toIsoDate(fallbackWeek)]: createEmptyWeekDays(fallbackWeek),
           });
         }
       }
@@ -1535,7 +1603,7 @@ export default function FamilyScheduler() {
     }
 
     persistDebounceRef.current = setTimeout(() => {
-      void fetch(SCHEDULER_STATE_ENDPOINT, {
+      void fetch(toApiUrl('/api/state'), {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
@@ -2366,7 +2434,18 @@ export default function FamilyScheduler() {
         throw new Error(payload?.error || 'Failed fetching events');
       }
 
-      const allEvents = (Array.isArray(payload?.events) ? payload.events : []) as ScheduleApiEvent[];
+      const allEventsRaw = (Array.isArray(payload?.events) ? payload.events : []) as ScheduleApiEvent[];
+      const johnnySuppressedIds = new Set(
+        allEventsRaw
+          .filter(
+            (e) =>
+              e.title === JOHNNY_SUPPRESSED_TITLE &&
+              typeof e.id === 'string' &&
+              e.id.startsWith('johnny-'),
+          )
+          .map((e) => e.id),
+      );
+      const allEvents = allEventsRaw.filter((e) => e.title !== JOHNNY_SUPPRESSED_TITLE);
       const recurringRows = allEvents.filter((event) => event.isRecurring);
 
     const templatesMap = new Map<string, RecurringTemplate>();
@@ -2391,7 +2470,13 @@ export default function FamilyScheduler() {
 
       const templates = [...templatesMap.values()];
       const targetWeekKey = toIsoDate(targetWeekStart);
-      const weekDays = createWeekDays(targetWeekStart, false, templates).map((day) => ({ ...day, events: [...day.events] }));
+      const weekDays = createWeekDays(targetWeekStart, false, templates, {
+        skipDefaultRecurringTemplates: true,
+        johnnySuppressedIds,
+      }).map((day) => ({
+        ...day,
+        events: [...day.events],
+      }));
 
       allEvents
       .filter((event) => !event.isRecurring)
@@ -2405,7 +2490,7 @@ export default function FamilyScheduler() {
           return;
         }
         const dayIndex = eventDate.getDay();
-        weekDays[dayIndex].events.push({
+        const mapped: SchedulerEvent = {
           id: event.id,
           date: toEventDateKey(eventDate),
           time: normalizeTimeForPicker(event.time),
@@ -2419,8 +2504,15 @@ export default function FamilyScheduler() {
           sendNotification: event.sendNotification ?? true,
           requireConfirmation: Boolean(event.requireConfirmation),
           reminderLeadMinutes: sanitizeReminderLead(event.reminderLeadMinutes),
-        });
-        weekDays[dayIndex].events = sortEvents(weekDays[dayIndex].events);
+        };
+        const dayEvents = weekDays[dayIndex].events;
+        const existingIdx = dayEvents.findIndex((e) => e.id === mapped.id);
+        if (existingIdx >= 0) {
+          dayEvents[existingIdx] = mapped;
+        } else {
+          dayEvents.push(mapped);
+        }
+        weekDays[dayIndex].events = sortEvents(dayEvents);
       });
 
       setRecurringTemplates(templates);
@@ -2428,6 +2520,8 @@ export default function FamilyScheduler() {
     } catch (error) {
       console.error('[API] GET /api/schedule client failed', error);
       throw error;
+    } finally {
+      setScheduleLoadedWeekKey(toIsoDate(targetWeekStart));
     }
   };
 
@@ -2498,15 +2592,49 @@ export default function FamilyScheduler() {
     }
   };
 
+  const upsertJohnnyTombstone = async (source: SchedulerEvent, targetWeekStart: Date, dayIndex: number) => {
+    const parsedEventDate = parseEventDateKey(source.date);
+    const normalizedApiDate = parsedEventDate
+      ? toIsoDate(parsedEventDate)
+      : toIsoDate(addDays(targetWeekStart, dayIndex));
+    const slotId = johnnyStableEventId(targetWeekStart, dayIndex, source.time);
+    const tombstone: SchedulerEvent = {
+      ...source,
+      id: slotId,
+      title: JOHNNY_SUPPRESSED_TITLE,
+      isRecurring: false,
+      recurringTemplateId: undefined,
+      sendNotification: false,
+    };
+    const response = await fetch(toApiUrl('/api/schedule'), {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        event: {
+          ...tombstone,
+          date: normalizedApiDate,
+          dayIndex,
+        },
+      }),
+    });
+    const payload = await response.json();
+    if (!response.ok) {
+      throw new Error(payload?.error || 'Failed saving Johnny tombstone');
+    }
+    return payload;
+  };
+
   const deleteEventFromDatabase = async (payload: { eventId: string; recurringTemplateId?: string }, deletePassword: string) => {
     try {
-      console.log('[API] DELETE /api/schedule -> start', payload);
+      const eventId = payload.eventId.trim();
+      const recurringTemplateId = payload.recurringTemplateId?.trim();
+      console.log('[API] DELETE /api/schedule -> start', { eventId, recurringTemplateId });
       const query = new URLSearchParams();
-      if (payload.eventId) {
-        query.set('id', payload.eventId);
+      if (eventId) {
+        query.set('id', eventId);
       }
-      if (payload.recurringTemplateId) {
-        query.set('recurringTemplateId', payload.recurringTemplateId);
+      if (recurringTemplateId) {
+        query.set('recurringTemplateId', recurringTemplateId);
       }
 
       const response = await fetch(toApiUrl(`/api/schedule?${query.toString()}`), {
@@ -2548,39 +2676,45 @@ export default function FamilyScheduler() {
   };
 
   const handleSubmit = async (event: SchedulerEvent, dayIndex: number, targetWeekStart: Date) => {
-    console.log('Action triggered:', 'add');
-    setDbSyncStatus({ state: 'saving', message: 'Saving to database...' });
+    console.log('Action triggered:', 'save');
+    setDbSyncStatus({ state: 'saving', message: 'שומר...' });
     try {
       await upsertEventToDatabase(event, dayIndex);
       await refetchEventsFromDatabase(targetWeekStart);
-      try {
-        await mutateSchedule('/api/schedule', targetWeekStart);
-      } catch (error) {
-        console.error('[UI] mutate(/api/schedule) failed', error);
-      }
 
-      setDbSyncStatus({ state: 'saved', message: 'Saved' });
+      setDbSyncStatus({ state: 'saved', message: 'נשמר' });
     } catch (error) {
       console.error('[API] handleSubmit failed', error);
-      setDbSyncStatus({ state: 'error', message: 'Failed' });
+      setDbSyncStatus({ state: 'error', message: 'שמירה נכשלה' });
       throw error;
     }
   };
 
-  const verifyDeletePassword = () => {
-    const entered = window.prompt('הקלידי סיסמה למחיקה');
-    if (entered === null) {
-      return null;
-    }
+  const requestDeletePassword = useCallback((): Promise<string | null> => {
+    return new Promise((resolve) => {
+      deletePasswordResolverRef.current = resolve;
+      setDeletePasswordInput('');
+      setDeletePasswordModalOpen(true);
+    });
+  }, []);
 
-    const trimmed = entered.trim();
-    if (trimmed !== '2101') {
-      setApiError('סיסמה שגויה. המחיקה בוטלה.');
-      return null;
-    }
+  const finishDeletePasswordModal = useCallback((value: string | null) => {
+    const resolve = deletePasswordResolverRef.current;
+    deletePasswordResolverRef.current = null;
+    setDeletePasswordModalOpen(false);
+    setDeletePasswordInput('');
+    resolve?.(value);
+  }, []);
 
-    return trimmed;
-  };
+  const confirmDeletePasswordFromModal = useCallback(() => {
+    const trimmed = deletePasswordInput.trim();
+    if (!trimmed) {
+      setApiError('יש להזין סיסמת מחיקה.');
+      return;
+    }
+    setApiError('');
+    finishDeletePasswordModal(trimmed);
+  }, [deletePasswordInput, finishDeletePasswordModal]);
 
   const verifySettingsResetPassword = () => {
     const entered = window.prompt('הקלידי סיסמה לאיפוס הגדרות');
@@ -2621,39 +2755,80 @@ export default function FamilyScheduler() {
     }
   };
 
-  const handleDelete = async (payload: { eventId: string; recurringTemplateId?: string }, targetWeekStart: Date) => {
+  const handleDelete = async (
+    payload: {
+      eventId: string;
+      recurringTemplateId?: string;
+      sourceEvent?: SchedulerEvent;
+      sourceDayIndex?: number;
+    },
+    targetWeekStart: Date,
+    afterDeleteApi?: () => void,
+  ): Promise<boolean> => {
     console.log('Action triggered:', 'delete');
-    const deletePassword = verifyDeletePassword();
+    const deletePassword = await requestDeletePassword();
     if (!deletePassword) {
-      return;
+      return false;
     }
 
-    setDbSyncStatus({ state: 'saving', message: 'Deleting from database...' });
+    setDbSyncStatus({ state: 'saving', message: 'מוחק...' });
+    const trimmedEventId = payload.eventId.trim();
+    const trimmedTemplateId = payload.recurringTemplateId?.trim();
     try {
-      await deleteEventFromDatabase(payload, deletePassword);
+      await deleteEventFromDatabase(
+        { eventId: trimmedEventId, recurringTemplateId: trimmedTemplateId },
+        deletePassword,
+      );
+
+      const src = payload.sourceEvent;
+      const srcDay = payload.sourceDayIndex;
+      let johnnySlotId: string | null = null;
+      if (src && isJohnnyScheduleTitle(src.title)) {
+        const dayIdx =
+          typeof srcDay === 'number' && srcDay >= 0 && srcDay <= 6
+            ? srcDay
+            : (parseEventDateKey(src.date)?.getDay() ?? 0);
+        johnnySlotId = johnnyStableEventId(targetWeekStart, dayIdx, src.time);
+        await upsertJohnnyTombstone(src, targetWeekStart, dayIdx);
+      }
+
+      afterDeleteApi?.();
 
       const targetWeekKey = toIsoDate(targetWeekStart);
       setWeeksData((prev) => {
-        const weekDays = prev[targetWeekKey] ? prev[targetWeekKey].map((day) => ({ ...day, events: [...day.events] })) : createWeekDays(targetWeekStart, false, recurringTemplates);
+        const tombstoneIds =
+          johnnySlotId ? new Set<string>([johnnySlotId]) : undefined;
+        const weekDays = prev[targetWeekKey]
+          ? prev[targetWeekKey].map((day) => ({ ...day, events: [...day.events] }))
+          : createWeekDays(targetWeekStart, false, recurringTemplates, {
+              skipDefaultRecurringTemplates: true,
+              johnnySuppressedIds: tombstoneIds,
+            });
 
         const nextWeekDays = weekDays.map((day) => ({
           ...day,
           events: day.events.filter((event) => {
-            if (payload.recurringTemplateId) {
-              return event.recurringTemplateId !== payload.recurringTemplateId && event.id !== payload.eventId;
+            if (trimmedTemplateId) {
+              return event.recurringTemplateId !== trimmedTemplateId && event.id !== trimmedEventId;
             }
-            return event.id !== payload.eventId;
+            if (johnnySlotId && (event.id === johnnySlotId || event.id === trimmedEventId)) {
+              return false;
+            }
+            return event.id !== trimmedEventId;
           }),
         }));
 
         return { ...prev, [targetWeekKey]: nextWeekDays };
       });
 
-      await refetchEventsFromDatabase(targetWeekStart);
-      setDbSyncStatus({ state: 'saved', message: 'Deleted' });
+      setDbSyncStatus({ state: 'idle', message: '' });
+      void refetchEventsFromDatabase(targetWeekStart).catch((err) => {
+        console.error('[API] refetch after delete failed', err);
+      });
+      return true;
     } catch (error) {
       console.error('[API] handleDelete failed', error);
-      setDbSyncStatus({ state: 'error', message: 'Failed' });
+      setDbSyncStatus({ state: 'error', message: 'מחיקה נכשלה' });
       throw error;
     }
   };
@@ -3052,7 +3227,7 @@ export default function FamilyScheduler() {
       return;
     }
 
-    const deletePassword = verifyDeletePassword();
+    const deletePassword = await requestDeletePassword();
     if (!deletePassword) {
       return;
     }
@@ -3075,7 +3250,7 @@ export default function FamilyScheduler() {
 
       setRecurringTemplates([]);
       setWeeksData({
-        [weekKey]: createWeekDays(weekStart, false, []),
+        [weekKey]: createWeekDays(weekStart, false, [], { skipDefaultRecurringTemplates: true }),
       });
 
       await refetchEventsFromDatabase(weekStart);
@@ -3083,7 +3258,12 @@ export default function FamilyScheduler() {
     } catch (error) {
       console.error('[API] DELETE /api/schedule clearAll client failed', error);
       setDbSyncStatus({ state: 'error', message: 'Failed' });
-      setApiError('השמירה לבסיס הנתונים נכשלה. נסה שוב.');
+      const msg = error instanceof Error ? error.message : '';
+      if (msg.includes('Invalid delete password')) {
+        setApiError('סיסמת המחיקה שגויה.');
+      } else {
+        setApiError(formatSchedulePersistenceError(error));
+      }
       return;
     }
     setSuccessMessage('הנתונים נוקו. ניתן להתחיל הזנה מחדש ללא הכפילויות הישנות.');
@@ -3124,7 +3304,6 @@ export default function FamilyScheduler() {
 
     setWeekStart(resolvedTargetWeekStart);
     await refetchEventsFromDatabase(resolvedTargetWeekStart);
-    await mutateSchedule('/api/schedule', resolvedTargetWeekStart);
     setDbSyncStatus({ state: 'saved', message: 'Saved' });
   };
 
@@ -3305,8 +3484,8 @@ export default function FamilyScheduler() {
     try {
       console.log('[UI] add submit payload', { targetDayIndex, targetWeekStart: toIsoDate(targetWeekStart), eventToSave });
       await handleSubmit(eventToSave, targetDayIndex, targetWeekStart);
-    } catch {
-      setApiError('שמירת העריכה לבסיס הנתונים נכשלה. נסה שוב.');
+    } catch (error) {
+      setApiError(formatSchedulePersistenceError(error));
       return;
     }
 
@@ -3315,11 +3494,10 @@ export default function FamilyScheduler() {
     if (apiError) {
       setApiError('');
     }
-    await hardRefreshScheduleAfterSuccess(targetWeekStart);
   };
 
   const saveEditedEvent = async () => {
-    console.log('Action triggered:', 'add');
+    console.log('Action triggered:', 'edit');
     if (!editingEvent) {
       console.warn('[UI] edit aborted: editingEvent is missing');
       return;
@@ -3368,8 +3546,8 @@ export default function FamilyScheduler() {
     try {
       console.log('[UI] edit submit payload', { targetDayIndex, targetWeekStart: toIsoDate(targetWeekStart), updatedEvent });
       await handleSubmit(updatedEvent, targetDayIndex, targetWeekStart);
-    } catch {
-      setApiError('ניקוי הנתונים בבסיס הנתונים נכשל. נסה שוב.');
+    } catch (error) {
+      setApiError(formatSchedulePersistenceError(error));
       return;
     }
 
@@ -3378,7 +3556,6 @@ export default function FamilyScheduler() {
     if (apiError) {
       setApiError('');
     }
-    await hardRefreshScheduleAfterSuccess(targetWeekStart);
   };
 
   const undoCompletedEvent = async () => {
@@ -3408,17 +3585,38 @@ export default function FamilyScheduler() {
       return;
     }
 
-    const deletingEventId = editingEvent.data.id;
-    const existingTemplateId = editingEvent.originalRecurringTemplateId;
+    const deletingEventId = editingEvent.data.id.trim();
+    const existingTemplateId = (editingEvent.originalRecurringTemplateId ?? editingEvent.data.recurringTemplateId)?.trim();
+    const selectedDate = new Date(`${editingEvent.selectedDate}T00:00:00`);
+    const deleteTargetWeekStart = Number.isNaN(selectedDate.getTime()) ? weekStart : getWeekStart(selectedDate);
 
     try {
-      await handleDelete({ eventId: deletingEventId, recurringTemplateId: existingTemplateId }, weekStart);
-    } catch {
-      setApiError('מחיקה מבסיס הנתונים נכשלה. נסה שוב.');
+      const deleted = await handleDelete(
+        {
+          eventId: deletingEventId,
+          recurringTemplateId: existingTemplateId,
+          sourceEvent: editingEvent.data,
+          sourceDayIndex: editingEvent.dayIndex,
+        },
+        deleteTargetWeekStart,
+        () => {
+          setEditingEvent(null);
+          setDbSyncStatus({ state: 'idle', message: '' });
+        },
+      );
+      if (!deleted) {
+        return;
+      }
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : '';
+      if (msg.includes('Invalid delete password')) {
+        setApiError('סיסמת המחיקה שגויה.');
+      } else {
+        setApiError('מחיקה מבסיס הנתונים נכשלה. נסה שוב.');
+      }
       return;
     }
 
-    setEditingEvent(null);
     setSuccessMessage('המשימה נמחקה מהלו״ז.');
   };
 
@@ -3502,6 +3700,12 @@ export default function FamilyScheduler() {
         <h2 className="text-base font-bold text-slate-700">לו״ז שבועי</h2>
       </div>
 
+      {showScheduleLoading ? (
+        <div className="max-w-6xl mx-auto py-16 flex flex-col items-center justify-center gap-2 text-slate-600 print:hidden">
+          <RefreshCw size={22} className="animate-spin text-indigo-600" aria-hidden />
+          <span className="text-sm font-semibold">טוען לו״ז מהשרת…</span>
+        </div>
+      ) : (
       <div id="schedule-table" className="printable-schedule max-w-6xl mx-auto grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
         {days.map((day, dayIndex) => {
           const currentCellDate = toEventDateKey(new Date(`${day.isoDate}T00:00:00`));
@@ -3523,15 +3727,16 @@ export default function FamilyScheduler() {
             ref={(element) => {
               dayCardRefs.current[dayIndex] = element;
             }}
-            className="bg-white rounded-3xl shadow-xl overflow-hidden border border-slate-100 ring-1 ring-slate-200 print-day-card"
+            className="bg-white rounded-3xl shadow-xl overflow-hidden border border-slate-100 ring-1 ring-slate-200 print-day-card flex flex-col min-h-[280px]"
           >
-            <div className="bg-[#1e293b] text-white p-4 flex justify-between items-center">
+            <div className="bg-[#1e293b] text-white p-4 flex justify-between items-center shrink-0">
               <span className="font-bold text-lg">{day.dayName}</span>
               <span className="text-sm font-mono opacity-70">{day.date}</span>
             </div>
 
+            <div className="flex flex-col flex-1 min-h-0 print-day-content">
             <div
-              className="p-4 space-y-3 min-h-[220px] print-day-content"
+              className="p-4 space-y-3 min-h-[120px] max-h-[min(70vh,720px)] overflow-y-auto print-day-content"
               onClick={(event) => {
                 if (event.target === event.currentTarget) {
                   openCreateEventModal(dayIndex);
@@ -3626,18 +3831,22 @@ export default function FamilyScheduler() {
                   </div>
                 );
               })}
+            </div>
 
+            <div className="px-4 pb-4 pt-2 shrink-0 border-t border-slate-100 bg-white">
               <button
                 type="button"
                 onClick={() => openCreateEventModal(dayIndex)}
-                className="w-full mt-1 flex items-center justify-center gap-2 text-sm text-slate-600 border border-dashed border-slate-300 rounded-2xl p-2.5 hover:bg-slate-50 transition print:hidden capture-ignore print-edit"
+                className="w-full flex items-center justify-center gap-2 text-sm text-slate-600 border border-dashed border-slate-300 rounded-2xl p-2.5 hover:bg-slate-50 transition print:hidden capture-ignore print-edit"
               >
                 <Plus size={16} /> הוסף משימה
               </button>
             </div>
+            </div>
           </div>
         )})}
       </div>
+      )}
 
       {showSettingsModal && (
         <div className="fixed inset-0 z-50 bg-black/35 backdrop-blur-[1px] flex items-start sm:items-center justify-center p-3 pt-6 print:hidden">
@@ -3652,6 +3861,22 @@ export default function FamilyScheduler() {
               >
                 <X size={18} />
               </button>
+            </div>
+
+            <div className="rounded-xl border border-slate-200 bg-slate-50 p-3 text-sm text-slate-700 space-y-2 leading-relaxed">
+              <div className="font-bold text-slate-800">עריכת הלו״ז</div>
+              <p>
+                <span className="font-semibold text-slate-800">הוספת משימה:</span>{' '}
+                בתחתית כל יום יש כפתור &quot;+ הוסף משימה&quot; (נשאר גלוי גם כשיש הרבה אירועים). אפשר גם ללחוץ על הרקע הריק כשאין אירועים ביום.
+              </p>
+              <p>
+                <span className="font-semibold text-slate-800">מחיקת משימה:</span>{' '}
+                לחיצה על משימה פותחת עריכה — בחרי &quot;מחק משימה&quot; בשורת הפעולות למטה, ואז הזיני את סיסמת המחיקה (ברירת מחדל <span className="font-mono">2101</span>, או הערך של <code className="text-xs bg-white px-1 rounded border border-slate-200">DELETE_PASSWORD</code> בשרת).
+              </p>
+              <p>
+                <span className="font-semibold text-slate-800">שמירה (פיתוח מקומי):</span>{' '}
+                שמירת עריכות דורשת מסד Postgres. הוסיפי בקובץ <code className="text-xs bg-white px-1 rounded border border-slate-200">.env.local</code> בשורש הפרויקט את <code className="text-xs bg-white px-1 rounded border border-slate-200">POSTGRES_URL</code> או <code className="text-xs bg-white px-1 rounded border border-slate-200">DATABASE_URL</code> (מחרוזת מ-Neon / Vercel Postgres), שמרי והפעילי מחדש את <span className="font-mono text-xs">npm run dev</span>.
+              </p>
             </div>
 
             <div className="space-y-1.5">
@@ -4024,6 +4249,12 @@ export default function FamilyScheduler() {
 
             <div className="max-h-[70vh] overflow-y-auto p-5 space-y-4">
 
+            {apiError && (
+              <div className="rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-800 leading-relaxed">
+                {apiError}
+              </div>
+            )}
+
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
               <label className="text-sm text-slate-700 font-medium">
                 תאריך
@@ -4202,6 +4433,12 @@ export default function FamilyScheduler() {
 
             <div className="max-h-[70vh] overflow-y-auto p-5 space-y-4">
 
+            {apiError && (
+              <div className="rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-800 leading-relaxed">
+                {apiError}
+              </div>
+            )}
+
             {editingEvent.data.completed && (
               <div className="rounded-xl border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm font-semibold text-emerald-700">
                 המשימה סומנה כבוצעה — עריכה נעולה עד לביטול אישור.
@@ -4355,36 +4592,92 @@ export default function FamilyScheduler() {
               </button>
             )}
 
-            <button
-              type="button"
-              onClick={() => { void deleteEditedEvent(); }}
-              className="w-full rounded-xl bg-red-600 text-white font-bold py-2.5 hover:bg-red-700 transition"
-            >
-              מחק משימה
-            </button>
-
             </div>
 
-            <div className="sticky bottom-0 z-20 shrink-0 bg-white border-t border-slate-200 px-5 py-3 flex gap-2 justify-end">
+            <div className="sticky bottom-0 z-20 shrink-0 bg-white border-t border-slate-200 px-5 py-3 flex flex-wrap items-center gap-2 justify-between">
               {dbSyncStatus.state !== 'idle' && (
-                <div className={`self-center text-xs font-semibold ${dbSyncStatus.state === 'error' ? 'text-red-600' : dbSyncStatus.state === 'saving' ? 'text-amber-600' : 'text-emerald-600'}`}>
+                <div className={`text-xs font-semibold min-w-0 ${dbSyncStatus.state === 'error' ? 'text-red-600' : dbSyncStatus.state === 'saving' ? 'text-amber-600' : 'text-emerald-600'}`}>
                   {dbSyncStatus.message}
                 </div>
               )}
+              <div className="flex flex-wrap items-center gap-2 ms-auto justify-end">
+                <button
+                  type="button"
+                  onClick={() => { void deleteEditedEvent(); }}
+                  className="px-4 py-2 rounded-xl bg-red-600 text-white font-bold hover:bg-red-700 transition"
+                >
+                  מחק משימה
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setEditingEvent(null)}
+                  className="px-4 py-2 rounded-xl border border-slate-300 text-slate-700 hover:bg-slate-100"
+                >
+                  ביטול
+                </button>
+                <button
+                  type="button"
+                  onClick={() => { void saveEditedEvent(); }}
+                  disabled={Boolean(editingEvent.data.completed)}
+                  className="px-4 py-2 rounded-xl bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-60 disabled:cursor-not-allowed"
+                >
+                  שמירה
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {deletePasswordModalOpen && (
+        <div
+          className="fixed inset-0 z-[70] bg-black/45 backdrop-blur-[1px] flex items-center justify-center p-4 print:hidden"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="delete-password-title"
+          onClick={(e) => {
+            if (e.target === e.currentTarget) {
+              finishDeletePasswordModal(null);
+            }
+          }}
+        >
+          <div className="w-full max-w-sm bg-white rounded-2xl shadow-2xl border border-slate-200 p-5 space-y-4" dir="rtl">
+            <h3 id="delete-password-title" className="text-lg font-bold text-slate-800">סיסמת מחיקה</h3>
+            <p className="text-sm text-slate-600 leading-relaxed">
+              הזיני את סיסמת המחיקה. ברירת המחדל בפיתוח היא <span className="font-mono font-semibold">2101</span> — אם הוגדרה בשרת משתנה <code className="text-xs bg-slate-100 px-1 rounded">DELETE_PASSWORD</code>, השתמשי בה.
+            </p>
+            <input
+              type="password"
+              autoComplete="off"
+              autoFocus
+              value={deletePasswordInput}
+              onChange={(e) => setDeletePasswordInput(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') {
+                  e.preventDefault();
+                  confirmDeletePasswordFromModal();
+                }
+                if (e.key === 'Escape') {
+                  finishDeletePasswordModal(null);
+                }
+              }}
+              className="w-full border border-slate-300 rounded-xl px-3 py-2.5 outline-none focus:border-blue-400 text-slate-900"
+              placeholder="סיסמה"
+            />
+            <div className="flex gap-2 justify-end pt-1">
               <button
                 type="button"
-                onClick={() => setEditingEvent(null)}
+                onClick={() => finishDeletePasswordModal(null)}
                 className="px-4 py-2 rounded-xl border border-slate-300 text-slate-700 hover:bg-slate-100"
               >
                 ביטול
               </button>
               <button
                 type="button"
-                onClick={() => { void saveEditedEvent(); }}
-                disabled={Boolean(editingEvent.data.completed)}
-                className="px-4 py-2 rounded-xl bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-60 disabled:cursor-not-allowed"
+                onClick={confirmDeletePasswordFromModal}
+                className="px-4 py-2 rounded-xl bg-slate-800 text-white hover:bg-slate-700"
               >
-                שמירה
+                אישור
               </button>
             </div>
           </div>

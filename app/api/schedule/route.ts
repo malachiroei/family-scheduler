@@ -830,13 +830,15 @@ export async function GET() {
       return NextResponse.json({ error: tableStatus.error }, { status: 500 });
     }
 
-    try {
-      const reminderResult = await sendUpcomingTaskReminders();
-      debugScheduleLog("Reminder fallback result:", reminderResult);
-      console.log("[API] Reminder fallback result:", reminderResult);
-    } catch (error) {
-      console.error("[API] Reminder fallback failed", error);
-    }
+    // Reminders run on /api/notifications/check (client interval) and cron routes — do not block every schedule read.
+    void sendUpcomingTaskReminders().then(
+      (reminderResult) => {
+        debugScheduleLog("Reminder sweep (async after GET):", reminderResult);
+      },
+      (error) => {
+        console.error("[API] Reminder sweep failed (async after GET)", error);
+      },
+    );
 
     const result = await sql`
       SELECT
@@ -976,19 +978,25 @@ export async function DELETE(request: NextRequest) {
     }
 
     if (recurringTemplateId) {
-      await sql`
+      // Instance rows use ids like `${templateId}-${weekKey}`; the template id lives in recurring_template_id.
+      // Deleting only by id missed those rows, so tasks reappeared after refetch.
+      const removed = await sql`
         DELETE FROM family_schedule
         WHERE id = ${recurringTemplateId}
            OR id = ${eventId}
+           OR event_id = ${eventId}
+           OR recurring_template_id = ${recurringTemplateId}
+        RETURNING id
       `;
-    } else {
-      await sql`
-        DELETE FROM family_schedule
-        WHERE id = ${eventId}
-      `;
+      return NextResponse.json({ ok: true, deleted: removed.rowCount ?? removed.rows?.length ?? 0 });
     }
 
-    return NextResponse.json({ ok: true });
+    const removed = await sql`
+      DELETE FROM family_schedule
+      WHERE id = ${eventId} OR event_id = ${eventId}
+      RETURNING id
+    `;
+    return NextResponse.json({ ok: true, deleted: removed.rowCount ?? removed.rows?.length ?? 0 });
   } catch (error) {
     console.error('[API] DELETE /api/schedule failed', error);
     return Response.json({ error: getErrorMessage(error) }, { status: 500 });
