@@ -235,7 +235,7 @@ const normalizeWeekEventsWithDate = (weeksData: Record<string, DaySchedule[]> | 
             .map((event) => ({
               ...event,
               date: normalizeEventDateKey(event.date, parseEventDateKey(day.isoDate) ?? new Date(`${day.isoDate}T00:00:00`)),
-              isRecurring: event.isRecurring ?? Boolean(event.recurringTemplateId),
+              isRecurring: Boolean(event.isRecurring),
               completed: Boolean(event.completed),
               sendNotification: event.sendNotification ?? true,
               requireConfirmation: Boolean(event.requireConfirmation),
@@ -1212,7 +1212,7 @@ const createWeekDays = (
     days[dayIndex].events.push({
       ...event,
       date: normalizeEventDateKey(event.date, fallbackDate),
-      isRecurring: event.isRecurring ?? Boolean(event.recurringTemplateId),
+      isRecurring: Boolean(event.isRecurring),
       completed: Boolean(event.completed),
       sendNotification: event.sendNotification ?? true,
       requireConfirmation: Boolean(event.requireConfirmation),
@@ -3882,7 +3882,7 @@ export default function FamilyScheduler() {
         {days.map((day, dayIndex) => {
           const currentCellDate = toEventDateKey(new Date(`${day.isoDate}T00:00:00`));
           const visibleEvents = day.events.filter((event) => {
-            const isRecurringEvent = Boolean(event.isRecurring || event.recurringTemplateId);
+            const isRecurringEvent = Boolean(event.isRecurring);
             const matchesChild = activeChildFilter === 'all' || getChildKeys(event.child).includes(activeChildFilter);
             if (!matchesChild) {
               return false;
@@ -3941,7 +3941,7 @@ export default function FamilyScheduler() {
                         dayIndex,
                         selectedDate: day.isoDate,
                         data: { ...event, time: normalizeTimeForPicker(event.time) },
-                        recurringWeekly: Boolean(event.recurringTemplateId),
+                        recurringWeekly: Boolean(event.isRecurring),
                         originalRecurringTemplateId: event.recurringTemplateId,
                       });
                     }}
@@ -3962,7 +3962,7 @@ export default function FamilyScheduler() {
                           {event.requireConfirmation && (
                             <span className={`${statusPillClassName} text-amber-700 bg-amber-50 border-amber-200`}>אישור ילד</span>
                           )}
-                          {(event.isRecurring || event.recurringTemplateId) && (
+                          {event.isRecurring && (
                             <span className={`${statusPillClassName} text-blue-700 bg-blue-50 border-blue-200`}>קבוע</span>
                           )}
                           {event.requireConfirmation && !event.completed && (

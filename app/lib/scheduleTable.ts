@@ -1,5 +1,5 @@
 import { sql } from "@/app/lib/db";
-import { normalizeMetadataTime } from "@/app/lib/scheduleTime";
+import { normalizeMetadataTime, parseMetadataBoolean } from "@/app/lib/scheduleTime";
 
 export type ScheduleEventMetadata = {
   dayIndex: number;
@@ -45,23 +45,42 @@ export const parseScheduleMetadata = (raw: unknown): ScheduleEventMetadata => {
   const dayIndex = Number(o.dayIndex ?? o.day_index);
   const reminderRaw = o.reminderLeadMinutes ?? o.reminder_lead_minutes;
   const reminderNum = Number(reminderRaw);
+  const isRecurring =
+    parseMetadataBoolean(o.isRecurring) ||
+    parseMetadataBoolean(o.is_recurring) ||
+    parseMetadataBoolean(o.is_weekly);
+  const recurringTemplateIdRaw =
+    typeof o.recurringTemplateId === "string" && o.recurringTemplateId.trim()
+      ? o.recurringTemplateId.trim()
+      : typeof o.recurring_template_id === "string" && o.recurring_template_id.trim()
+        ? o.recurring_template_id.trim()
+        : null;
   return {
     dayIndex: Number.isInteger(dayIndex) && dayIndex >= 0 && dayIndex <= 6 ? dayIndex : base.dayIndex,
     time: normalizeMetadataTime(o.time, base.time),
     child: typeof o.child === "string" && o.child.trim() ? o.child.trim().toLowerCase() : base.child,
     type: typeof o.type === "string" && o.type.trim() ? o.type.trim().toLowerCase() : base.type,
     zoomLink: typeof o.zoomLink === "string" ? o.zoomLink : typeof o.zoom_link === "string" ? o.zoom_link : null,
-    isRecurring: Boolean(o.isRecurring ?? o.is_recurring ?? o.is_weekly),
-    recurringTemplateId:
-      typeof o.recurringTemplateId === "string" && o.recurringTemplateId.trim()
-        ? o.recurringTemplateId.trim()
-        : typeof o.recurring_template_id === "string" && o.recurring_template_id.trim()
-          ? o.recurring_template_id.trim()
-          : null,
-    completed: Boolean(o.completed),
-    sendNotification: o.sendNotification === false || o.send_notification === false ? false : true,
-    requireConfirmation: Boolean(o.requireConfirmation ?? o.require_confirmation ?? o.needsAck ?? o.needs_ack),
-    needsAck: Boolean(o.needsAck ?? o.needs_ack ?? o.requireConfirmation ?? o.require_confirmation),
+    isRecurring,
+    recurringTemplateId: isRecurring ? recurringTemplateIdRaw : null,
+    completed: parseMetadataBoolean(o.completed),
+    sendNotification: (() => {
+      const v = o.sendNotification ?? o.send_notification;
+      if (v === undefined) {
+        return true;
+      }
+      return parseMetadataBoolean(v);
+    })(),
+    requireConfirmation:
+      parseMetadataBoolean(o.requireConfirmation) ||
+      parseMetadataBoolean(o.require_confirmation) ||
+      parseMetadataBoolean(o.needsAck) ||
+      parseMetadataBoolean(o.needs_ack),
+    needsAck:
+      parseMetadataBoolean(o.needsAck) ||
+      parseMetadataBoolean(o.needs_ack) ||
+      parseMetadataBoolean(o.requireConfirmation) ||
+      parseMetadataBoolean(o.require_confirmation),
     reminderLeadMinutes:
       reminderRaw === null || reminderRaw === undefined || Number.isNaN(reminderNum)
         ? null
@@ -69,7 +88,7 @@ export const parseScheduleMetadata = (raw: unknown): ScheduleEventMetadata => {
           ? (reminderNum as 5 | 10 | 15 | 30)
           : null,
     userId: typeof o.userId === "string" && o.userId.trim() ? o.userId.trim() : typeof o.user_id === "string" && o.user_id.trim() ? o.user_id.trim() : base.userId,
-    notified: Boolean(o.notified),
+    notified: parseMetadataBoolean(o.notified),
   };
 };
 
@@ -95,7 +114,7 @@ export const buildMetadataFromIncoming = (incoming: {
   type: incoming.type,
   zoomLink: incoming.zoomLink ?? null,
   isRecurring: incoming.isRecurring,
-  recurringTemplateId: incoming.recurringTemplateId ?? null,
+  recurringTemplateId: incoming.isRecurring ? (incoming.recurringTemplateId ?? null) : null,
   completed: incoming.completed,
   sendNotification: incoming.sendNotification,
   requireConfirmation: incoming.requireConfirmation,
