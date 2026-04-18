@@ -616,7 +616,8 @@ const buildScheduleClarification = (
   headerChild: BaseChildKey | null,
   events: AiEvent[],
 ): { questions: string[]; needsWho: boolean; needsWhat: boolean } => {
-  const needsWho = !headerChild && !MENTIONS_CHILD_IN_SCHEDULE_TEXT.test(text);
+  const resolvedHeader = headerChild ?? inferScheduleHeaderChild(text);
+  const needsWho = !resolvedHeader && !MENTIONS_CHILD_IN_SCHEDULE_TEXT.test(text);
   const sportHintInText = /(כדורסל|שחייה|כושר|ריקוד|משחק|אולם|ספורט|בריכה|מצוינות)/i.test(text);
   const needsWhat =
     events.some((e) => isGenericTrainingTitle(e.title || '')) && !sportHintInText;
@@ -730,6 +731,45 @@ const detectDefaultChildFromScheduleHeader = (text: string): BaseChildKey | null
   }
   return null;
 };
+
+/**
+ * כש־detectDefaultChildFromScheduleHeader מפספס (רווחים, שורה נפרדת, וריאציות), עדיין לתפוס
+ * "לו"ז רביד" בשורות הראשונות — בלי זה כל השורות נופלות לעמית חוץ מהשורה עם "אולם".
+ */
+const inferScheduleHeaderChild = (text: string): BaseChildKey | null => {
+  const head = normalizeScheduleHeaderQuotes(text.slice(0, 1600));
+  const lines = head.split(/\r?\n/).slice(0, 12);
+  const linePatterns = [
+    /^לו["׳']?ז\s+ל\s*(עמית|רביד|אלין)\b/i,
+    /^לו["׳']?ז\s+(עמית|רביד|אלין)\b/i,
+    /^לוז\s+(עמית|רביד|אלין)\b/i,
+  ];
+  for (const raw of lines) {
+    const line = raw.trim();
+    if (!line) {
+      continue;
+    }
+    for (const p of linePatterns) {
+      const m = line.match(p);
+      if (m) {
+        const c = normalizeChildKey(m[1]);
+        if (c) {
+          return c;
+        }
+      }
+    }
+  }
+  const compact = head.replace(/\s+/g, ' ');
+  const inline = compact.match(/(?:לו["׳']?ז\s+ל\s*|לו["׳']?ז\s+|לוז\s+)(עמית|רביד|אלין)\b/i);
+  if (inline) {
+    const c = normalizeChildKey(inline[1]);
+    return c ?? null;
+  }
+  return null;
+};
+
+const resolveScheduleHeaderChild = (text: string): BaseChildKey | null =>
+  detectDefaultChildFromScheduleHeader(text) ?? inferScheduleHeaderChild(text);
 
 const minutesFromClock = (value: string) => {
   const normalized = normalizeClock(value);
@@ -3817,7 +3857,7 @@ export default function FamilyScheduler() {
             ev = applyActivityDetailToDraftEvents(ev, activityNote);
           }
           const mergedContext = `${p.baseText}\n${text}`;
-          const effectiveHeader = child ?? detectDefaultChildFromScheduleHeader(p.baseText);
+          const effectiveHeader = child ?? resolveScheduleHeaderChild(p.baseText);
           const clar = buildScheduleClarification(mergedContext, effectiveHeader, ev);
           if (clar.questions.length > 0) {
             setChatClarificationPending({
@@ -3848,7 +3888,7 @@ export default function FamilyScheduler() {
         setChatClarificationPending(null);
       }
 
-      const headerChild = detectDefaultChildFromScheduleHeader(text);
+      const headerChild = resolveScheduleHeaderChild(text);
       const localSchedule = parseComplexWhatsAppMessage(text, weekStart, headerChild);
       if (!imageFile && localSchedule && localSchedule.events.length > 0) {
         const clar = buildScheduleClarification(text, headerChild, localSchedule.events);
