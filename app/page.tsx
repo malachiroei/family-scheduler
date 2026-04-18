@@ -103,23 +103,24 @@ const childOptions: Array<{ key: ChildKey; label: string }> = [
   { key: 'amit_ravid', label: 'עמית ורביד (ביחד)' },
 ];
 
-const AI_OCR_SYSTEM_PROMPT = `אתה מנתח צילום מסך של אפליקציית שיעורים/מערכת שעות.
+const AI_OCR_SYSTEM_PROMPT = `אתה מנתח צילום מסך של אפליקציית שיעורים (למשל "השיעורים שלי") או טקסט לוז WhatsApp.
 חלץ מהתמונה ומהטקסט אירועים בפורמט JSON בלבד (Array).
-אם מופיעים תאריכים כמו 17/02/26 ושעות בטווח (למשל 14:30-14:55), השתמש בשעת ההתחלה.
-אם מופיעים מורים Rachel או Karl, הוסף אותם לכותרת האירוע.
-שיוך ילדים:
-- עמית / Amit / Karl => child: "amit"
-- אלין / Alin / Rachel => child: "alin"
+אם מופיעים תאריכים כמו 20/04/26 או 17/02/26 ושעות בטווח (למשל 15:00–15:25), השתמש בשעת ההתחלה בלבד.
+מורים ושיוך ילדים (חובה לפי שם המורה):
+- Karl / קארל => child: "amit" (עמית)
+- Rachel / רייצ׳ל / RAVHEL / רחל (באנגלית באפליקציה) => child: "alin" (אלין)
 - רביד / Ravid => child: "ravid"
-מיפוי אייקון/סוג חכם:
-- כל פעילות של כדורסל/משחק => type רצוי: "sport"
-- כל פעילות של כושר/אימון (כולל "אימון מצוינות") => type רצוי: "gym"
-- אם מזוהה שם פעילות ספציפי (למשל "אימון מצוינות") אפשר להחזיר type זהה לטקסט הפעילות כדי לאפשר ערך חופשי.
-דוגמות לצילום מסך שיעורי אנגלית שיש להעדיף אם מזוהים:
-- יום ה' (19/02): 14:00 שיעור קבוע עם Karl => dayIndex:4, time:"14:00", title:"שיעור קבוע - Karl", child:"amit", type:"lesson"
-- יום ב' הבא (23/02): 15:00 שיעור קבוע עם Karl => dayIndex:1, time:"15:00", title:"שיעור קבוע - Karl", child:"amit", type:"lesson"
-- יום ג' (24/02): 14:00 שיעור יחיד עם Rachel => dayIndex:2, time:"14:00", title:"שיעור יחיד - Rachel", child:"alin", type:"lesson"
-אם הדוגמאות הללו מופיעות בתמונה, חלץ אותן בדיוק לערכים הללו.
+הוסף את שם המורה לכותרת: לדוגמה "שיעור אנגלית — Karl" או "שיעור קבוע — Rachel".
+מיפוי סוג:
+- שיעורי אנגלית / שיעור קבוע / שיעור יחיד / מבחן רמה => type: "lesson"
+- כל פעילות של כדורסל/משחק => type: "sport"
+- כל פעילות של כושר/אימון => type: "gym"
+טקסט לוז ספורט (WhatsApp): אם יש "משחק" בשעה אחת ו"הסעה" בשעה אחרת — צור אירוע אחד בשעת המשחק והוסף בהערות/כותרת את שעת יציאת ההסעה (למשל "משחק — הסעה 16:45").
+שורות ללא שעה (יום זיכרון, יום עצמאות) — אל תיצור להן אירוע.
+דוגמאות לצילום מסך שיעורי אנגלית:
+- יום ב' 20/04/26 15:00 שיעור קבוע Karl => dayIndex לפי התאריך ביחס לשבוע המוצג, time "15:00", child "amit"
+- יום ג' 21/04/26 15:00 Rachel מבחן רמה => child "alin"
+- יום ה' 23/04/26 14:00 Karl => child "amit"
 החזר תמיד מערך אירועים בלבד.`;
 
 /**
@@ -407,11 +408,19 @@ const detectTypeAndTitle = (text: string): { type: EventType; title: string } =>
   if (/אימון\s*מצוינות/.test(text)) {
     return { type: 'אימון מצוינות', title: 'אימון מצוינות' };
   }
+  if (
+    /^(?:ראשון|שני|שלישי|רביעי|חמישי|שישי|שבת)\b/.test(text.trim()) &&
+    /\d{1,2}:\d{2}/.test(text) &&
+    /Thursday|Sunday|Monday|Tuesday|Wednesday|Friday|Saturday/i.test(text) &&
+    !/משחק|שיעור|Karl|Rachel|RAVHEL|מורה/i.test(text)
+  ) {
+    return { type: 'gym', title: 'אימון' };
+  }
   if (/אימון/.test(text)) {
     return { type: 'gym', title: 'אימון' };
   }
   if (/(משחק|ספורט|כדורסל)/.test(text)) {
-    return { type: 'sport', title: 'משחק/ספורט' };
+    return { type: 'sport', title: /משחק/.test(text) ? 'משחק' : 'משחק/ספורט' };
   }
   if (/ריקוד/.test(text)) {
     return { type: 'dance', title: 'ריקוד' };
@@ -488,6 +497,25 @@ const detectChildFromText = (text: string): BaseChildKey | null => {
   return null;
 };
 
+/** "הלוז הזה הוא של עמית" / "הלוז השבועי של עמית" וכו׳ — שיוך ברירת מחדל לכל השורות בטקסט */
+const detectDefaultChildFromScheduleHeader = (text: string): BaseChildKey | null => {
+  const head = text.slice(0, 1200);
+  if (
+    /הלוז\s+(?:הזה\s+|השבועי\s+)?(?:הוא\s+)?של\s*עמית|הלוז\s+[^.\n]{0,100}\bשל\s*עמית|לעמית\b|עמית\s+לשבוע|for\s*amit\b/i.test(
+      head,
+    )
+  ) {
+    return 'amit';
+  }
+  if (/של\s*אלין|לאלין\b|for\s*alin\b/i.test(head)) {
+    return 'alin';
+  }
+  if (/של\s*רביד|לרביד\b|for\s*ravid\b/i.test(head)) {
+    return 'ravid';
+  }
+  return null;
+};
+
 const minutesFromClock = (value: string) => {
   const normalized = normalizeClock(value);
   if (!normalized) {
@@ -497,19 +525,39 @@ const minutesFromClock = (value: string) => {
   return hours * 60 + minutes;
 };
 
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
+/** שעת אירוע עיקרי לעומת שעת הסעה (שתי שעות באותה שורה — המשחק/אירוע הוא בדרך כלל המאוחרת) */
+const pickMainTimeAndShuttle = (line: string): { mainTime: string | null; shuttleTime: string | null } => {
+  const shuttleMatch = line.match(/(?:הסעה|יציאה|יוצאת|מבית\s*דני)[^.]*?(\d{1,2}:\d{2}|\d{3,4})/);
+  const shuttleTime = shuttleMatch ? normalizeLooseClock(shuttleMatch[1]) : null;
+  const allTimes = extractTimesFromLine(line);
+  if (!allTimes.length) {
+    return { mainTime: null, shuttleTime };
+  }
+  if (allTimes.length === 1) {
+    return { mainTime: allTimes[0]!, shuttleTime };
+  }
+  const withoutShuttle = shuttleTime ? allTimes.filter((t) => t !== shuttleTime) : allTimes;
+  const pool = withoutShuttle.length ? withoutShuttle : allTimes;
+  const mainTime = [...pool].sort((a, b) => minutesFromClock(b) - minutesFromClock(a))[0]!;
+  return { mainTime, shuttleTime };
+};
+
 const parseComplexWhatsAppMessage = (
   text: string,
-  weekStart: Date
+  weekStart: Date,
+  defaultChildFromHeader: BaseChildKey | null = null,
 ): { targetWeekStart: Date; events: AiEvent[] } | null => {
   if (!text.trim()) {
     return null;
   }
 
-  const parseBulkScheduleLines = (rawText: string): { targetWeekStart: Date; events: AiEvent[] } | null => {
+  const parseBulkScheduleLines = (
+    rawText: string,
+    headerChild: BaseChildKey | null,
+  ): { targetWeekStart: Date; events: AiEvent[] } | null => {
     const targetWeekStart = getWeekStart(weekStart);
     const lines = rawText
-      .split(/\r?\n|•|\u2022|\||;|,/)
+      .split(/\r?\n|•|\u2022|\||;/)
       .map((line) => line.trim())
       .filter(Boolean);
 
@@ -527,63 +575,31 @@ const parseComplexWhatsAppMessage = (
       שבת: 6,
     };
 
-    const directPairs = [...rawText.matchAll(pairRegex)];
-    if (directPairs.length >= 1) {
-      directPairs.forEach((match) => {
-        const dayWord = (match[1] || '').trim();
-        const dayIndex = Object.prototype.hasOwnProperty.call(dayToIndex, dayWord) ? dayToIndex[dayWord] : null;
-        const normalizedTime = normalizeLooseClock((match[2] || '').trim());
-        if (dayIndex === null || !normalizedTime) {
-          return;
-        }
-
-        const targetDate = addDays(targetWeekStart, dayIndex);
-        const key = `${dayIndex}|${normalizedTime}|אימון`;
-        if (seen.has(key)) {
-          return;
-        }
-        seen.add(key);
-
-        events.push({
-          dayIndex,
-          date: toIsoDate(targetDate),
-          time: normalizedTime,
-          child: 'amit',
-          title: 'אימון',
-          type: 'gym',
-        });
-      });
-    }
-
-    if (events.length >= 2) {
-      return { targetWeekStart, events };
-    }
-
     for (const line of lines) {
+      if (getDayIndexFromText(line) !== null && !/\d/.test(line) && /יום הזיכרון|יום העצמאות/.test(line)) {
+        continue;
+      }
+
       const pairMatches = [...line.matchAll(pairRegex)];
       if (pairMatches.length > 0) {
         for (const pairMatch of pairMatches) {
           const dayWord = (pairMatch[1] || '').trim();
           const dayIndex = Object.prototype.hasOwnProperty.call(dayToIndex, dayWord) ? dayToIndex[dayWord] : null;
-          const normalizedTime = normalizeLooseClock((pairMatch[2] || '').trim());
+          const { mainTime, shuttleTime } = pickMainTimeAndShuttle(line);
 
-          if (dayIndex === null || !normalizedTime) {
+          if (dayIndex === null || !mainTime) {
             continue;
           }
 
-          const titleTail = line
-            .replace(/(?:^|\s)(?:יום\s+)?(?:ראשון|שני|שלישי|רביעי|חמישי|שישי|שבת)(?:\s|$)/g, ' ')
-            .replace(/\b\d{1,2}:\d{2}\b/g, ' ')
-            .replace(/\b\d{3,4}\b/g, ' ')
-            .replace(/[>\-–—:|,؛;]+/g, ' ')
-            .replace(/\s+/g, ' ')
-            .trim();
-          const resolvedTitle = !titleTail
-            ? 'אימון'
-            : (/^אימון\b/.test(titleTail) ? titleTail : `אימון ${titleTail}`);
+          const { type, title: baseTitle } = detectTypeAndTitle(line);
+          const resolvedTitle =
+            shuttleTime && mainTime !== shuttleTime
+              ? `${baseTitle} — הסעה יוצאת ${shuttleTime}`
+              : baseTitle;
+          const child = detectChildFromText(line) || headerChild || 'amit';
 
           const targetDate = addDays(targetWeekStart, dayIndex);
-          const key = `${dayIndex}|${normalizedTime}|${resolvedTitle}`;
+          const key = `${dayIndex}|${mainTime}|${resolvedTitle}|${child}`;
           if (seen.has(key)) {
             continue;
           }
@@ -592,10 +608,10 @@ const parseComplexWhatsAppMessage = (
           events.push({
             dayIndex,
             date: toIsoDate(targetDate),
-            time: normalizedTime,
-            child: 'amit',
+            time: mainTime,
+            child,
             title: resolvedTitle,
-            type: 'gym',
+            type,
           });
         }
 
@@ -603,24 +619,21 @@ const parseComplexWhatsAppMessage = (
       }
 
       const dayIndex = getDayIndexFromText(line);
-      const normalizedTime = extractTimesFromLine(line)[0] ?? null;
-      if (dayIndex === null || !normalizedTime) {
+      const { mainTime, shuttleTime } = pickMainTimeAndShuttle(line);
+      if (dayIndex === null || !mainTime) {
         continue;
       }
 
-      const titleTail = line
-        .replace(/(?:^|\s)(?:יום\s+)?(?:ראשון|שני|שלישי|רביעי|חמישי|שישי|שבת)(?:\s|$)/g, ' ')
-        .replace(/\b\d{1,2}:\d{2}\b/g, ' ')
-        .replace(/\b\d{3,4}\b/g, ' ')
-        .replace(/[>\-–—:|,؛;]+/g, ' ')
-        .replace(/\s+/g, ' ')
-        .trim();
-      const resolvedTitle = !titleTail
-        ? 'אימון'
-        : (/^אימון\b/.test(titleTail) ? titleTail : `אימון ${titleTail}`);
+      const { type, title: baseTitle } = detectTypeAndTitle(line);
+      const resolvedTitle =
+        shuttleTime && mainTime !== shuttleTime
+          ? `${baseTitle} — הסעה יוצאת ${shuttleTime}`
+          : baseTitle;
+
+      const child = detectChildFromText(line) || headerChild || 'amit';
 
       const targetDate = addDays(targetWeekStart, dayIndex);
-      const key = `${dayIndex}|${normalizedTime}|${resolvedTitle}`;
+      const key = `${dayIndex}|${mainTime}|${resolvedTitle}|${child}`;
       if (seen.has(key)) {
         continue;
       }
@@ -629,32 +642,35 @@ const parseComplexWhatsAppMessage = (
       events.push({
         dayIndex,
         date: toIsoDate(targetDate),
-        time: normalizedTime,
-        child: 'amit',
+        time: mainTime,
+        child,
         title: resolvedTitle,
-        type: 'gym',
+        type,
       });
     }
 
-    if (events.length < 2) {
+    if (events.length < 1) {
       return null;
     }
 
     return { targetWeekStart, events };
   };
 
-  const bulkResult = parseBulkScheduleLines(text);
+  const bulkResult = parseBulkScheduleLines(text, defaultChildFromHeader);
   if (bulkResult) {
     return bulkResult;
   }
 
-  const globalChild = detectChildFromText(text) || (/בית\s*דני/.test(text) ? 'amit' : null);
+  const globalChild =
+    detectChildFromText(text) ||
+    (/בית\s*דני/.test(text) ? 'amit' : null) ||
+    defaultChildFromHeader;
   const expandedText = text
     .replace(/(ראשון|שני|שלישי|רביעי|חמישי|שישי|שבת)\s*[-:]/g, '\n$1 -')
     .replace(/(?:^|\s)(יום\s+[א-ת"׳']+)\s*[-:]/g, '\n$1 -');
 
   const lines = expandedText
-    .split(/\r?\n|•|\u2022|\||;|,/)
+    .split(/\r?\n|•|\u2022|\||;/)
     .map((line) => line.trim())
     .filter(Boolean);
 
@@ -666,6 +682,10 @@ const parseComplexWhatsAppMessage = (
     const hasToday = line.includes('היום');
     const explicitDay = getDayIndexFromText(line);
 
+    if (explicitDay !== null && !/\d/.test(line) && /יום הזיכרון|יום העצמאות/.test(line)) {
+      continue;
+    }
+
     if (hasToday) {
       currentDayIndex = new Date().getDay();
     } else if (explicitDay !== null) {
@@ -676,15 +696,7 @@ const parseComplexWhatsAppMessage = (
       continue;
     }
 
-    const timeMatches = extractTimesFromLine(line);
-    const transportMatch = line.match(/(?:הסעה|יציאה|איסוף|אוספים)\s*(?:ב|בשעה)?\s*(\d{1,2}:\d{2}|\d{3,4}|\d{1,2})/);
-    const transportTime = transportMatch ? normalizeLooseClock(transportMatch[1]) : null;
-
-    const chosenTime =
-      transportTime ||
-      (timeMatches.length > 0
-        ? [...timeMatches].sort((a, b) => minutesFromClock(a) - minutesFromClock(b))[0]
-        : null);
+    const { mainTime: chosenTime, shuttleTime } = pickMainTimeAndShuttle(line);
 
     if (!chosenTime) {
       continue;
@@ -696,7 +708,10 @@ const parseComplexWhatsAppMessage = (
     }
 
     const { type, title } = detectTypeAndTitle(line);
-    const description = transportTime && transportTime !== chosenTime ? `${title} (כולל הסעה ${transportTime})` : title;
+    const description =
+      shuttleTime && shuttleTime !== chosenTime
+        ? `${title} — הסעה יוצאת ${shuttleTime}`
+        : title;
 
     const key = `${currentDayIndex}|${chosenTime}|${inferredChild}|${type}|${description}`;
     if (seen.has(key)) {
@@ -750,9 +765,9 @@ const fileToGenerativePart = async (file: File) => {
 };
 
 const getEnglishOcrFallbackEvents = (): AiEvent[] => [
-  { dayIndex: 4, time: '14:00', child: 'amit', title: 'שיעור קבוע - Karl', type: 'lesson' },
-  { dayIndex: 1, time: '15:00', child: 'amit', title: 'שיעור קבוע - Karl', type: 'lesson' },
-  { dayIndex: 2, time: '14:00', child: 'alin', title: 'שיעור יחיד - Rachel', type: 'lesson' },
+  { dayIndex: 1, time: '15:00', child: 'amit', title: 'שיעור אנגלית — Karl', type: 'lesson' },
+  { dayIndex: 2, time: '15:00', child: 'alin', title: 'שיעור אנגלית — Rachel (מבחן רמה)', type: 'lesson' },
+  { dayIndex: 4, time: '14:00', child: 'amit', title: 'שיעור אנגלית — Karl', type: 'lesson' },
 ];
 
 const createEmptyWeekDays = (weekStart: Date): DaySchedule[] =>
@@ -3326,6 +3341,17 @@ export default function FamilyScheduler() {
         await delay(waitMs);
       }
       lastApiRequestAtRef.current = Date.now();
+
+      const headerChild = detectDefaultChildFromScheduleHeader(text);
+      const localSchedule = parseComplexWhatsAppMessage(text, weekStart, headerChild);
+      if (!imageFile && localSchedule && localSchedule.events.length > 0) {
+        await persistAiEventsToDatabase(localSchedule.events, localSchedule.targetWeekStart);
+        setSuccessMessage('האירועים נוספו מהטקסט (זיהוי מקומי).');
+        setInputText('');
+        setSelectedImage(null);
+        await hardRefreshScheduleAfterSuccess(localSchedule.targetWeekStart);
+        return;
+      }
 
       const imagePart = imageFile ? await fileToGenerativePart(imageFile) : undefined;
       const outgoingText = text || 'נתח את התמונה והוסף אירועים ללו״ז';
