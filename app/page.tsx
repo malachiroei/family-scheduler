@@ -56,6 +56,13 @@ type ChatClarificationPending = {
   targetWeekStart: Date;
 };
 
+/** טיוטה לפני שמירה — אישור משתמש ושינוי שיוך ילד */
+type ScheduleImportPreviewPending = {
+  baseText: string;
+  draftEvents: AiEvent[];
+  targetWeekStart: Date;
+};
+
 type RecurringTemplate = {
   templateId: string;
   dayIndex: number;
@@ -1674,6 +1681,7 @@ export default function FamilyScheduler() {
   const [creatingEvent, setCreatingEvent] = useState<NewEventDraft | null>(null);
   const [isChatOpen, setIsChatOpen] = useState(false);
   const [chatClarificationPending, setChatClarificationPending] = useState<ChatClarificationPending | null>(null);
+  const [scheduleImportPreview, setScheduleImportPreview] = useState<ScheduleImportPreviewPending | null>(null);
   const [showSettingsModal, setShowSettingsModal] = useState(false);
   const [showUpcomingListModal, setShowUpcomingListModal] = useState(false);
   const [upcomingListLoading, setUpcomingListLoading] = useState(false);
@@ -3838,8 +3846,70 @@ export default function FamilyScheduler() {
     return buildLocalBulkImportSummary(persisted, resolvedTargetWeekStart);
   };
 
+  const openScheduleImportPreview = (baseText: string, events: AiEvent[], targetWeekStart: Date) => {
+    const draftEvents = dedupeAiEvents(events.map((e) => normalizeAiEventForImport(e, baseText)));
+    setScheduleImportPreview({ baseText, draftEvents, targetWeekStart });
+    setIsChatOpen(true);
+    setChatClarificationPending(null);
+    setSuccessMessage(
+      'לפני שמירה: בדקי את השיוך לכל ילד. אפשר לשנות בשורות או לשייך את כולן בבת אחת — ואז לחצי «אשר והוסף ללוח».',
+    );
+    setApiError('');
+  };
+
+  const updateSchedulePreviewChild = (index: number, child: BaseChildKey) => {
+    setScheduleImportPreview((prev) => {
+      if (!prev) {
+        return null;
+      }
+      const next = [...prev.draftEvents];
+      next[index] = { ...next[index], child };
+      return { ...prev, draftEvents: next };
+    });
+  };
+
+  const applySchedulePreviewChildToAll = (child: BaseChildKey) => {
+    setScheduleImportPreview((prev) => {
+      if (!prev) {
+        return null;
+      }
+      return {
+        ...prev,
+        draftEvents: prev.draftEvents.map((e) => ({ ...e, child })),
+      };
+    });
+  };
+
+  const confirmScheduleImportPreview = async () => {
+    if (!scheduleImportPreview || isSubmitting) {
+      return;
+    }
+    const { baseText, draftEvents, targetWeekStart } = scheduleImportPreview;
+    setIsSubmitting(true);
+    try {
+      const summary = await persistAiEventsToDatabase(draftEvents, targetWeekStart, baseText);
+      const preview = dedupeAiEvents(draftEvents.map((e) => normalizeAiEventForImport(e, baseText)));
+      const fallbackSummary = buildLocalBulkImportSummary(preview, targetWeekStart);
+      setSuccessMessage(
+        summary ||
+          fallbackSummary ||
+          `נוספו ${preview.length} משימות (זיהוי מקומי). בדקי את הלוח לפרטים.`,
+      );
+      setScheduleImportPreview(null);
+      setInputText('');
+      setSelectedImage(null);
+      await hardRefreshScheduleAfterSuccess(targetWeekStart);
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
   const sendMessageNow = async (text: string, imageFile: File | null) => {
     if ((!text && !imageFile) || isSubmitting || requestInFlightRef.current) {
+      return;
+    }
+    if (scheduleImportPreview && (text.trim() || imageFile)) {
+      setApiError('יש לאשר או לבטל את התצוגה המקדימה לפני שליחה חדשה.');
       return;
     }
 
@@ -3889,18 +3959,9 @@ export default function FamilyScheduler() {
             setInputText('');
             return;
           }
-          const summary = await persistAiEventsToDatabase(ev, p.targetWeekStart, mergedContext);
-          const preview = dedupeAiEvents(ev.map((e) => normalizeAiEventForImport(e, mergedContext)));
-          const fallbackSummary = buildLocalBulkImportSummary(preview, p.targetWeekStart);
-          setSuccessMessage(
-            summary ||
-              fallbackSummary ||
-              `נוספו ${preview.length} משימות (זיהוי מקומי). בדקי את הלוח לפרטים.`,
-          );
-          setChatClarificationPending(null);
+          openScheduleImportPreview(mergedContext, ev, p.targetWeekStart);
           setInputText('');
           setSelectedImage(null);
-          await hardRefreshScheduleAfterSuccess(p.targetWeekStart);
           return;
         }
         setChatClarificationPending(null);
@@ -3922,20 +3983,9 @@ export default function FamilyScheduler() {
           setInputText('');
           return;
         }
-        const summary = await persistAiEventsToDatabase(localSchedule.events, localSchedule.targetWeekStart, text);
-        const preview = dedupeAiEvents(
-          localSchedule.events.map((e) => normalizeAiEventForImport(e, text)),
-        );
-        const fallbackSummary = buildLocalBulkImportSummary(preview, localSchedule.targetWeekStart);
-        setSuccessMessage(
-          summary ||
-            fallbackSummary ||
-            `נוספו ${preview.length} משימות (זיהוי מקומי). בדקי את הלוח לפרטים.`,
-        );
-        setChatClarificationPending(null);
+        openScheduleImportPreview(text, localSchedule.events, localSchedule.targetWeekStart);
         setInputText('');
         setSelectedImage(null);
-        await hardRefreshScheduleAfterSuccess(localSchedule.targetWeekStart);
         return;
       }
 
@@ -3975,18 +4025,23 @@ export default function FamilyScheduler() {
             apiSummary ||
               `נוספו ${apiPreview.length} משימות (שבוע ${toDisplayDate(getWeekStart(targetWeekStart))}–${toDisplayDate(addDays(getWeekStart(targetWeekStart), 6))}). בדקי את הלוח.`,
           );
+          setInputText('');
+          setSelectedImage(null);
+          return;
         } else {
           const targetWs = resolveTargetWeekStartFromEvents(events, weekStart);
-          const summary = await persistAiEventsToDatabase(events, targetWs, outgoingText);
-          const preview = dedupeAiEvents(events.map((e) => normalizeAiEventForImport(e, outgoingText)));
-          const fb = buildLocalBulkImportSummary(preview, targetWs);
-          setSuccessMessage(summary || fb || 'האירועים נוספו בהצלחה ללו״ז.');
+          openScheduleImportPreview(outgoingText, events, targetWs);
+          setInputText('');
+          setSelectedImage(null);
+          return;
         }
       } else {
         if (imageFile) {
           const fallbackEvents = getEnglishOcrFallbackEvents();
-          const fbSummary = await persistAiEventsToDatabase(fallbackEvents, weekStart);
-          setSuccessMessage(fbSummary || 'אירועי האנגלית נוספו מהתמונה.');
+          openScheduleImportPreview('זיהוי מתמונה (ברירת מחדל)', fallbackEvents, weekStart);
+          setInputText('');
+          setSelectedImage(null);
+          return;
         } else {
           setApiError('לא זוהו אירועים חדשים בטקסט. נסה ניסוח מפורט יותר.');
           return;
@@ -4003,12 +4058,14 @@ export default function FamilyScheduler() {
         setApiError('חריגה ממכסת Gemini (429). נסה שוב עוד מעט או כתוב ניסוח קצר וברור.');
       } else if ((message.includes('404') || message.toLowerCase().includes('not found')) && imageFile) {
         const fallbackEvents = getEnglishOcrFallbackEvents();
-        const fbSummary = await persistAiEventsToDatabase(fallbackEvents, weekStart);
-        setSuccessMessage(fbSummary || 'אירועי האנגלית נוספו מהתמונה (fallback למודל נתמך).');
+        openScheduleImportPreview('זיהוי מתמונה (fallback)', fallbackEvents, weekStart);
+        setInputText('');
+        setSelectedImage(null);
       } else if (message.includes('502') && imageFile) {
         const fallbackEvents = getEnglishOcrFallbackEvents();
-        const fbSummary502 = await persistAiEventsToDatabase(fallbackEvents, weekStart);
-        setSuccessMessage(fbSummary502 || 'אירועי האנגלית נוספו מהתמונה (fallback).');
+        openScheduleImportPreview('זיהוי מתמונה (fallback)', fallbackEvents, weekStart);
+        setInputText('');
+        setSelectedImage(null);
       } else {
         setApiError(message);
       }
@@ -4036,6 +4093,7 @@ export default function FamilyScheduler() {
     const file = event.target.files?.[0] || null;
     setSelectedImage(file);
     setChatClarificationPending(null);
+    setScheduleImportPreview(null);
     if (successMessage) {
       setSuccessMessage('');
     }
@@ -4896,6 +4954,7 @@ export default function FamilyScheduler() {
                 onClick={() => {
                   setIsChatOpen(false);
                   setChatClarificationPending(null);
+                  setScheduleImportPreview(null);
                 }}
                 className="rounded-md bg-white/10 hover:bg-white/20 p-1 transition"
                 aria-label="סגור צ׳אט"
@@ -4917,6 +4976,7 @@ export default function FamilyScheduler() {
                     type="button"
                     onClick={() => {
                       setChatClarificationPending(null);
+                      setScheduleImportPreview(null);
                       setSuccessMessage('');
                       setApiError('');
                     }}
@@ -4926,25 +4986,102 @@ export default function FamilyScheduler() {
                   </button>
                 </div>
               )}
+              {scheduleImportPreview && (
+                <div className="mb-2 rounded-xl border border-indigo-200 bg-indigo-50/90 px-3 py-2 text-sm text-slate-900 text-right space-y-2">
+                  <div className="font-semibold text-indigo-950">תצוגה לפני שמירה</div>
+                  <p className="text-xs text-slate-600 leading-snug">
+                    בדקי שיוך ילד לכל שורה. אפשר לתקן בשדה או ללחוץ «כולם» — רק אחרי «אשר והוסף ללוח» הנתונים נשמרים בלוח.
+                  </p>
+                  <div className="flex flex-wrap gap-1 justify-end items-center text-[11px]">
+                    <span className="text-slate-600">שיוך מהיר:</span>
+                    <button
+                      type="button"
+                      onClick={() => applySchedulePreviewChildToAll('ravid')}
+                      className="rounded-md bg-blue-100 px-2 py-0.5 font-medium text-blue-900 hover:bg-blue-200"
+                    >
+                      כולם רביד
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => applySchedulePreviewChildToAll('amit')}
+                      className="rounded-md bg-emerald-100 px-2 py-0.5 font-medium text-emerald-900 hover:bg-emerald-200"
+                    >
+                      כולם עמית
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => applySchedulePreviewChildToAll('alin')}
+                      className="rounded-md bg-pink-100 px-2 py-0.5 font-medium text-pink-900 hover:bg-pink-200"
+                    >
+                      כולם אלין
+                    </button>
+                  </div>
+                  <ul className="max-h-44 overflow-y-auto space-y-1.5 pr-0.5">
+                    {scheduleImportPreview.draftEvents.map((ev, idx) => (
+                      <li
+                        key={`prev-${idx}-${ev.dayIndex}-${ev.time}-${(ev.title || '').slice(0, 12)}`}
+                        className="flex flex-col gap-1 rounded-lg bg-white/90 border border-indigo-100 px-2 py-1.5"
+                      >
+                        <div className="text-[11px] text-slate-600">
+                          {dayNames[ev.dayIndex] ?? `יום ${ev.dayIndex}`} · {normalizeTimeForPicker(ev.time)}
+                        </div>
+                        <div className="text-xs text-slate-800 line-clamp-2">{ev.title || 'פעילות'}</div>
+                        <select
+                          className="w-full rounded-lg border border-slate-200 bg-white px-2 py-1 text-xs"
+                          value={coerceBaseChildKey(String(ev.child))}
+                          onChange={(e) => updateSchedulePreviewChild(idx, e.target.value as BaseChildKey)}
+                        >
+                          <option value="ravid">רביד</option>
+                          <option value="amit">עמית</option>
+                          <option value="alin">אלין</option>
+                        </select>
+                      </li>
+                    ))}
+                  </ul>
+                  <div className="flex gap-2 justify-end pt-1">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setScheduleImportPreview(null);
+                        setSuccessMessage('');
+                        setApiError('');
+                      }}
+                      className="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50"
+                    >
+                      ביטול
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => void confirmScheduleImportPreview()}
+                      disabled={isSubmitting}
+                      className="rounded-lg bg-indigo-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-indigo-700 disabled:opacity-60"
+                    >
+                      {isSubmitting ? 'שומר...' : 'אשר והוסף ללוח'}
+                    </button>
+                  </div>
+                </div>
+              )}
               <div className="relative">
                 <input
                   value={inputText}
-                  disabled={isSubmitting || requestInFlightRef.current}
+                  disabled={isSubmitting || requestInFlightRef.current || !!scheduleImportPreview}
                   onChange={(e) => {
                     setInputText(e.target.value);
                   }}
                   type="text"
                   placeholder={
-                    chatClarificationPending
-                      ? 'השיבי בהבהרה (למשל: רביד, כדורסל)...'
-                      : 'עדכן לו״ז בקול חופשי (למשל: אימון לרביד ביום שלישי ב-16:00)'
+                    scheduleImportPreview
+                      ? 'אשרי או בטלי את הרשימה למעלה לפני הדבקה חדשה'
+                      : chatClarificationPending
+                        ? 'השיבי בהבהרה (למשל: רביד, כדורסל)...'
+                        : 'עדכן לו״ז בקול חופשי (למשל: אימון לרביד ביום שלישי ב-16:00)'
                   }
                   className="w-full pl-14 pr-6 py-4 rounded-2xl border border-slate-200 bg-white shadow-sm focus:border-blue-400 focus:ring-0 outline-none transition-all text-right"
                 />
                 <button
                   type="button"
                   onClick={handleSendMessage}
-                  disabled={isSubmitting || requestInFlightRef.current}
+                  disabled={isSubmitting || requestInFlightRef.current || !!scheduleImportPreview}
                   className="absolute left-2 top-2 bottom-2 bg-blue-600 text-white px-4 rounded-xl hover:bg-blue-700 transition flex items-center gap-2 disabled:opacity-60 disabled:cursor-not-allowed"
                 >
                   <MessageCircle size={20} />
@@ -4959,7 +5096,7 @@ export default function FamilyScheduler() {
                     type="file"
                     accept="image/*"
                     className="hidden"
-                    disabled={isSubmitting || requestInFlightRef.current}
+                    disabled={isSubmitting || requestInFlightRef.current || !!scheduleImportPreview}
                     onChange={handleFileUpload}
                   />
                 </label>
