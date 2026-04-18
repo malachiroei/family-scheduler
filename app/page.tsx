@@ -932,7 +932,7 @@ const getDefaultTitleFromType = (eventType: string) => {
 const formatSchedulePersistenceError = (error: unknown): string => {
   const msg = error instanceof Error ? error.message : String(error);
   if (msg.includes('Missing database configuration')) {
-    return 'אין חיבור למסד נתונים. בפיתוח מקומי: צרי קובץ .env.local בשורש הפרויקט והוסיפי POSTGRES_URL= או DATABASE_URL= עם מחרוזת החיבור ל-Postgres (למשל מ-Neon), שמרי את הקובץ והפעילי מחדש את שרת הפיתוח (npm run dev).';
+    return 'אין חיבור למסד נתונים. בפיתוח מקומי: צרי קובץ .env.local בשורש הפרויקט והוסיפי SUPABASE_POSTGRES_URL או SUPABASE_DATABASE_URL (מומלץ), או POSTGRES_URL / DATABASE_URL, עם מחרוזת החיבור ל-Postgres, שמרי את הקובץ והפעילי מחדש את שרת הפיתוח (npm run dev).';
   }
   return 'שמירה לשרת נכשלה. נסי שוב.';
 };
@@ -4140,7 +4140,7 @@ export default function FamilyScheduler() {
               </p>
               <p>
                 <span className="font-semibold text-slate-800">שמירה (פיתוח מקומי):</span>{' '}
-                שמירת עריכות דורשת מסד Postgres. הוסיפי בקובץ <code className="text-xs bg-white px-1 rounded border border-slate-200">.env.local</code> בשורש הפרויקט את <code className="text-xs bg-white px-1 rounded border border-slate-200">POSTGRES_URL</code> או <code className="text-xs bg-white px-1 rounded border border-slate-200">DATABASE_URL</code> (מחרוזת מ-Neon / Vercel Postgres), שמרי והפעילי מחדש את <span className="font-mono text-xs">npm run dev</span>.
+                שמירת עריכות דורשת מסד Postgres. הוסיפי בקובץ <code className="text-xs bg-white px-1 rounded border border-slate-200">.env.local</code> את <code className="text-xs bg-white px-1 rounded border border-slate-200">SUPABASE_POSTGRES_URL</code> או <code className="text-xs bg-white px-1 rounded border border-slate-200">SUPABASE_DATABASE_URL</code> (עדיפות), או <code className="text-xs bg-white px-1 rounded border border-slate-200">POSTGRES_URL</code> / <code className="text-xs bg-white px-1 rounded border border-slate-200">DATABASE_URL</code>, שמרי והפעילי מחדש את <span className="font-mono text-xs">npm run dev</span>.
               </p>
             </div>
 
