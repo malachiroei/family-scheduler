@@ -310,7 +310,8 @@ const fixedWeekDateByDayIndex: Partial<Record<number, string>> = {
 
 const toIsoDate = (value: string) => {
   const trimmed = value.trim();
-  const yyyyMmDd = trimmed.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  // Postgres / JS may serialize dates as full ISO strings (e.g. 2026-04-20T00:00:00.000Z).
+  const yyyyMmDd = trimmed.match(/^(\d{4})-(\d{2})-(\d{2})/);
   if (yyyyMmDd) {
     return `${yyyyMmDd[1]}-${yyyyMmDd[2]}-${yyyyMmDd[3]}`;
   }

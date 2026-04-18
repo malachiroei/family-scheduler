@@ -305,7 +305,8 @@ const parseEventDateKey = (value: string) => {
     return Number.isNaN(parsed.getTime()) ? null : parsed;
   }
 
-  const yyyyMmDd = trimmed.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  // Match YYYY-MM-DD at start so ISO datetimes from the API/DB (…T00:00:00.000Z) parse correctly.
+  const yyyyMmDd = trimmed.match(/^(\d{4})-(\d{2})-(\d{2})/);
   if (yyyyMmDd) {
     const y = Number(yyyyMmDd[1]);
     const m = Number(yyyyMmDd[2]);
