@@ -183,12 +183,6 @@ const createId = () => (typeof crypto !== "undefined" && typeof crypto.randomUUI
   ? crypto.randomUUID()
   : `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`);
 
-const fixedWeekDateByDayIndex: Partial<Record<number, string>> = {
-  0: "2026-02-22",
-  2: "2026-02-24",
-  4: "2026-02-26",
-};
-
 const toIsoDate = (value: string) => {
   const trimmed = value.trim();
   // Postgres / JS may serialize dates as full ISO strings (e.g. 2026-04-20T00:00:00.000Z).
@@ -205,12 +199,7 @@ const toIsoDate = (value: string) => {
   return "";
 };
 
-const normalizeDateStrict = (rawDate: string, dayIndex: number) => {
-  const fixedDate = fixedWeekDateByDayIndex[dayIndex];
-  if (fixedDate) {
-    return fixedDate;
-  }
-
+const normalizeDateStrict = (rawDate: string, _dayIndex: number) => {
   const isoDate = toIsoDate(rawDate);
   if (isoDate) {
     return isoDate;
@@ -421,7 +410,36 @@ const toDayIndex = (dayValue: string, fallback: number) => {
   return fallback;
 };
 
-const parseBulkEventsFromText = (text: string) => {
+/** Calendar date for dayIndex (0=Sun..6=Sat) within the week that starts on weekStartYyyyMmDd (Sunday). */
+const dateForWeekDay = (weekStartYyyyMmDd: string, dayIndex: number): string | null => {
+  const iso = toIsoDate(weekStartYyyyMmDd);
+  if (!iso || dayIndex < 0 || dayIndex > 6) {
+    return null;
+  }
+  const [y, m, d] = iso.split("-").map(Number);
+  const base = new Date(y, m - 1, d);
+  if (Number.isNaN(base.getTime())) {
+    return null;
+  }
+  base.setDate(base.getDate() + dayIndex);
+  const yy = base.getFullYear();
+  const mm = `${base.getMonth() + 1}`.padStart(2, "0");
+  const dd = `${base.getDate()}`.padStart(2, "0");
+  return `${yy}-${mm}-${dd}`;
+};
+
+const defaultWeekStartIso = (): string => {
+  const now = new Date();
+  const start = new Date(now);
+  start.setHours(0, 0, 0, 0);
+  start.setDate(start.getDate() - start.getDay());
+  const yy = start.getFullYear();
+  const mm = `${start.getMonth() + 1}`.padStart(2, "0");
+  const dd = `${start.getDate()}`.padStart(2, "0");
+  return `${yy}-${mm}-${dd}`;
+};
+
+const parseBulkEventsFromText = (text: string, weekStartIso: string) => {
   const lines = text
     .split(/\r?\n/)
     .map((line) => line.trim())
@@ -475,8 +493,8 @@ const parseBulkEventsFromText = (text: string) => {
         continue;
       }
 
-      const fixedDate = fixedWeekDateByDayIndex[dayIndex];
-      if (!fixedDate) {
+      const resolvedDate = dateForWeekDay(weekStartIso, dayIndex);
+      if (!resolvedDate) {
         continue;
       }
 
@@ -487,7 +505,7 @@ const parseBulkEventsFromText = (text: string) => {
       seenKeys.add(key);
 
       events.push({
-        date: fixedDate,
+        date: resolvedDate,
         dayIndex,
         time: normalizedTime,
         child: "amit",
@@ -1052,7 +1070,8 @@ export async function POST(request: NextRequest) {
       ? incomingInlineData.mimeType.trim()
       : (typeof body?.imageMimeType === "string" ? body.imageMimeType.trim() : "image/png");
 
-    const bulkFromText = text ? parseBulkEventsFromText(text) : [];
+    const bulkWeekStart = weekStart || defaultWeekStartIso();
+    const bulkFromText = text ? parseBulkEventsFromText(text, bulkWeekStart) : [];
     if (bulkFromText.length > 0) {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       let upsertResults: any[] = [];
