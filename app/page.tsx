@@ -578,6 +578,20 @@ const pickMainTimeAndShuttle = (line: string): { mainTime: string | null; shuttl
   return { mainTime, shuttleTime };
 };
 
+/** When users paste a whole paragraph, split before Hebrew day rows so one regex match ≠ wrong day + wrong time. */
+const insertBulkScheduleLineBreaks = (raw: string): string => {
+  let t = raw.trim();
+  t = t.replace(
+    /\s+(?=(?:ראשון|שני|שלישי|רביעי|חמישי|שישי|שבת)(?:\s*[–—]|\s+יום\s))/g,
+    '\n',
+  );
+  t = t.replace(
+    /([^\n])\s+(?=(?:ראשון|שני|שלישי|רביעי|חמישי|שישי|שבת)\s+\d{1,2}[:：]\d{2})/g,
+    '$1\n',
+  );
+  return t;
+};
+
 const parseComplexWhatsAppMessage = (
   text: string,
   weekStart: Date,
@@ -592,7 +606,7 @@ const parseComplexWhatsAppMessage = (
     headerChild: BaseChildKey | null,
   ): { targetWeekStart: Date; events: AiEvent[] } | null => {
     const targetWeekStart = getWeekStart(weekStart);
-    const lines = rawText
+    const lines = insertBulkScheduleLineBreaks(rawText)
       .split(/\r?\n|•|\u2022|\||;/)
       .map((line) => line.trim())
       .filter(Boolean);
@@ -636,27 +650,33 @@ const parseComplexWhatsAppMessage = (
         continue;
       }
 
-      const pairMatches = [
-        ...line.matchAll(hebrewDayTimePair),
-        ...line.matchAll(englishDayTimePair),
-      ];
+      /** If the line has Hebrew day names, ignore English day+time pairs — otherwise "Sunday" matches 16:45 and duplicates ראשון 18:00. */
+      const lineHasHebrewWeekday =
+        /(?:^|\s)(?:יום\s+)?(ראשון|שני|שלישי|רביעי|חמישי|שישי|שבת)(?=\s|$|[–—:])/u.test(line);
+      const pairMatches = lineHasHebrewWeekday
+        ? [...line.matchAll(hebrewDayTimePair)]
+        : [...line.matchAll(hebrewDayTimePair), ...line.matchAll(englishDayTimePair)];
       let addedFromDayTimePairs = 0;
       if (pairMatches.length > 0) {
         for (const pairMatch of pairMatches) {
           const dayWord = (pairMatch[1] || '').trim();
           const dayIndex = resolveBulkDayIndex(dayWord);
-          const { mainTime, shuttleTime } = pickMainTimeAndShuttle(line);
-
-          if (dayIndex === null || !mainTime) {
+          const timeFromPair = normalizeLooseClock((pairMatch[2] || '').trim());
+          if (dayIndex === null || !timeFromPair) {
             continue;
           }
 
-          const { type, title: baseTitle } = detectTypeAndTitle(line);
+          const sliceStart = typeof pairMatch.index === 'number' ? pairMatch.index : 0;
+          const lineFromMatch = line.slice(sliceStart);
+          const { shuttleTime } = pickMainTimeAndShuttle(lineFromMatch);
+          const mainTime = timeFromPair;
+
+          const { type, title: baseTitle } = detectTypeAndTitle(lineFromMatch);
           const resolvedTitle =
-            shuttleTime && mainTime !== shuttleTime
+            shuttleTime && shuttleTime !== mainTime
               ? `${baseTitle} — הסעה יוצאת ${shuttleTime}`
               : baseTitle;
-          const child = detectChildFromText(line) || headerChild || 'amit';
+          const child = detectChildFromText(lineFromMatch) || headerChild || detectChildFromText(line) || 'amit';
 
           const targetDate = addDays(targetWeekStart, dayIndex);
           const key = `${dayIndex}|${mainTime}|${resolvedTitle}|${child}`;
