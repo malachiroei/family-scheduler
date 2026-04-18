@@ -846,29 +846,26 @@ const johnnyStableEventId = (weekStart: Date, dayIndex: number, time: string): s
 /** Persisted row title so refetch hides built-in Johnny slots after delete (see upsertJohnnyTombstone). */
 const JOHNNY_SUPPRESSED_TITLE = '__JOHNNY_SUPPRESSED__';
 
+/** Event start (local date + time) is still in the future — not "calendar day >= today" only. */
 const isScheduleEventUpcoming = (event: ScheduleApiEvent, now: Date): boolean => {
   if (!event?.date || event.title === JOHNNY_SUPPRESSED_TITLE) {
+    return false;
+  }
+  if (event.completed) {
     return false;
   }
   const d = parseEventDateKey(event.date);
   if (!d) {
     return false;
   }
-  const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-  const eventDay = new Date(d.getFullYear(), d.getMonth(), d.getDate());
-  if (eventDay.getTime() > todayStart.getTime()) {
-    return true;
-  }
-  if (eventDay.getTime() < todayStart.getTime()) {
-    return false;
-  }
   const t = normalizeTimeForPicker(event.time);
   const match = t.match(/^(\d{1,2}):(\d{2})$/);
-  if (!match) {
-    return true;
-  }
   const at = new Date(d.getFullYear(), d.getMonth(), d.getDate());
-  at.setHours(Number(match[1]), Number(match[2]), 0, 0);
+  if (match) {
+    at.setHours(Number(match[1]), Number(match[2]), 0, 0);
+  } else {
+    at.setHours(23, 59, 59, 999);
+  }
   return at.getTime() >= now.getTime();
 };
 
@@ -1308,6 +1305,8 @@ export default function FamilyScheduler() {
   const [showUpcomingListModal, setShowUpcomingListModal] = useState(false);
   const [upcomingListLoading, setUpcomingListLoading] = useState(false);
   const [upcomingListEvents, setUpcomingListEvents] = useState<ScheduleApiEvent[]>([]);
+  /** True when API returned rows but all were filtered out (past date/time or completed). */
+  const [upcomingListAllFilteredOut, setUpcomingListAllFilteredOut] = useState(false);
   const [deletePasswordModalOpen, setDeletePasswordModalOpen] = useState(false);
   const [deletePasswordInput, setDeletePasswordInput] = useState('');
   const deletePasswordResolverRef = useRef<((value: string | null) => void) | null>(null);
@@ -2946,10 +2945,12 @@ export default function FamilyScheduler() {
         .filter((e) => isScheduleEventUpcoming(e, now))
         .sort(compareScheduleApiEventsByDateTime);
       setUpcomingListEvents(next);
+      setUpcomingListAllFilteredOut(raw.length > 0 && next.length === 0);
     } catch (error) {
       const msg = error instanceof Error ? error.message : 'טעינה נכשלה';
       setApiError(msg);
       setUpcomingListEvents([]);
+      setUpcomingListAllFilteredOut(false);
     } finally {
       setUpcomingListLoading(false);
     }
@@ -4025,7 +4026,9 @@ export default function FamilyScheduler() {
             <div className="shrink-0 flex justify-between items-center border-b border-slate-200 px-4 py-3 gap-2">
               <div>
                 <h3 className="text-lg font-bold text-slate-800">כל המשימות העתידיות</h3>
-                <p className="text-xs text-slate-500 mt-0.5">לפי מסד הנתונים — כולל משימות חד-פעמיות וקבועות. ממוין לפי תאריך ושעה.</p>
+                <p className="text-xs text-slate-500 mt-0.5">
+                  לפי מסד הנתונים — מוצגות רק משימות שעדיין לא התרחשו (תאריך + שעה מעכשיו ואילך). משימות שבוצעו, או מתאריך/שעה שכבר עברו — לא מופיעות.
+                </p>
               </div>
               <div className="flex items-center gap-1">
                 <button
@@ -4053,7 +4056,18 @@ export default function FamilyScheduler() {
                   <span className="text-sm font-semibold">טוען...</span>
                 </div>
               ) : upcomingListEvents.length === 0 ? (
-                <p className="text-center text-slate-500 py-12 text-sm">אין משימות עתידיות (מהיום והלאה).</p>
+                <div className="text-center py-10 px-2 space-y-3">
+                  <p className="text-slate-600 text-sm font-semibold">אין משימות עתידיות להצגה.</p>
+                  {upcomingListAllFilteredOut ? (
+                    <p className="text-xs text-slate-500 max-w-md mx-auto leading-relaxed">
+                      במסד יש משימות, אבל כולן כבר עברו לפי תאריך ושעה (למשל יום מוקדם יותר בשבוע שכבר חלף), או מסומנות כבוצעו. בלוח השבועי עדיין אפשר לראות אותן אם עוברים לשבוע הרלוונטי.
+                    </p>
+                  ) : (
+                    <p className="text-xs text-slate-400 max-w-md mx-auto">
+                      כשתוסיפי משימות חדשות עם תאריך ושעה עתידיים — הן יופיעו כאן.
+                    </p>
+                  )}
+                </div>
               ) : (
                 <ul className="space-y-2">
                   {upcomingListEvents.map((ev) => {
