@@ -101,3 +101,12 @@ export function sql<T extends PgRow = PgRow>(
     return { rows, rowCount: result.count };
   });
 }
+
+/** Safe JSON/JSONB parameter for `sql\`...\`` (prefer over string + `::jsonb`). */
+export function sqlJson(value: unknown) {
+  const client = getPostgres();
+  if (!client) {
+    throw new Error("Missing database configuration");
+  }
+  return client.json(value as never);
+}

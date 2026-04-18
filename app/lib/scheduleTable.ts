@@ -1,4 +1,5 @@
 import { sql } from "@/app/lib/db";
+import { normalizeMetadataTime } from "@/app/lib/scheduleTime";
 
 export type ScheduleEventMetadata = {
   dayIndex: number;
@@ -46,7 +47,7 @@ export const parseScheduleMetadata = (raw: unknown): ScheduleEventMetadata => {
   const reminderNum = Number(reminderRaw);
   return {
     dayIndex: Number.isInteger(dayIndex) && dayIndex >= 0 && dayIndex <= 6 ? dayIndex : base.dayIndex,
-    time: typeof o.time === "string" && o.time.trim() ? o.time.trim() : base.time,
+    time: normalizeMetadataTime(o.time, base.time),
     child: typeof o.child === "string" && o.child.trim() ? o.child.trim().toLowerCase() : base.child,
     type: typeof o.type === "string" && o.type.trim() ? o.type.trim().toLowerCase() : base.type,
     zoomLink: typeof o.zoomLink === "string" ? o.zoomLink : typeof o.zoom_link === "string" ? o.zoom_link : null,

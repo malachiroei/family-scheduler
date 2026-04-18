@@ -3,6 +3,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import Image from 'next/image';
 import { Dog, Dumbbell, Music, GraduationCap, Trophy, Printer, Image as ImageIcon, MessageCircle, ChevronRight, ChevronLeft, X, Plus, CalendarDays, Settings, RefreshCw, Video, ClipboardList, Trash2 } from 'lucide-react';
 import html2canvas from 'html2canvas';
+import { normalizeMetadataTime } from '@/app/lib/scheduleTime';
 
 const baseChildrenConfig = {
   ravid: { name: 'רביד', color: 'bg-blue-500', iconColor: 'text-blue-500' },
@@ -353,14 +354,7 @@ const generateId = () => {
   return `${Date.now()}-${Math.random().toString(36).slice(2)}`;
 };
 
-const isTimeValue = (value: string) => /^(\d{2}):(\d{2})$/.test(value);
-
-const normalizeTimeForPicker = (value: string) => {
-  if (isTimeValue(value)) {
-    return value;
-  }
-  return '08:00';
-};
+const normalizeTimeForPicker = (value: string) => normalizeMetadataTime(value, '08:00');
 
 const halfHourTimeOptions = Array.from({ length: 48 }, (_, index) => {
   const hours = Math.floor(index / 2);

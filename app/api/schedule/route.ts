@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { ensureDatabaseConnectionString, getDatabaseConfig, sql } from "@/app/lib/db";
+import { ensureDatabaseConnectionString, getDatabaseConfig, sql, sqlJson } from "@/app/lib/db";
 import {
   buildMetadataFromIncoming,
   ensureScheduleMetadataColumn,
@@ -542,7 +542,6 @@ const upsertScheduleEvent = async (incoming: ReturnType<typeof sanitizeDbEvent>)
       notified: previousMeta?.notified ?? false,
     });
 
-    const payloadJson = JSON.stringify(metadataPayload);
     debugScheduleLog("Data to save:", { id: incoming.eventId, title: incoming.title, date: incoming.date, metadataPayload });
     console.log("Inserting event:", incoming.eventId);
 
@@ -554,7 +553,7 @@ const upsertScheduleEvent = async (incoming: ReturnType<typeof sanitizeDbEvent>)
           ${incoming.eventId},
           ${incoming.title},
           ${incoming.date},
-          ${payloadJson}::jsonb
+          ${sqlJson(metadataPayload)}
         )
         ON CONFLICT (id)
         DO UPDATE SET
