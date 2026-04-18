@@ -13,7 +13,7 @@ const debugScheduleLog = (...args: unknown[]) => {
   }
 };
 
-debugScheduleLog("Syncing with Neon DB: ", activeDatabaseUrl ? "CONNECTED" : "MISSING");
+debugScheduleLog("Syncing with Postgres: ", activeDatabaseUrl ? "CONNECTED" : "MISSING");
 debugScheduleLog("DB URL source:", dbConfig.source);
 debugScheduleLog("Saving to DB:", activeDatabaseUrl ? activeDatabaseUrl.substring(0, 15) + "..." : "(missing)");
 debugScheduleLog("Current ENV keys:", Object.keys(process.env));

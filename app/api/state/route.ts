@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { sql } from "@vercel/postgres";
+import { sql } from "@/app/lib/db";
 
 console.log("Current ENV keys:", Object.keys(process.env));
 
@@ -15,6 +15,7 @@ const getErrorMessage = (error: unknown) =>
   error instanceof Error ? error.message : String(error);
 
 const ensurePostgresEnv = () => {
+  // db.ts syncs DATABASE_URL → POSTGRES_URL for @vercel/postgres before any sql`…`
   const postgresUrl = process.env.POSTGRES_URL?.trim();
   const databaseUrl = process.env.DATABASE_URL?.trim();
   if (!postgresUrl && !databaseUrl) {
