@@ -49,6 +49,13 @@ type AiEvent = {
   recurringWeekly?: boolean;
 };
 
+type ChatClarificationPending = {
+  questions: string[];
+  baseText: string;
+  draftEvents: AiEvent[];
+  targetWeekStart: Date;
+};
+
 type RecurringTemplate = {
   templateId: string;
   dayIndex: number;
@@ -339,6 +346,39 @@ const toDisplayDate = (date: Date) => {
   return `${d}.${m}`;
 };
 
+const bulkImportChildLabel: Record<BaseChildKey, string> = {
+  ravid: 'רביד',
+  amit: 'עמית',
+  alin: 'אלין',
+};
+
+/** Text after the weekday + time on a bulk line — use as task title when descriptive (e.g. משחק בוגרות…). */
+const stripBulkScheduleLineDescription = (raw: string): string => {
+  let s = raw.trim();
+  s = s.replace(/^(?:יום\s+)?(ראשון|שני|שלישי|רביעי|חמישי|שישי|שבת)\s+/u, '');
+  s = s.replace(/^(\d{1,2}:\d{2}|\d{4})\s*,?\s*/u, '');
+  s = s.replace(/^(\d{1,2})\s+עד\s+(\d{1,2}:\d{2}|\d{3,4}|\d{1,2})\s*/u, '');
+  s = s.replace(/^(\d{1,2}:\d{2}|\d{4})\s+עד\s+(\d{1,2}:\d{2}|\d{3,4}|\d{1,2})\s*/u, '');
+  s = s.replace(/\.\s*$/u, '');
+  return s.replace(/^[,.\s–—]+/u, '').trim();
+};
+
+const buildLocalBulkImportSummary = (events: AiEvent[], targetWeekStart: Date): string => {
+  if (events.length === 0) {
+    return '';
+  }
+  const ws = getWeekStart(targetWeekStart);
+  const rangeLabel = `${toDisplayDate(ws)}–${toDisplayDate(addDays(ws, 6))}`;
+  const lines = events.map((ev) => {
+    const who = bulkImportChildLabel[coerceBaseChildKey(String(ev.child))] ?? String(ev.child);
+    const dayLabel = dayNames[ev.dayIndex] ?? `יום ${ev.dayIndex}`;
+    const timeLabel = normalizeTimeForPicker(ev.time);
+    const title = (ev.title || '').trim() || 'פעילות';
+    return `${who} · ${dayLabel} ${timeLabel} · ${title}`;
+  });
+  return `נוספו ${events.length} משימות (שבוע ${rangeLabel}):\n${lines.map((l) => `• ${l}`).join('\n')}`;
+};
+
 const formatUpcomingListDayLabel = (dateStr: string) => {
   const d = parseEventDateKey(dateStr);
   if (!d) {
@@ -441,7 +481,51 @@ const detectTypeAndTitle = (text: string): { type: EventType; title: string } =>
   if (/(כלב|ג׳וני|ג'וני)/.test(text)) {
     return { type: 'dog', title: 'הורדת ג׳וני' };
   }
+  if (/(אולם|מגרש|כדורסל|אימון\s*כדורסל)/.test(text) && !/(שיעור|תגבור|אנגלית)/.test(text)) {
+    return { type: 'gym', title: 'אימון כדורסל' };
+  }
   return { type: 'lesson', title: 'פעילות' };
+};
+
+const stripTitleBidi = (title: string) =>
+  title.replace(/[\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, '').replace(/\u00a0/g, ' ');
+
+const isGenericPailutTitle = (title: string) => {
+  const t = stripTitleBidi(title).trim();
+  if (t === 'פעילות') {
+    return true;
+  }
+  return /^פעילות\s*[\(（]/u.test(t);
+};
+
+/** "פעילות" גנרית → משחק (רמז למשחק בטקסט המלא) או אימון כדורסל. */
+const upgradeGenericBulkTitle = (
+  title: string,
+  type: EventType,
+  contextLine: string,
+  scheduleFullText = '',
+): { title: string; type: EventType } => {
+  if (!isGenericPailutTitle(title)) {
+    return { title, type };
+  }
+  const broadCtx = `${scheduleFullText}\n${contextLine}\n${title}`;
+  if (
+    /(שיעור|אנגלית|תגבור|מבחן|Karl|Rachel|מורה|ריקוד|מוזיק|התור של ג|ג׳וני|ג'וני)/i.test(
+      broadCtx,
+    )
+  ) {
+    return { title, type };
+  }
+  if (/(משחק|בוגרות|משחקי|צפייה|מגרש|ספורט)/i.test(broadCtx)) {
+    return {
+      title: title.replace(/^([\s\u200e\u200f]*)פעילות/u, '$1משחק'),
+      type: 'sport',
+    };
+  }
+  return {
+    title: title.replace(/^([\s\u200e\u200f]*)פעילות/u, '$1אימון כדורסל'),
+    type: 'gym',
+  };
 };
 
 const getDayIndexFromText = (text: string): number | null => {
@@ -477,6 +561,109 @@ const normalizeChildKey = (value: string): BaseChildKey | null => {
   if (normalized === 'ravid' || normalized === 'רביד') return 'ravid';
   if (normalized === 'alin' || normalized === 'אלין') return 'alin';
   return null;
+};
+
+/** RTL marks / NBSP from paste can break strict equality — still map to a child for save + summary. */
+const coerceBaseChildKey = (value: string): BaseChildKey => {
+  const cleaned = value
+    .replace(/[\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, '')
+    .replace(/\u00a0/g, ' ')
+    .trim();
+  return normalizeChildKey(cleaned) ?? 'amit';
+};
+
+const normalizeAiEventForImport = (ev: AiEvent, scheduleFullText = ''): AiEvent => {
+  const child = coerceBaseChildKey(String(ev.child ?? ''));
+  const u = upgradeGenericBulkTitle(ev.title, ev.type, ev.title, scheduleFullText);
+  return { ...ev, child, title: u.title, type: u.type };
+};
+
+const normalizeTitleDedupKey = (title: string) =>
+  stripTitleBidi(title)
+    .replace(/[–—−]/g, '-')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+const dedupeAiEvents = (events: AiEvent[]): AiEvent[] => {
+  const seen = new Set<string>();
+  const out: AiEvent[] = [];
+  for (const e of events) {
+    const k = `${e.dayIndex}|${normalizeTimeForPicker(e.time)}|${coerceBaseChildKey(String(e.child))}|${normalizeTitleDedupKey(e.title || '')}`;
+    if (seen.has(k)) {
+      continue;
+    }
+    seen.add(k);
+    out.push(e);
+  }
+  return out;
+};
+
+const MENTIONS_CHILD_IN_SCHEDULE_TEXT = /(עמית|רביד|אלין|amit|ravid|alin)/i;
+
+const isGenericTrainingTitle = (title: string) => {
+  const t = title.trim();
+  if (t === 'אימון') {
+    return true;
+  }
+  if (!/^אימון\s*\(/u.test(t)) {
+    return false;
+  }
+  return !/(כדורסל|שחייה|כושר|ריקוד|משחק|אולם|ספורט|בריכה|מצוינות)/i.test(t);
+};
+
+const buildScheduleClarification = (
+  text: string,
+  headerChild: BaseChildKey | null,
+  events: AiEvent[],
+): { questions: string[]; needsWho: boolean; needsWhat: boolean } => {
+  const needsWho = !headerChild && !MENTIONS_CHILD_IN_SCHEDULE_TEXT.test(text);
+  const sportHintInText = /(כדורסל|שחייה|כושר|ריקוד|משחק|אולם|ספורט|בריכה|מצוינות)/i.test(text);
+  const needsWhat =
+    events.some((e) => isGenericTrainingTitle(e.title || '')) && !sportHintInText;
+  const questions: string[] = [];
+  if (needsWho) {
+    questions.push('למי לשייך את המשימות? (כתבי למשל: עמית, רביד או אלין)');
+  }
+  if (needsWhat) {
+    questions.push('על איזו פעילות מדובר? (למשל: כדורסל, שחייה, כושר...)');
+  }
+  return { questions, needsWho, needsWhat };
+};
+
+const parseClarificationReply = (reply: string): { child: BaseChildKey | null; activityNote: string | null } => {
+  const raw = reply.trim();
+  if (!raw) {
+    return { child: null, activityNote: null };
+  }
+  const childMatch = raw.match(/(עמית|רביד|אלין|amit|ravid|alin)/i);
+  const child = childMatch ? normalizeChildKey(childMatch[1]) : null;
+  const rest = raw
+    .replace(/(עמית|רביד|אלין|amit|ravid|alin)/gi, ' ')
+    .replace(/[,;،]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  const activityNote = rest.length > 0 ? rest : null;
+  return { child, activityNote };
+};
+
+const applyChildToDraftEvents = (events: AiEvent[], child: BaseChildKey): AiEvent[] =>
+  events.map((e) => ({ ...e, child }));
+
+const applyActivityDetailToDraftEvents = (events: AiEvent[], detail: string): AiEvent[] => {
+  const d = detail.replace(/^אימון\s*/i, '').trim();
+  if (!d) {
+    return events;
+  }
+  return events.map((e) => {
+    const t = (e.title || '').trim();
+    if (t === 'אימון') {
+      return { ...e, title: `אימון ${d}`, type: 'gym' as EventType };
+    }
+    if (/^אימון\s*\(/u.test(t) && !/(כדורסל|שחייה|כושר|ריקוד|משחק|אולם|ספורט|בריכה)/i.test(t)) {
+      return { ...e, title: t.replace(/^אימון/u, `אימון ${d}`), type: 'gym' as EventType };
+    }
+    return e;
+  });
 };
 
 const normalizeChildForSave = (value: string): ChildKey => {
@@ -528,7 +715,7 @@ const detectDefaultChildFromScheduleHeader = (text: string): BaseChildKey | null
     return 'alin';
   }
   if (
-    /של\s*רביד|לרביד\b|לו["׳']?ז\s+של\s*רביד|לוז\s+של\s*רביד|הלוז\s+של\s*רביד|for\s*ravid\b/i.test(
+    /לו["׳']?ז\s+ל\s*רביד|לו["׳']?ז\s+לרביד|לרביד\s+לשבוע|של\s*רביד|לרביד(?:\s|$|[,:.\u05BE])|לו["׳']?ז\s+של\s*רביד|לוז\s+של\s*רביד|הלוז\s+של\s*רביד|for\s*ravid\b/i.test(
       head,
     )
   ) {
@@ -653,8 +840,9 @@ const parseComplexWhatsAppMessage = (
       return Object.prototype.hasOwnProperty.call(dayToIndex, lower) ? dayToIndex[lower] : null;
     };
 
-    for (const line of lines) {
-      if (/^שבת\s+שלום\b/i.test(line.trim()) || /^שלום\s*$/i.test(line.trim())) {
+    for (const rawLine of lines) {
+      const line = rawLine.replace(/\.+$/u, '').trim();
+      if (/^שבת\s+שלום\b/i.test(line) || /^שלום\s*$/i.test(line)) {
         continue;
       }
 
@@ -684,10 +872,15 @@ const parseComplexWhatsAppMessage = (
           const mainTime = timeFromPair;
 
           const { type, title: baseTitle } = detectTypeAndTitle(lineFromMatch);
+          const narrative = stripBulkScheduleLineDescription(lineFromMatch);
           let resolvedTitle =
-            shuttleTime && shuttleTime !== mainTime
-              ? `${baseTitle} — הסעה יוצאת ${shuttleTime}`
+            narrative.length >= 8
+              ? narrative
               : baseTitle;
+          resolvedTitle =
+            shuttleTime && shuttleTime !== mainTime
+              ? `${resolvedTitle} — הסעה יוצאת ${shuttleTime}`
+              : resolvedTitle;
           const rangeTimes = extractTimesFromLine(lineFromMatch);
           if (rangeTimes.length >= 2 && /עד|[-–—]\s*\d/.test(lineFromMatch)) {
             resolvedTitle = `${resolvedTitle} (${rangeTimes[0]}–${rangeTimes[rangeTimes.length - 1]})`;
@@ -728,10 +921,15 @@ const parseComplexWhatsAppMessage = (
       }
 
       const { type, title: baseTitle } = detectTypeAndTitle(line);
+      const narrativeB = stripBulkScheduleLineDescription(line);
       let resolvedTitle =
-        shuttleTime && mainTime !== shuttleTime
-          ? `${baseTitle} — הסעה יוצאת ${shuttleTime}`
+        narrativeB.length >= 8
+          ? narrativeB
           : baseTitle;
+      resolvedTitle =
+        shuttleTime && mainTime !== shuttleTime
+          ? `${resolvedTitle} — הסעה יוצאת ${shuttleTime}`
+          : resolvedTitle;
       const rangeTimesB = extractTimesFromLine(line);
       if (rangeTimesB.length >= 2 && /עד|[-–—]\s*\d/.test(line)) {
         resolvedTitle = `${resolvedTitle} (${rangeTimesB[0]}–${rangeTimesB[rangeTimesB.length - 1]})`;
@@ -1400,6 +1598,7 @@ export default function FamilyScheduler() {
   } | null>(null);
   const [creatingEvent, setCreatingEvent] = useState<NewEventDraft | null>(null);
   const [isChatOpen, setIsChatOpen] = useState(false);
+  const [chatClarificationPending, setChatClarificationPending] = useState<ChatClarificationPending | null>(null);
   const [showSettingsModal, setShowSettingsModal] = useState(false);
   const [showUpcomingListModal, setShowUpcomingListModal] = useState(false);
   const [upcomingListLoading, setUpcomingListLoading] = useState(false);
@@ -3520,14 +3719,21 @@ export default function FamilyScheduler() {
     }
   };
 
-  const persistAiEventsToDatabase = async (events: AiEvent[], targetWeekStart: Date) => {
+  const persistAiEventsToDatabase = async (
+    events: AiEvent[],
+    targetWeekStart: Date,
+    scheduleFullText = '',
+  ): Promise<string> => {
     setDbSyncStatus({ state: 'saving', message: 'Saving AI events...' });
-    const resolvedTargetWeekStart = resolveTargetWeekStartFromEvents(events, targetWeekStart);
-    await Promise.all(events.map(async (eventData) => {
-      const normalizedChild = normalizeChildKey(String(eventData.child));
-      if (!normalizedChild || eventData.dayIndex < 0 || eventData.dayIndex > 6) {
+    let normalizedEvents = events.map((e) => normalizeAiEventForImport(e, scheduleFullText));
+    normalizedEvents = dedupeAiEvents(normalizedEvents);
+    const resolvedTargetWeekStart = resolveTargetWeekStartFromEvents(normalizedEvents, targetWeekStart);
+    const persisted: AiEvent[] = [];
+    await Promise.all(normalizedEvents.map(async (eventData) => {
+      if (!Number.isInteger(eventData.dayIndex) || eventData.dayIndex < 0 || eventData.dayIndex > 6) {
         return;
       }
+      const normalizedChild = coerceBaseChildKey(String(eventData.child ?? ''));
 
       const parsedEventDate = eventData.date ? parseEventDateKey(eventData.date) : null;
       const resolvedEventDate = parsedEventDate ?? addDays(resolvedTargetWeekStart, eventData.dayIndex);
@@ -3548,11 +3754,13 @@ export default function FamilyScheduler() {
       };
 
       await upsertEventToDatabase(event, eventData.dayIndex);
+      persisted.push({ ...eventData, child: normalizedChild });
     }));
 
     setWeekStart(resolvedTargetWeekStart);
     await refetchEventsFromDatabase(resolvedTargetWeekStart);
     setDbSyncStatus({ state: 'saved', message: 'Saved' });
+    return buildLocalBulkImportSummary(persisted, resolvedTargetWeekStart);
   };
 
   const sendMessageNow = async (text: string, imageFile: File | null) => {
@@ -3562,6 +3770,9 @@ export default function FamilyScheduler() {
 
     setApiError('');
     setSuccessMessage('');
+    if (imageFile) {
+      setChatClarificationPending(null);
+    }
 
     requestInFlightRef.current = true;
     setIsSubmitting(true);
@@ -3575,17 +3786,85 @@ export default function FamilyScheduler() {
       }
       lastApiRequestAtRef.current = Date.now();
 
+      if (chatClarificationPending && text.trim() && !imageFile) {
+        const p = chatClarificationPending;
+        const looksLikeNewSchedulePaste =
+          text.length > 80 && /(?:ראשון|שני|שלישי|רביעי|חמישי|שישי|שבת)/.test(text);
+        if (!looksLikeNewSchedulePaste) {
+          const { child, activityNote } = parseClarificationReply(text);
+          let ev = p.draftEvents.map((e) => ({ ...e }));
+          if (child) {
+            ev = applyChildToDraftEvents(ev, child);
+          }
+          if (activityNote) {
+            ev = applyActivityDetailToDraftEvents(ev, activityNote);
+          }
+          const mergedContext = `${p.baseText}\n${text}`;
+          const effectiveHeader = child ?? detectDefaultChildFromScheduleHeader(p.baseText);
+          const clar = buildScheduleClarification(mergedContext, effectiveHeader, ev);
+          if (clar.questions.length > 0) {
+            setChatClarificationPending({
+              questions: clar.questions,
+              baseText: p.baseText,
+              draftEvents: ev,
+              targetWeekStart: p.targetWeekStart,
+            });
+            setSuccessMessage(`עדיין חסר פרט:\n• ${clar.questions.join('\n• ')}`);
+            setApiError('');
+            setInputText('');
+            return;
+          }
+          const summary = await persistAiEventsToDatabase(ev, p.targetWeekStart, mergedContext);
+          const preview = dedupeAiEvents(ev.map((e) => normalizeAiEventForImport(e, mergedContext)));
+          const fallbackSummary = buildLocalBulkImportSummary(preview, p.targetWeekStart);
+          setSuccessMessage(
+            summary ||
+              fallbackSummary ||
+              `נוספו ${preview.length} משימות (זיהוי מקומי). בדקי את הלוח לפרטים.`,
+          );
+          setChatClarificationPending(null);
+          setInputText('');
+          setSelectedImage(null);
+          await hardRefreshScheduleAfterSuccess(p.targetWeekStart);
+          return;
+        }
+        setChatClarificationPending(null);
+      }
+
       const headerChild = detectDefaultChildFromScheduleHeader(text);
       const localSchedule = parseComplexWhatsAppMessage(text, weekStart, headerChild);
       if (!imageFile && localSchedule && localSchedule.events.length > 0) {
-        await persistAiEventsToDatabase(localSchedule.events, localSchedule.targetWeekStart);
-        setSuccessMessage('האירועים נוספו מהטקסט (זיהוי מקומי).');
+        const clar = buildScheduleClarification(text, headerChild, localSchedule.events);
+        if (clar.questions.length > 0) {
+          setChatClarificationPending({
+            questions: clar.questions,
+            baseText: text,
+            draftEvents: localSchedule.events,
+            targetWeekStart: localSchedule.targetWeekStart,
+          });
+          setSuccessMessage(`לפני שמירה — נא להבהיר:\n• ${clar.questions.join('\n• ')}`);
+          setApiError('');
+          setInputText('');
+          return;
+        }
+        const summary = await persistAiEventsToDatabase(localSchedule.events, localSchedule.targetWeekStart, text);
+        const preview = dedupeAiEvents(
+          localSchedule.events.map((e) => normalizeAiEventForImport(e, text)),
+        );
+        const fallbackSummary = buildLocalBulkImportSummary(preview, localSchedule.targetWeekStart);
+        setSuccessMessage(
+          summary ||
+            fallbackSummary ||
+            `נוספו ${preview.length} משימות (זיהוי מקומי). בדקי את הלוח לפרטים.`,
+        );
+        setChatClarificationPending(null);
         setInputText('');
         setSelectedImage(null);
         await hardRefreshScheduleAfterSuccess(localSchedule.targetWeekStart);
         return;
       }
 
+      setChatClarificationPending(null);
       const imagePart = imageFile ? await fileToGenerativePart(imageFile) : undefined;
       const outgoingText = text || 'נתח את התמונה והוסף אירועים ללו״ז';
       const response = await fetch(toApiUrl('/api/schedule'), {
@@ -3613,15 +3892,26 @@ export default function FamilyScheduler() {
           const targetWeekStart = resolveTargetWeekStartFromEvents(events, weekStart);
           setWeekStart(targetWeekStart);
           await hardRefreshScheduleAfterSuccess(targetWeekStart);
+          const apiPreview = dedupeAiEvents(
+            events.map((e) => normalizeAiEventForImport({ ...e }, outgoingText)),
+          );
+          const apiSummary = buildLocalBulkImportSummary(apiPreview, targetWeekStart);
+          setSuccessMessage(
+            apiSummary ||
+              `נוספו ${apiPreview.length} משימות (שבוע ${toDisplayDate(getWeekStart(targetWeekStart))}–${toDisplayDate(addDays(getWeekStart(targetWeekStart), 6))}). בדקי את הלוח.`,
+          );
         } else {
-          await persistAiEventsToDatabase(events, weekStart);
+          const targetWs = resolveTargetWeekStartFromEvents(events, weekStart);
+          const summary = await persistAiEventsToDatabase(events, targetWs, outgoingText);
+          const preview = dedupeAiEvents(events.map((e) => normalizeAiEventForImport(e, outgoingText)));
+          const fb = buildLocalBulkImportSummary(preview, targetWs);
+          setSuccessMessage(summary || fb || 'האירועים נוספו בהצלחה ללו״ז.');
         }
-        setSuccessMessage('האירועים נוספו בהצלחה ללו״ז.');
       } else {
         if (imageFile) {
           const fallbackEvents = getEnglishOcrFallbackEvents();
-          await persistAiEventsToDatabase(fallbackEvents, weekStart);
-          setSuccessMessage('אירועי האנגלית נוספו מהתמונה.');
+          const fbSummary = await persistAiEventsToDatabase(fallbackEvents, weekStart);
+          setSuccessMessage(fbSummary || 'אירועי האנגלית נוספו מהתמונה.');
         } else {
           setApiError('לא זוהו אירועים חדשים בטקסט. נסה ניסוח מפורט יותר.');
           return;
@@ -3638,12 +3928,12 @@ export default function FamilyScheduler() {
         setApiError('חריגה ממכסת Gemini (429). נסה שוב עוד מעט או כתוב ניסוח קצר וברור.');
       } else if ((message.includes('404') || message.toLowerCase().includes('not found')) && imageFile) {
         const fallbackEvents = getEnglishOcrFallbackEvents();
-        await persistAiEventsToDatabase(fallbackEvents, weekStart);
-        setSuccessMessage('אירועי האנגלית נוספו מהתמונה (fallback למודל נתמך).');
+        const fbSummary = await persistAiEventsToDatabase(fallbackEvents, weekStart);
+        setSuccessMessage(fbSummary || 'אירועי האנגלית נוספו מהתמונה (fallback למודל נתמך).');
       } else if (message.includes('502') && imageFile) {
         const fallbackEvents = getEnglishOcrFallbackEvents();
-        await persistAiEventsToDatabase(fallbackEvents, weekStart);
-        setSuccessMessage('אירועי האנגלית נוספו מהתמונה (fallback).');
+        const fbSummary502 = await persistAiEventsToDatabase(fallbackEvents, weekStart);
+        setSuccessMessage(fbSummary502 || 'אירועי האנגלית נוספו מהתמונה (fallback).');
       } else {
         setApiError(message);
       }
@@ -3670,6 +3960,7 @@ export default function FamilyScheduler() {
 
     const file = event.target.files?.[0] || null;
     setSelectedImage(file);
+    setChatClarificationPending(null);
     if (successMessage) {
       setSuccessMessage('');
     }
@@ -4527,7 +4818,10 @@ export default function FamilyScheduler() {
               <span className="text-sm font-semibold">עדכון חכם לצ׳אט</span>
               <button
                 type="button"
-                onClick={() => setIsChatOpen(false)}
+                onClick={() => {
+                  setIsChatOpen(false);
+                  setChatClarificationPending(null);
+                }}
                 className="rounded-md bg-white/10 hover:bg-white/20 p-1 transition"
                 aria-label="סגור צ׳אט"
               >
@@ -4536,18 +4830,40 @@ export default function FamilyScheduler() {
             </div>
 
             <div className="p-3">
+              {chatClarificationPending && (
+                <div className="mb-2 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-950 text-right space-y-2">
+                  <div className="font-semibold">ממתין להבהרה</div>
+                  <ul className="list-disc list-inside space-y-1 pr-1">
+                    {chatClarificationPending.questions.map((q, idx) => (
+                      <li key={`clar-q-${idx}`}>{q}</li>
+                    ))}
+                  </ul>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setChatClarificationPending(null);
+                      setSuccessMessage('');
+                      setApiError('');
+                    }}
+                    className="text-xs text-amber-800 underline hover:text-amber-950"
+                  >
+                    ביטול והתחלה מחדש
+                  </button>
+                </div>
+              )}
               <div className="relative">
                 <input
                   value={inputText}
                   disabled={isSubmitting || requestInFlightRef.current}
                   onChange={(e) => {
                     setInputText(e.target.value);
-                    if (successMessage) {
-                      setSuccessMessage('');
-                    }
                   }}
                   type="text"
-                  placeholder="עדכן לו״ז בקול חופשי (למשל: אימון לרביד ביום שלישי ב-16:00)"
+                  placeholder={
+                    chatClarificationPending
+                      ? 'השיבי בהבהרה (למשל: רביד, כדורסל)...'
+                      : 'עדכן לו״ז בקול חופשי (למשל: אימון לרביד ביום שלישי ב-16:00)'
+                  }
                   className="w-full pl-14 pr-6 py-4 rounded-2xl border border-slate-200 bg-white shadow-sm focus:border-blue-400 focus:ring-0 outline-none transition-all text-right"
                 />
                 <button
@@ -4593,7 +4909,11 @@ export default function FamilyScheduler() {
               </div>
 
               {isSubmitting && <div className="text-slate-500 text-xs mt-2 text-right px-1">טוען...</div>}
-              {successMessage && <div className="text-emerald-600 text-sm mt-2 text-right px-1">{successMessage}</div>}
+              {successMessage && (
+                <div className="text-emerald-600 text-sm mt-2 text-right px-1 whitespace-pre-wrap break-words">
+                  {successMessage}
+                </div>
+              )}
               {apiError && <div className="text-red-500 text-sm mt-2 text-right px-1">{apiError}</div>}
             </div>
           </div>
