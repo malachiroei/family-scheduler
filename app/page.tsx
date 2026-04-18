@@ -3,7 +3,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import Image from 'next/image';
 import { Dog, Dumbbell, Music, GraduationCap, Trophy, Printer, Image as ImageIcon, MessageCircle, ChevronRight, ChevronLeft, X, Plus, CalendarDays, Settings, RefreshCw, Video, ClipboardList, Trash2 } from 'lucide-react';
 import html2canvas from 'html2canvas';
-import { normalizeMetadataTime } from '@/app/lib/scheduleTime';
+import { normalizeMetadataTime, parseMetadataBoolean } from '@/app/lib/scheduleTime';
 
 const baseChildrenConfig = {
   ravid: { name: 'רביד', color: 'bg-blue-500', iconColor: 'text-blue-500' },
@@ -235,7 +235,7 @@ const normalizeWeekEventsWithDate = (weeksData: Record<string, DaySchedule[]> | 
             .map((event) => ({
               ...event,
               date: normalizeEventDateKey(event.date, parseEventDateKey(day.isoDate) ?? new Date(`${day.isoDate}T00:00:00`)),
-              isRecurring: Boolean(event.isRecurring),
+              isRecurring: parseMetadataBoolean(event.isRecurring),
               completed: Boolean(event.completed),
               sendNotification: event.sendNotification ?? true,
               requireConfirmation: Boolean(event.requireConfirmation),
@@ -248,7 +248,7 @@ const normalizeWeekEventsWithDate = (weeksData: Record<string, DaySchedule[]> | 
                 candidate.child === event.child &&
                 candidate.title === event.title &&
                 candidate.type === event.type &&
-                Boolean(candidate.isRecurring) === Boolean(event.isRecurring) &&
+                parseMetadataBoolean(candidate.isRecurring) === parseMetadataBoolean(event.isRecurring) &&
                 Boolean(candidate.completed) === Boolean(event.completed)
               )
             )))
@@ -1232,7 +1232,7 @@ const createWeekDays = (
     days[dayIndex].events.push({
       ...event,
       date: normalizeEventDateKey(event.date, fallbackDate),
-      isRecurring: Boolean(event.isRecurring),
+      isRecurring: parseMetadataBoolean(event.isRecurring),
       completed: Boolean(event.completed),
       sendNotification: event.sendNotification ?? true,
       requireConfirmation: Boolean(event.requireConfirmation),
@@ -2538,7 +2538,7 @@ export default function FamilyScheduler() {
           .map((e) => e.id),
       );
       const allEvents = allEventsRaw.filter((e) => e.title !== JOHNNY_SUPPRESSED_TITLE);
-      const recurringRows = allEvents.filter((event) => event.isRecurring === true);
+      const recurringRows = allEvents.filter((event) => parseMetadataBoolean(event.isRecurring));
 
     const templatesMap = new Map<string, RecurringTemplate>();
     recurringRows.forEach((event) => {
@@ -2571,7 +2571,7 @@ export default function FamilyScheduler() {
       }));
 
       allEvents
-      .filter((event) => event.isRecurring !== true)
+      .filter((event) => !parseMetadataBoolean(event.isRecurring))
       .forEach((event) => {
         let eventDate = parseEventDateKey(event.date);
         const apiDay =
@@ -2656,6 +2656,8 @@ export default function FamilyScheduler() {
       const normalizedApiDate = parsedEventDate
         ? toIsoDate(parsedEventDate)
         : toIsoDate(getNextOccurrenceDate(dayIndex, new Date()));
+      /** `Boolean("false")` is true in JS — must match server `parseMetadataBoolean` / `parseBooleanValue`. */
+      const isRecurringSave = parseMetadataBoolean(event.isRecurring);
 
       let response = await fetch(toApiUrl('/api/schedule'), {
         method: 'POST',
@@ -2665,8 +2667,8 @@ export default function FamilyScheduler() {
             ...event,
             date: normalizedApiDate,
             dayIndex,
-            isRecurring: Boolean(event.isRecurring),
-            recurringTemplateId: event.isRecurring ? event.recurringTemplateId : undefined,
+            isRecurring: isRecurringSave,
+            recurringTemplateId: isRecurringSave ? event.recurringTemplateId : undefined,
           },
         }),
       });
@@ -2680,8 +2682,8 @@ export default function FamilyScheduler() {
               ...event,
               date: normalizedApiDate,
               dayIndex,
-              isRecurring: Boolean(event.isRecurring),
-              recurringTemplateId: event.isRecurring ? event.recurringTemplateId : undefined,
+              isRecurring: isRecurringSave,
+              recurringTemplateId: isRecurringSave ? event.recurringTemplateId : undefined,
             },
           }),
         });
@@ -3464,7 +3466,7 @@ export default function FamilyScheduler() {
         child: normalizeChildForSave(normalizedChild),
         title: eventData.title,
         type: normalizeTypeForStorage(eventData.type, eventData.title),
-        isRecurring: Boolean(eventData.recurringWeekly),
+        isRecurring: parseMetadataBoolean(eventData.recurringWeekly),
         recurringTemplateId,
         completed: false,
         sendNotification: true,
@@ -3901,7 +3903,7 @@ export default function FamilyScheduler() {
         {days.map((day, dayIndex) => {
           const currentCellDate = toEventDateKey(new Date(`${day.isoDate}T00:00:00`));
           const visibleEvents = day.events.filter((event) => {
-            const isRecurringEvent = Boolean(event.isRecurring);
+            const isRecurringEvent = parseMetadataBoolean(event.isRecurring);
             const matchesChild = activeChildFilter === 'all' || getChildKeys(event.child).includes(activeChildFilter);
             if (!matchesChild) {
               return false;
@@ -3960,7 +3962,7 @@ export default function FamilyScheduler() {
                         dayIndex,
                         selectedDate: day.isoDate,
                         data: { ...event, time: normalizeTimeForPicker(event.time) },
-                        recurringWeekly: Boolean(event.isRecurring),
+                        recurringWeekly: parseMetadataBoolean(event.isRecurring),
                         originalRecurringTemplateId: event.recurringTemplateId,
                       });
                     }}
@@ -3981,7 +3983,7 @@ export default function FamilyScheduler() {
                           {event.requireConfirmation && (
                             <span className={`${statusPillClassName} text-amber-700 bg-amber-50 border-amber-200`}>אישור ילד</span>
                           )}
-                          {event.isRecurring && (
+                          {parseMetadataBoolean(event.isRecurring) && (
                             <span className={`${statusPillClassName} text-blue-700 bg-blue-50 border-blue-200`}>קבוע</span>
                           )}
                           {event.requireConfirmation && !event.completed && (
@@ -4116,7 +4118,7 @@ export default function FamilyScheduler() {
                             {!ev.completed && !past && (
                               <span className="text-[10px] font-bold px-2 py-0.5 rounded-full border border-emerald-200 bg-white text-emerald-800">עתידי</span>
                             )}
-                            {ev.isRecurring && (
+                            {parseMetadataBoolean(ev.isRecurring) && (
                               <span className="text-[10px] font-bold px-2 py-0.5 rounded-full border border-blue-200 bg-blue-50 text-blue-800">קבוע</span>
                             )}
                           </div>

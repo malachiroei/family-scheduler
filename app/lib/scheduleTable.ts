@@ -106,22 +106,25 @@ export const buildMetadataFromIncoming = (incoming: {
   reminderLeadMinutes: number | null;
   userId: string;
   notified?: boolean;
-}): ScheduleEventMetadata => ({
-  dayIndex: incoming.dayIndex,
-  time: incoming.time,
-  child: incoming.child,
-  type: incoming.type,
-  zoomLink: incoming.zoomLink ?? null,
-  isRecurring: incoming.isRecurring,
-  recurringTemplateId: incoming.isRecurring ? (incoming.recurringTemplateId ?? null) : null,
-  completed: incoming.completed,
-  sendNotification: incoming.sendNotification,
-  requireConfirmation: incoming.requireConfirmation,
-  needsAck: incoming.needsAck,
-  reminderLeadMinutes: incoming.reminderLeadMinutes,
-  userId: incoming.userId,
-  notified: incoming.notified ?? false,
-});
+}): ScheduleEventMetadata => {
+  const recurring = parseMetadataBoolean(incoming.isRecurring);
+  return {
+    dayIndex: incoming.dayIndex,
+    time: incoming.time,
+    child: incoming.child,
+    type: incoming.type,
+    zoomLink: incoming.zoomLink ?? null,
+    isRecurring: recurring,
+    recurringTemplateId: recurring ? (incoming.recurringTemplateId ?? null) : null,
+    completed: incoming.completed,
+    sendNotification: incoming.sendNotification,
+    requireConfirmation: incoming.requireConfirmation,
+    needsAck: incoming.needsAck,
+    reminderLeadMinutes: incoming.reminderLeadMinutes,
+    userId: incoming.userId,
+    notified: incoming.notified ?? false,
+  };
+};
 
 /**
  * Ensures JSONB `metadata` exists on `schedule` (user-created id/title/date).
