@@ -298,13 +298,19 @@ const parseEventDateKey = (value: string) => {
 
   const ddMmYyyy = trimmed.match(/^(\d{2})-(\d{2})-(\d{4})$/);
   if (ddMmYyyy) {
-    const parsed = new Date(`${ddMmYyyy[3]}-${ddMmYyyy[2]}-${ddMmYyyy[1]}T00:00:00`);
+    const d = Number(ddMmYyyy[1]);
+    const m = Number(ddMmYyyy[2]);
+    const y = Number(ddMmYyyy[3]);
+    const parsed = new Date(y, m - 1, d);
     return Number.isNaN(parsed.getTime()) ? null : parsed;
   }
 
   const yyyyMmDd = trimmed.match(/^(\d{4})-(\d{2})-(\d{2})$/);
   if (yyyyMmDd) {
-    const parsed = new Date(`${yyyyMmDd[1]}-${yyyyMmDd[2]}-${yyyyMmDd[3]}T00:00:00`);
+    const y = Number(yyyyMmDd[1]);
+    const m = Number(yyyyMmDd[2]);
+    const d = Number(yyyyMmDd[3]);
+    const parsed = new Date(y, m - 1, d);
     return Number.isNaN(parsed.getTime()) ? null : parsed;
   }
 
@@ -2496,11 +2502,23 @@ export default function FamilyScheduler() {
       allEvents
       .filter((event) => !event.isRecurring)
       .forEach((event) => {
-        const eventDate = parseEventDateKey(event.date);
+        let eventDate = parseEventDateKey(event.date);
+        const apiDay =
+          Number.isInteger(event.dayIndex) && event.dayIndex >= 0 && event.dayIndex <= 6 ? event.dayIndex : null;
+        if (!eventDate && apiDay !== null) {
+          eventDate = addDays(targetWeekStart, apiDay);
+        }
         if (!eventDate) {
           return;
         }
-        const eventWeekKey = toIsoDate(getWeekStart(eventDate));
+        let eventWeekKey = toIsoDate(getWeekStart(eventDate));
+        if (eventWeekKey !== targetWeekKey && apiDay !== null) {
+          const anchored = addDays(targetWeekStart, apiDay);
+          if (toIsoDate(getWeekStart(anchored)) === targetWeekKey) {
+            eventDate = anchored;
+            eventWeekKey = targetWeekKey;
+          }
+        }
         if (eventWeekKey !== targetWeekKey) {
           return;
         }
