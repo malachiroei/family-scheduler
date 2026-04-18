@@ -757,8 +757,9 @@ const inferScheduleHeaderChild = (text: string): BaseChildKey | null => {
   return null;
 };
 
+/** קודם תבניות מפורשות (לו"ז X) — אחרת תבניות רחבות של "עמית" ב-detectDefault עלולות לנצח בטעות לפני רביד. */
 const resolveScheduleHeaderChild = (text: string): BaseChildKey | null =>
-  detectDefaultChildFromScheduleHeader(text) ?? inferScheduleHeaderChild(text);
+  inferScheduleHeaderChild(text) ?? detectDefaultChildFromScheduleHeader(text);
 
 const minutesFromClock = (value: string) => {
   const normalized = normalizeClock(value);
@@ -846,7 +847,7 @@ const parseComplexWhatsAppMessage = (
     rawText: string,
     headerChild: BaseChildKey | null,
   ): { targetWeekStart: Date; events: AiEvent[] } | null => {
-    const effectiveHeaderChild = headerChild ?? inferScheduleHeaderChild(rawText);
+    const effectiveHeaderChild = inferScheduleHeaderChild(rawText) ?? headerChild;
     const targetWeekStart = getWeekStart(weekStart);
     const lines = insertBulkScheduleLineBreaks(rawText)
       .split(/\r?\n|•|\u2022|\||;/)
@@ -1014,10 +1015,10 @@ const parseComplexWhatsAppMessage = (
   }
 
   const globalChild =
-    detectChildFromText(text) ||
-    (/בית\s*דני/.test(text) ? 'amit' : null) ||
     defaultChildFromHeader ||
-    inferScheduleHeaderChild(text);
+    inferScheduleHeaderChild(text) ||
+    detectChildFromText(text) ||
+    (/בית\s*דני/.test(text) ? 'amit' : null);
   const expandedText = text
     .replace(/(ראשון|שני|שלישי|רביעי|חמישי|שישי|שבת)\s*[-:]/g, '\n$1 -')
     .replace(/(?:^|\s)(יום\s+[א-ת"׳']+)\s*[-:]/g, '\n$1 -');
