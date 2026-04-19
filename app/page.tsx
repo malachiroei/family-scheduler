@@ -4321,22 +4321,6 @@ export default function FamilyScheduler() {
     <div className="print-scheduler-shell h-screen overflow-y-auto bg-[#f8fafc] px-3 pt-12 pb-20 md:px-4 md:pt-14 md:pb-24 dir-rtl" dir="rtl">
       <button
         type="button"
-        onClick={() => setShowSettingsModal(true)}
-        className="fixed bottom-28 left-4 md:bottom-32 md:left-6 z-40 h-10 w-10 rounded-full bg-slate-800 text-white shadow-lg hover:bg-slate-700 transition print:hidden flex items-center justify-center"
-        aria-label="פתח הגדרות"
-      >
-        <Settings size={18} />
-      </button>
-      <button
-        type="button"
-        onClick={() => setShowUpcomingListModal(true)}
-        className="fixed bottom-16 left-4 md:bottom-20 md:left-6 z-40 h-10 w-10 rounded-full bg-indigo-600 text-white shadow-lg hover:bg-indigo-700 transition print:hidden flex items-center justify-center"
-        aria-label="כל המשימות מהמסד"
-      >
-        <ClipboardList size={18} />
-      </button>
-      <button
-        type="button"
         onClick={() => { void handleManualRefresh(); }}
         disabled={isRefreshing}
         className="fixed top-5 right-5 md:top-6 md:right-6 z-40 h-9 rounded-full bg-white border border-slate-200 text-slate-700 shadow-lg hover:bg-slate-50 transition print:hidden flex items-center justify-center gap-1.5 px-3 disabled:opacity-60 disabled:cursor-not-allowed"
@@ -4389,7 +4373,25 @@ export default function FamilyScheduler() {
       </div>
 
       <div className="max-w-6xl mx-auto mb-2 bg-white border border-slate-200 rounded-2xl p-2 shadow-sm print:hidden space-y-2">
-        <div className="rounded-2xl bg-white border border-slate-200 p-2.5 shadow-sm flex flex-wrap items-center justify-center gap-2">
+        <div className="rounded-2xl bg-white border border-slate-200 p-2.5 shadow-sm flex flex-wrap items-center justify-center gap-3">
+          <div className="flex items-center gap-2 shrink-0">
+            <button
+              type="button"
+              onClick={() => setShowSettingsModal(true)}
+              className="h-9 w-9 rounded-full bg-slate-800 text-white shadow-md hover:bg-slate-700 transition flex items-center justify-center"
+              aria-label="פתח הגדרות"
+            >
+              <Settings size={17} />
+            </button>
+            <button
+              type="button"
+              onClick={() => setShowUpcomingListModal(true)}
+              className="h-9 w-9 rounded-full bg-indigo-600 text-white shadow-md hover:bg-indigo-700 transition flex items-center justify-center"
+              aria-label="כל המשימות מהמסד"
+            >
+              <ClipboardList size={17} />
+            </button>
+          </div>
           {(Object.keys(baseChildrenConfig) as BaseChildKey[]).map((childKey) => {
             const config = baseChildrenConfig[childKey];
             return (
