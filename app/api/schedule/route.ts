@@ -1170,8 +1170,9 @@ export async function POST(request: NextRequest) {
 0=יום ראשון, 1=יום שני, 2=יום שלישי, 3=יום רביעי, 4=יום חמישי, 5=יום שישי, 6=שבת
 ילדים מותרים: ravid, amit, alin
 סוגים מותרים: dog, gym, sport, lesson, dance
-פורמט חובה לכל איבר:
-{ "dayIndex": number, "time": string, "child": "ravid|amit|alin", "title": string, "type": "dog|gym|sport|lesson|dance" }
+פורמט לכל איבר (שדות חובה כמו למעלה; אופציונלי: recurringWeekly):
+{ "dayIndex": number, "time": string, "child": "ravid|amit|alin", "title": string, "type": "dog|gym|sport|lesson|dance", "recurringWeekly"?: boolean }
+אם המשתמש מבקש משימה קבועה / חוזרת כל שבוע / "קבוע" / "כל שבוע" — קבע recurringWeekly: true לאירועים הרלוונטיים.
 
 אם מתקבלת תמונה, בצע OCR וחלץ ממנה ימים/שעות/ילד.
 החזר תמיד אך ורק מערך JSON, גם אם יש אירוע יחיד. ללא טקסט נוסף.

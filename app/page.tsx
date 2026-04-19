@@ -65,6 +65,8 @@ type ScheduleImportPreviewPending = {
 
 type RecurringTemplate = {
   templateId: string;
+  /** מזהה השורה ב־DB — חובה לעדכון שיוך/עריכה של משימה חוזרת (בלי זה נשמרת שורה חדשה עם id סינתטי). */
+  persistedRowId?: string;
   dayIndex: number;
   time: string;
   child: ChildKey;
@@ -131,6 +133,7 @@ const AI_OCR_SYSTEM_PROMPT = `אתה מנתח צילום מסך של אפליק�
 - כל פעילות של כדורסל/משחק => type: "sport"
 - כל פעילות של כושר/אימון => type: "gym"
 טקסט לוז ספורט (WhatsApp): אם יש "משחק" בשעה אחת ו"הסעה" בשעה אחרת — צור אירוע אחד בשעת המשחק והוסף בהערות/כותרת את שעת יציאת ההסעה (למשל "משחק — הסעה 16:45").
+משימה קבועה / חוזרת כל שבוע: אם המשתמש מבקש "משימה קבועה", "כל שבוע", "שבועית" — הוסף לכל אירוע רלוונטי שדה "recurringWeekly": true (בנוסף לשדות הרגילים).
 שורות ללא שעה (יום זיכרון, יום עצמאות) — אל תיצור להן אירוע.
 דוגמאות לצילום מסך שיעורי אנגלית:
 - יום ב' 20/04/26 15:00 שיעור קבוע Karl => dayIndex לפי התאריך ביחס לשבוע המוצג, time "15:00", child "amit"
@@ -791,6 +794,13 @@ const inferScheduleHeaderChild = (text: string): BaseChildKey | null => {
 const resolveScheduleHeaderChild = (text: string): BaseChildKey | null =>
   inferScheduleHeaderChild(text) ?? detectDefaultChildFromScheduleHeader(text);
 
+/** משימה חוזרת — לפי מילות מפתח בצ'אט (מקומי) או מודל (Gemini). */
+const RECURRING_SCHEDULE_HINT =
+  /(?:משימה\s*)?קבוע|משימה\s+קבועה|כל\s+שבוע|חוזרת|שבועית|פעילות\s+שבועית|weekly|recurring/i;
+
+const inferRecurringFromScheduleText = (fullText: string, lineText: string): boolean =>
+  RECURRING_SCHEDULE_HINT.test(lineText.trim()) || RECURRING_SCHEDULE_HINT.test(fullText);
+
 const minutesFromClock = (value: string) => {
   const normalized = normalizeClock(value);
   if (!normalized) {
@@ -986,6 +996,7 @@ const parseComplexWhatsAppMessage = (
             child,
             title: resolvedTitle,
             type,
+            recurringWeekly: inferRecurringFromScheduleText(rawText, lineFromMatch),
           });
           addedFromDayTimePairs += 1;
         }
@@ -1032,6 +1043,7 @@ const parseComplexWhatsAppMessage = (
         child,
         title: resolvedTitle,
         type,
+        recurringWeekly: inferRecurringFromScheduleText(rawText, line),
       });
     }
 
@@ -1114,6 +1126,7 @@ const parseComplexWhatsAppMessage = (
       child: inferredChild,
       title: description,
       type,
+      recurringWeekly: inferRecurringFromScheduleText(text, line),
     });
   }
 
@@ -1605,7 +1618,7 @@ const createWeekDays = (
     .filter((template) => !template.title.includes('ג׳וני') && !template.title.includes("ג'וני"))
     .forEach((template) => {
     addEvent(template.dayIndex, {
-      id: `${template.templateId}-${toIsoDate(weekStart)}`,
+      id: template.persistedRowId ?? `${template.templateId}-${toIsoDate(weekStart)}`,
       date: toEventDateKey(addDays(weekStart, template.dayIndex)),
       time: template.time,
       child: template.child,
@@ -2907,6 +2920,7 @@ export default function FamilyScheduler() {
       if (!templatesMap.has(templateId)) {
         templatesMap.set(templateId, {
           templateId,
+          persistedRowId: event.id,
           dayIndex: event.dayIndex,
           time: normalizeTimeForPicker(event.time),
           child: event.child,
@@ -4308,7 +4322,7 @@ export default function FamilyScheduler() {
       <button
         type="button"
         onClick={() => setShowSettingsModal(true)}
-        className="fixed top-5 left-5 md:top-6 md:left-6 z-40 h-10 w-10 rounded-full bg-slate-800 text-white shadow-lg hover:bg-slate-700 transition print:hidden flex items-center justify-center"
+        className="fixed bottom-28 left-4 md:bottom-32 md:left-6 z-40 h-10 w-10 rounded-full bg-slate-800 text-white shadow-lg hover:bg-slate-700 transition print:hidden flex items-center justify-center"
         aria-label="פתח הגדרות"
       >
         <Settings size={18} />
@@ -4316,7 +4330,7 @@ export default function FamilyScheduler() {
       <button
         type="button"
         onClick={() => setShowUpcomingListModal(true)}
-        className="fixed top-[5.5rem] left-5 md:left-6 z-40 h-10 w-10 rounded-full bg-indigo-600 text-white shadow-lg hover:bg-indigo-700 transition print:hidden flex items-center justify-center"
+        className="fixed bottom-16 left-4 md:bottom-20 md:left-6 z-40 h-10 w-10 rounded-full bg-indigo-600 text-white shadow-lg hover:bg-indigo-700 transition print:hidden flex items-center justify-center"
         aria-label="כל המשימות מהמסד"
       >
         <ClipboardList size={18} />
@@ -4461,7 +4475,11 @@ export default function FamilyScheduler() {
                         sourceWeekKey: weekKey,
                         dayIndex,
                         selectedDate: day.isoDate,
-                        data: { ...event, time: normalizeTimeForPicker(event.time) },
+                        data: {
+                          ...event,
+                          time: normalizeTimeForPicker(event.time),
+                          child: normalizeChildForSave(String(event.child)),
+                        },
                         recurringWeekly: parseMetadataBoolean(event.isRecurring),
                         originalRecurringTemplateId: event.recurringTemplateId,
                       });
