@@ -131,6 +131,15 @@ export const buildMetadataFromIncoming = (incoming: {
  * Does not CREATE the table — only adds the column if missing.
  */
 export const ensureScheduleMetadataColumn = async () => {
+  // Fresh/local databases may not have the table yet (no-op when it already exists).
+  await sql`
+    CREATE TABLE IF NOT EXISTS schedule (
+      id TEXT PRIMARY KEY,
+      title TEXT NOT NULL,
+      "date" TEXT NOT NULL,
+      metadata JSONB NOT NULL DEFAULT '{}'::jsonb
+    )
+  `;
   await sql`
     ALTER TABLE schedule
     ADD COLUMN IF NOT EXISTS metadata JSONB NOT NULL DEFAULT '{}'::jsonb
