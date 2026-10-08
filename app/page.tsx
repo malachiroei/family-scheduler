@@ -3,6 +3,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import Image from 'next/image';
 import { Dog, Dumbbell, Music, GraduationCap, Trophy, Printer, Image as ImageIcon, MessageCircle, ChevronRight, ChevronLeft, X, Plus, CalendarDays, Settings, RefreshCw, Video, ClipboardList, Trash2 } from 'lucide-react';
 import html2canvas from 'html2canvas';
+import AgentChat from '@/app/components/AgentChat';
 import { normalizeMetadataTime, parseMetadataBoolean } from '@/app/lib/scheduleTime';
 
 const baseChildrenConfig = {
@@ -1692,7 +1693,7 @@ export default function FamilyScheduler() {
     originalRecurringTemplateId?: string;
   } | null>(null);
   const [creatingEvent, setCreatingEvent] = useState<NewEventDraft | null>(null);
-  const [isChatOpen, setIsChatOpen] = useState(false);
+  const [, setIsChatOpen] = useState(false);
   const [chatClarificationPending, setChatClarificationPending] = useState<ChatClarificationPending | null>(null);
   const [scheduleImportPreview, setScheduleImportPreview] = useState<ScheduleImportPreviewPending | null>(null);
   const [showSettingsModal, setShowSettingsModal] = useState(false);
@@ -4964,202 +4965,7 @@ export default function FamilyScheduler() {
         </div>
       )}
 
-      <div className="print-chat fixed bottom-5 right-5 z-40 print:hidden">
-        {isChatOpen && (
-          <div className="mb-3 w-[min(92vw,390px)] bg-white border border-slate-200 rounded-2xl shadow-2xl overflow-hidden">
-            <div className="bg-slate-800 text-white px-4 py-3 flex items-center justify-between">
-              <span className="text-sm font-semibold">עדכון חכם לצ׳אט</span>
-              <button
-                type="button"
-                onClick={() => {
-                  setIsChatOpen(false);
-                  setChatClarificationPending(null);
-                  setScheduleImportPreview(null);
-                }}
-                className="rounded-md bg-white/10 hover:bg-white/20 p-1 transition"
-                aria-label="סגור צ׳אט"
-              >
-                <X size={16} />
-              </button>
-            </div>
-
-            <div className="p-3">
-              {chatClarificationPending && (
-                <div className="mb-2 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-950 text-right space-y-2">
-                  <div className="font-semibold">ממתין להבהרה</div>
-                  <ul className="list-disc list-inside space-y-1 pr-1">
-                    {chatClarificationPending.questions.map((q, idx) => (
-                      <li key={`clar-q-${idx}`}>{q}</li>
-                    ))}
-                  </ul>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setChatClarificationPending(null);
-                      setScheduleImportPreview(null);
-                      setSuccessMessage('');
-                      setApiError('');
-                    }}
-                    className="text-xs text-amber-800 underline hover:text-amber-950"
-                  >
-                    ביטול והתחלה מחדש
-                  </button>
-                </div>
-              )}
-              {scheduleImportPreview && (
-                <div className="mb-2 rounded-xl border border-indigo-200 bg-indigo-50/90 px-3 py-2 text-sm text-slate-900 text-right space-y-2">
-                  <div className="font-semibold text-indigo-950">תצוגה לפני שמירה</div>
-                  <p className="text-xs text-slate-600 leading-snug">
-                    בדקי שיוך ילד לכל שורה. אפשר לתקן בשדה או ללחוץ «כולם» — רק אחרי «אשר והוסף ללוח» הנתונים נשמרים בלוח.
-                  </p>
-                  <div className="flex flex-wrap gap-1 justify-end items-center text-[11px]">
-                    <span className="text-slate-600">שיוך מהיר:</span>
-                    <button
-                      type="button"
-                      onClick={() => applySchedulePreviewChildToAll('ravid')}
-                      className="rounded-md bg-blue-100 px-2 py-0.5 font-medium text-blue-900 hover:bg-blue-200"
-                    >
-                      כולם רביד
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => applySchedulePreviewChildToAll('amit')}
-                      className="rounded-md bg-emerald-100 px-2 py-0.5 font-medium text-emerald-900 hover:bg-emerald-200"
-                    >
-                      כולם עמית
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => applySchedulePreviewChildToAll('alin')}
-                      className="rounded-md bg-pink-100 px-2 py-0.5 font-medium text-pink-900 hover:bg-pink-200"
-                    >
-                      כולם אלין
-                    </button>
-                  </div>
-                  <ul className="max-h-44 overflow-y-auto space-y-1.5 pr-0.5">
-                    {scheduleImportPreview.draftEvents.map((ev, idx) => (
-                      <li
-                        key={`prev-${idx}-${ev.dayIndex}-${ev.time}-${(ev.title || '').slice(0, 12)}`}
-                        className="flex flex-col gap-1 rounded-lg bg-white/90 border border-indigo-100 px-2 py-1.5"
-                      >
-                        <div className="text-[11px] text-slate-600">
-                          {dayNames[ev.dayIndex] ?? `יום ${ev.dayIndex}`} · {normalizeTimeForPicker(ev.time)}
-                        </div>
-                        <div className="text-xs text-slate-800 line-clamp-2">{ev.title || 'פעילות'}</div>
-                        <select
-                          className="w-full rounded-lg border border-slate-200 bg-white px-2 py-1 text-xs"
-                          value={coerceBaseChildKey(String(ev.child))}
-                          onChange={(e) => updateSchedulePreviewChild(idx, e.target.value as BaseChildKey)}
-                        >
-                          <option value="ravid">רביד</option>
-                          <option value="amit">עמית</option>
-                          <option value="alin">אלין</option>
-                        </select>
-                      </li>
-                    ))}
-                  </ul>
-                  <div className="flex gap-2 justify-end pt-1">
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setScheduleImportPreview(null);
-                        setSuccessMessage('');
-                        setApiError('');
-                      }}
-                      className="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50"
-                    >
-                      ביטול
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => void confirmScheduleImportPreview()}
-                      disabled={isSubmitting}
-                      className="rounded-lg bg-indigo-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-indigo-700 disabled:opacity-60"
-                    >
-                      {isSubmitting ? 'שומר...' : 'אשר והוסף ללוח'}
-                    </button>
-                  </div>
-                </div>
-              )}
-              <div className="relative">
-                <input
-                  value={inputText}
-                  disabled={isSubmitting || requestInFlightRef.current || !!scheduleImportPreview}
-                  onChange={(e) => {
-                    setInputText(e.target.value);
-                  }}
-                  type="text"
-                  placeholder={
-                    scheduleImportPreview
-                      ? 'אשרי או בטלי את הרשימה למעלה לפני הדבקה חדשה'
-                      : chatClarificationPending
-                        ? 'השיבי בהבהרה (למשל: רביד, כדורסל)...'
-                        : 'עדכן לו״ז בקול חופשי (למשל: אימון לרביד ביום שלישי ב-16:00)'
-                  }
-                  className="w-full pl-14 pr-6 py-4 rounded-2xl border border-slate-200 bg-white shadow-sm focus:border-blue-400 focus:ring-0 outline-none transition-all text-right"
-                />
-                <button
-                  type="button"
-                  onClick={handleSendMessage}
-                  disabled={isSubmitting || requestInFlightRef.current || !!scheduleImportPreview}
-                  className="absolute left-2 top-2 bottom-2 bg-blue-600 text-white px-4 rounded-xl hover:bg-blue-700 transition flex items-center gap-2 disabled:opacity-60 disabled:cursor-not-allowed"
-                >
-                  <MessageCircle size={20} />
-                  <span>{isSubmitting ? 'מעדכן...' : 'עדכן'}</span>
-                </button>
-              </div>
-
-              <div className="mt-2 flex items-center justify-between gap-2">
-                <label className="text-xs bg-white border border-slate-200 rounded-lg px-2 py-1 cursor-pointer hover:bg-slate-50">
-                  העלאת תמונה
-                  <input
-                    type="file"
-                    accept="image/*"
-                    className="hidden"
-                    disabled={isSubmitting || requestInFlightRef.current || !!scheduleImportPreview}
-                    onChange={handleFileUpload}
-                  />
-                </label>
-
-                {selectedImage && (
-                  <div className="flex items-center gap-2">
-                    <div className="text-xs text-slate-700 bg-slate-100 border border-slate-200 rounded-md px-2 py-1 text-right">
-                      תמונה נבחרה: {selectedImage.name}
-                    </div>
-                    {selectedImagePreview && (
-                      <Image
-                        src={selectedImagePreview}
-                        alt="תצוגה מקדימה"
-                        width={40}
-                        height={40}
-                        unoptimized
-                        className="h-10 w-10 rounded-lg border border-slate-200 object-cover"
-                      />
-                    )}
-                  </div>
-                )}
-              </div>
-
-              {isSubmitting && <div className="text-slate-500 text-xs mt-2 text-right px-1">טוען...</div>}
-              {successMessage && (
-                <div className="text-emerald-600 text-sm mt-2 text-right px-1 whitespace-pre-wrap break-words">
-                  {successMessage}
-                </div>
-              )}
-              {apiError && <div className="text-red-500 text-sm mt-2 text-right px-1">{apiError}</div>}
-            </div>
-          </div>
-        )}
-
-        <button
-          type="button"
-          onClick={() => setIsChatOpen((prev) => !prev)}
-          className="h-14 w-14 rounded-full bg-slate-800 text-white shadow-xl hover:bg-slate-700 transition flex items-center justify-center"
-          aria-label={isChatOpen ? 'סגור צ׳אט' : 'פתח צ׳אט'}
-        >
-          <MessageCircle size={24} />
-        </button>
-      </div>
+      <AgentChat onSaved={() => { void refetchEventsFromDatabase(weekStart); }} />
 
       {creatingEvent && (
         <div className="fixed inset-0 bg-black/35 backdrop-blur-[1px] flex items-center justify-center p-4 z-[60] print:hidden">
