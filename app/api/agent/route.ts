@@ -228,7 +228,7 @@ const callGemini = async (prompt: string, img: { data: string; mime: string } | 
   const parts: Array<Record<string, unknown>> = [{ text: prompt }];
   if (img) parts.push({ inlineData: { mimeType: img.mime, data: img.data } });
   let lastErr = "";
-  for (const model of ["gemini-2.0-flash", "gemini-1.5-flash"]) {
+  for (const model of ["gemini-2.5-flash", "gemini-2.0-flash"]) {
     const res = await fetch(
       `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${key}`,
       {
@@ -246,8 +246,9 @@ const callGemini = async (prompt: string, img: { data: string; mime: string } | 
         data?.candidates?.[0]?.content?.parts?.map((p: { text?: string }) => p?.text || "").join("") ?? "",
       );
     }
-    lastErr = `Gemini ${res.status}: ${await res.text()}`;
-    if (res.status !== 404) break;
+    const errBody = await res.text();
+    lastErr = `Gemini ${model} ${res.status}: ${errBody}`;
+    console.error(`[agent] Gemini error (model=${model}, status=${res.status}):`, errBody);
   }
   throw new Error(lastErr);
 };
