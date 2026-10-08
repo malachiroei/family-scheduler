@@ -26,6 +26,7 @@ type Draft = {
   title: string | null;
   type: EventType | null;
   keyword: string | null;
+  sender_or_group: string | null; // WhatsApp group / chat title / contact name
 };
 
 type ChatTurn = { role: "user" | "assistant"; content: string };
@@ -37,6 +38,7 @@ const emptyDraft = (): Draft => ({
   title: null,
   type: null,
   keyword: null,
+  sender_or_group: null,
 });
 
 const errMsg = (e: unknown) => (e instanceof Error ? e.message : String(e));
@@ -106,10 +108,13 @@ const sanitizeDraft = (raw: unknown): Draft => {
     title: str(o.title),
     type: normalizeType(o.type),
     keyword: str(o.keyword, 40),
+    sender_or_group: str(o.sender_or_group, 80),
   };
 };
 
 /* ---------- learned patterns (family_learned_patterns) ---------- */
+
+const AUTO_ASSIGN_THRESHOLD = 3;
 
 let patternsTableReady = false;
 const ensurePatternsTable = async () => {
@@ -117,23 +122,43 @@ const ensurePatternsTable = async () => {
   await sql`
     CREATE TABLE IF NOT EXISTS family_learned_patterns (
       id SERIAL PRIMARY KEY,
-      keyword TEXT NOT NULL UNIQUE,
+      keyword TEXT NOT NULL,
       child_name TEXT NOT NULL,
       event_type TEXT,
       hits INTEGER NOT NULL DEFAULT 1,
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )
   `;
+  // Migrations for tables created by the earlier version.
+  await sql`ALTER TABLE family_learned_patterns ADD COLUMN IF NOT EXISTS sender_or_group TEXT NOT NULL DEFAULT ''`;
+  await sql`ALTER TABLE family_learned_patterns ADD COLUMN IF NOT EXISTS confirmations_count INTEGER NOT NULL DEFAULT 0`;
+  await sql`ALTER TABLE family_learned_patterns ADD COLUMN IF NOT EXISTS auto_assign BOOLEAN NOT NULL DEFAULT FALSE`;
+  await sql`ALTER TABLE family_learned_patterns DROP CONSTRAINT IF EXISTS family_learned_patterns_keyword_key`;
+  await sql`
+    CREATE UNIQUE INDEX IF NOT EXISTS family_learned_patterns_kw_sender_child_idx
+    ON family_learned_patterns (keyword, sender_or_group, child_name)
+  `;
   patternsTableReady = true;
 };
 
-type Pattern = { keyword: string; child_name: string; event_type: string | null; hits: number };
+type Pattern = {
+  keyword: string;
+  sender_or_group: string;
+  child_name: string;
+  event_type: string | null;
+  confirmations_count: number;
+  auto_assign: boolean;
+};
+
+const normSender = (s: string | null | undefined) => (s ?? "").trim().toLowerCase();
 
 const loadPatterns = async (): Promise<Pattern[]> => {
   try {
     await ensurePatternsTable();
     const r = await sql<Pattern>`
-      SELECT keyword, child_name, event_type, hits FROM family_learned_patterns ORDER BY hits DESC
+      SELECT keyword, sender_or_group, child_name, event_type, confirmations_count, auto_assign
+      FROM family_learned_patterns
+      ORDER BY confirmations_count DESC
     `;
     return r.rows;
   } catch (e) {
@@ -142,31 +167,52 @@ const loadPatterns = async (): Promise<Pattern[]> => {
   }
 };
 
-const learnPattern = async (keywords: Array<string | null>, child: Child, type: EventType | null) => {
+/**
+ * Called each time the user confirms (explicitly names the child, or answers a confirmation question).
+ * Learning is keyed by keyword + sender_or_group + child. auto_assign flips to true only at
+ * AUTO_ASSIGN_THRESHOLD confirmations, and only for a known (non-empty) source.
+ */
+const learnPattern = async (
+  keywords: Array<string | null>,
+  sender: string | null,
+  child: Child,
+  type: EventType | null,
+) => {
   try {
     await ensurePatternsTable();
+    const senderKey = normSender(sender);
     const uniq = [...new Set(keywords.map((k) => (k ?? "").trim().toLowerCase()).filter((k) => k.length >= 2))];
     for (const keyword of uniq) {
       await sql`
-        INSERT INTO family_learned_patterns (keyword, child_name, event_type, hits)
-        VALUES (${keyword}, ${child}, ${type}, 1)
-        ON CONFLICT (keyword) DO UPDATE SET
-          hits = CASE WHEN family_learned_patterns.child_name = EXCLUDED.child_name
-                      THEN family_learned_patterns.hits + 1 ELSE 1 END,
-          child_name = EXCLUDED.child_name,
+        INSERT INTO family_learned_patterns
+          (keyword, sender_or_group, child_name, event_type, hits, confirmations_count, auto_assign)
+        VALUES (${keyword}, ${senderKey}, ${child}, ${type}, 1, 1, FALSE)
+        ON CONFLICT (keyword, sender_or_group, child_name) DO UPDATE SET
+          hits = family_learned_patterns.hits + 1,
+          confirmations_count = family_learned_patterns.confirmations_count + 1,
           event_type = COALESCE(EXCLUDED.event_type, family_learned_patterns.event_type),
           updated_at = NOW()
       `;
+      if (senderKey) {
+        await sql`
+          UPDATE family_learned_patterns
+          SET auto_assign = TRUE
+          WHERE keyword = ${keyword} AND sender_or_group = ${senderKey} AND child_name = ${child}
+            AND confirmations_count >= ${AUTO_ASSIGN_THRESHOLD}
+        `;
+      }
     }
   } catch (e) {
     console.error("[agent] learnPattern failed", e);
   }
 };
 
-const matchPattern = (patterns: Pattern[], haystacks: Array<string | null>): Pattern | null => {
+/** Patterns whose keyword appears in the input AND whose source equals the draft's source. */
+const matchPatterns = (patterns: Pattern[], sender: string | null, haystacks: Array<string | null>) => {
   const hay = haystacks.filter(Boolean).join(" ").toLowerCase();
-  if (!hay) return null;
-  return patterns.find((p) => hay.includes(p.keyword)) ?? null;
+  if (!hay) return [];
+  const senderKey = normSender(sender);
+  return patterns.filter((p) => p.sender_or_group === senderKey && hay.includes(p.keyword));
 };
 
 /* ---------- LLM ---------- */
@@ -174,12 +220,16 @@ const matchPattern = (patterns: Pattern[], haystacks: Array<string | null>): Pat
 const buildPrompt = (text: string, draft: Draft, history: ChatTurn[], patterns: Pattern[]) => {
   const now = israelNow();
   const learned = patterns.length
-    ? patterns.slice(0, 40).map((p) => `"${p.keyword}" => ${CHILD_LABEL[p.child_name as Child] ?? p.child_name}`).join("; ")
+    ? patterns
+        .slice(0, 40)
+        .map((p) => `"${p.keyword}"${p.sender_or_group ? ` מ-"${p.sender_or_group}"` : ""} => ${CHILD_LABEL[p.child_name as Child] ?? p.child_name}`)
+        .join("; ")
     : "אין";
   const hist = history.slice(-8).map((h) => `${h.role === "user" ? "משתמש" : "סוכן"}: ${h.content}`).join("\n");
   return `אתה סוכן לו"ז משפחתי. חלץ פרטי אירוע מהקלט (טקסט ו/או תמונה) ומזג עם הטיוטה הקיימת.
 היום: ${now.iso} (${now.weekday}), אזור זמן Asia/Jerusalem. פענח "מחר", "ביום שלישי הבא" וכו' לתאריך YYYY-MM-DD מדויק.
-ילדים אפשריים: ravid (רביד), amit (עמית), alin (אלין). אם לא ברור במפורש מי הילד - החזר null, אל תנחש.
+ילדים אפשריים: ravid (רביד), amit (עמית), alin (אלין). child_name = רק אם הילד מוזכר במפורש בקלט החדש או בטיוטה. אם לא - החזר null. אל תנחש ואל תסיק ילד לפי סוג הפעילות או הדפוסים שנלמדו (הדפוסים רק לידיעתך; ההחלטה בצד השרת).
+sender_or_group = המקור של ההודעה: שם קבוצת הוואטסאפ, כותרת השיחה או שם איש הקשר שמופיע בראש צילום המסך (או מוזכר בטקסט). אם אין - null.
 סוגים: dog, gym, sport, lesson, dance. בחר את הקרוב ביותר (כדורסל/כדורגל = sport).
 keyword = מילה אחת/שתיים שמזהות את הפעילות או האדם (למשל "מאמן", "כדורסל", "קרל") לצורך למידה.
 דפוסים שנלמדו: ${learned}
@@ -188,7 +238,7 @@ ${hist ? `היסטוריית שיחה:\n${hist}\n` : ""}קלט חדש מהמשת
 
 אם הקלט החדש הוא תשובה קצרה (למשל "רביד" או "18:00") — עדכן רק את השדה המתאים בטיוטה.
 החזר JSON בלבד בפורמט:
-{"date": "YYYY-MM-DD"|null, "time": "HH:mm"|null, "child_name": "ravid"|"amit"|"alin"|null, "title": string|null, "type": "dog|gym|sport|lesson|dance"|null, "keyword": string|null}`;
+{"date": "YYYY-MM-DD"|null, "time": "HH:mm"|null, "child_name": "ravid"|"amit"|"alin"|null, "title": string|null, "type": "dog|gym|sport|lesson|dance"|null, "keyword": string|null, "sender_or_group": string|null}`;
 };
 
 const extractJsonObject = (t: string) => {
@@ -266,7 +316,7 @@ const buildQuestion = (draft: Draft, missing: string[], suggestedChild: Child | 
   const when = [draft.date, draft.time ? `ב-${draft.time}` : ""].filter(Boolean).join(" ");
   if (missing.length === 1 && missing[0] === "child_name") {
     if (suggestedChild) {
-      return `מזהה ${what}${when ? ` ${when}` : ""}, לרשום עבור ${CHILD_LABEL[suggestedChild]}?`;
+      return `זיהיתי ${what} ב-${draft.date} ב-${draft.time}. לשבץ עבור ${CHILD_LABEL[suggestedChild]}?`;
     }
     return `עבור מי ${what}${when ? ` (${when})` : ""}?`;
   }
@@ -295,7 +345,6 @@ export async function POST(request: NextRequest) {
           .map((h) => ({ role: h.role as "user" | "assistant", content: String(h.content).slice(0, 500) }))
       : [];
     const previousDraft = sanitizeDraft(body.draft);
-    const suggestedChildFromClient = normalizeChild(body.suggestedChild);
     const senderEndpoint = typeof body.senderSubscriptionEndpoint === "string" ? body.senderSubscriptionEndpoint : "";
 
     if (!text && !imageBase64) {
@@ -304,13 +353,22 @@ export async function POST(request: NextRequest) {
 
     const patterns = await loadPatterns();
 
-    // Shortcut: a bare child name answering a pending question, no LLM needed.
-    const bareChild = normalizeChild(text);
+    // Shortcut: a short reply ("רביד", "כן, עבור רביד", "עבור עמית", or a bare "כן" to the
+    // last suggestion) answering a pending question. No LLM needed; counts as a confirmation.
+    const replyChild = (() => {
+      if (imageBase64 || !previousDraft.title || text.length > 30) return null;
+      const named = CHILDREN.filter((c) => text.includes(CHILD_LABEL[c]));
+      if (named.length === 1) return named[0];
+      if (named.length === 0 && /^(כן|בטח|אישור|סבבה|אוקיי|אוקי|ok)[.!]?$/i.test(text)) {
+        const lastAssistant = [...history].reverse().find((h) => h.role === "assistant")?.content ?? "";
+        const m = lastAssistant.match(/לשבץ עבור (רביד|עמית|אלין)\?/);
+        return m ? normalizeChild(m[1]) : null;
+      }
+      return null;
+    })();
     let draft: Draft;
-    if (bareChild && !imageBase64 && previousDraft.title) {
-      draft = { ...previousDraft, child_name: bareChild };
-    } else if (/^(כן|בטח|אישור|סבבה|אוקיי|אוקי|ok)\.?$/i.test(text) && suggestedChildFromClient && !imageBase64) {
-      draft = { ...previousDraft, child_name: suggestedChildFromClient };
+    if (replyChild) {
+      draft = { ...previousDraft, child_name: replyChild };
     } else {
       const prompt = buildPrompt(text, previousDraft, history, patterns);
       const parsed = await runModel(prompt, imageBase64 ? { data: imageBase64, mime: imageMime } : null);
@@ -322,18 +380,25 @@ export async function POST(request: NextRequest) {
         title: fromModel.title ?? previousDraft.title,
         type: fromModel.type ?? previousDraft.type,
         keyword: fromModel.keyword ?? previousDraft.keyword,
+        sender_or_group: fromModel.sender_or_group ?? previousDraft.sender_or_group,
       };
     }
 
-    // Child still unknown -> consult learned memory first.
-    const suggestedChild: Child | null = suggestedChildFromClient;
+    // Child not stated by the user -> consult learned memory (keyword + source).
+    // A generic keyword alone never causes a silent save: only a pattern with auto_assign=true
+    // (3+ confirmations for this exact source+child) does. Otherwise it becomes a question.
+    let suggestedChild: Child | null = null;
     let childFromMemory = false;
     if (!draft.child_name) {
-      const hit = matchPattern(patterns, [draft.keyword, draft.title, text]);
-      const c = hit ? normalizeChild(hit.child_name) : null;
-      if (c) {
-        draft.child_name = c;
+      const matches = matchPatterns(patterns, draft.sender_or_group, [draft.keyword, draft.title, text]);
+      const autoKids = [...new Set(matches.filter((p) => p.auto_assign).map((p) => normalizeChild(p.child_name)))].filter(
+        (c): c is Child => c !== null,
+      );
+      if (autoKids.length === 1) {
+        draft.child_name = autoKids[0];
         childFromMemory = true;
+      } else if (matches.length > 0) {
+        suggestedChild = normalizeChild(matches[0].child_name); // highest confirmations
       }
     }
 
@@ -344,12 +409,21 @@ export async function POST(request: NextRequest) {
     if (!draft.title) missing.push("title");
 
     if (missing.length > 0) {
+      const confirmOnly = missing.length === 1 && missing[0] === "child_name" && suggestedChild;
+      const quick = !missing.includes("child_name")
+        ? []
+        : confirmOnly && suggestedChild
+          ? [
+              `כן, עבור ${CHILD_LABEL[suggestedChild]}`,
+              ...CHILDREN.filter((c) => c !== suggestedChild).map((c) => `עבור ${CHILD_LABEL[c]}`),
+            ]
+          : CHILDREN.map((c) => CHILD_LABEL[c]);
       return NextResponse.json({
+        quick_replies: quick,
         success: false,
         missing_fields: missing,
         question: buildQuestion(draft, missing, suggestedChild),
         draft,
-        quick_replies: missing.includes("child_name") ? CHILDREN.map((c) => CHILD_LABEL[c]) : [],
       });
     }
 
@@ -381,8 +455,8 @@ export async function POST(request: NextRequest) {
       VALUES (${id}, ${title}, ${date}, ${sqlJson(metadata)})
     `;
 
-    // Learn for next time.
-    await learnPattern([draft.keyword, title], child, type);
+    // Learn: every save is a confirmation for keyword + source + child (auto_assign at 3).
+    await learnPattern([draft.keyword, title], draft.sender_or_group, child, type);
 
     try {
       await sendPushToAll(
@@ -400,7 +474,7 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({
       success: true,
       message: `נרשם: ${title} עבור ${CHILD_LABEL[child]}, ${date} בשעה ${time}${
-        childFromMemory ? " (שייכתי לפי מה שלמדתי)" : ""
+        childFromMemory ? " (שובץ אוטומטית לפי למידה מאושרת)" : ""
       }`,
       event: { id, title, date, time, child, type },
       draft: emptyDraft(),
