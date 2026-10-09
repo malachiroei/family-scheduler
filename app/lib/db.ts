@@ -75,9 +75,10 @@ function getPostgres() {
     pg = postgres(url, {
       max: 2, // lets a background refresh run in parallel with a fetch, still tiny
       idle_timeout: 10, // seconds; close idle connections quickly
-      connect_timeout: 15, // seconds; a cold start's SSL handshake can take well over 5s
+      connect_timeout: 7, // seconds; fail fast if the network route is stuck (e.g. IPv6 unreachable)
       // Required behind a Transaction-mode pooler (Supabase :6543 / PgBouncer), which breaks on prepared statements.
       prepare: false,
+      // SSL is mandatory for Supabase's pooler (PgBouncer).
       ...(needsSsl ? { ssl: "require" as const } : {}),
     });
     globalForPg.__familySchedulerPg = pg;
@@ -97,9 +98,44 @@ export function sql<T extends PgRow = PgRow>(
   if (!client) {
     return Promise.reject(new Error("Missing database configuration"));
   }
-  return client(strings, ...values).then((result) => {
-    const rows = Array.from(result) as T[];
-    return { rows, rowCount: result.count };
+  return client(strings, ...values).then(
+    (result) => {
+      const rows = Array.from(result) as T[];
+      return { rows, rowCount: result.count };
+    },
+    (error: unknown) => {
+      logDbError(error);
+      throw error;
+    },
+  );
+}
+
+/** Classify and log connection/query errors (never logs credentials). */
+function logDbError(error: unknown) {
+  const e = (error ?? {}) as { code?: string; errno?: string | number; message?: string; address?: string; port?: number; detail?: string; hint?: string };
+  const code = String(e.code ?? e.errno ?? "");
+  let kind = "QUERY_ERROR";
+  if (code === "ENETUNREACH" || code === "EHOSTUNREACH") kind = "NETWORK_UNREACHABLE (likely IPv6 / no route)";
+  else if (code === "CONNECT_TIMEOUT" || code === "ETIMEDOUT") kind = "CONNECT_TIMEOUT (network stuck)";
+  else if (code === "ENOTFOUND" || code === "EAI_AGAIN") kind = "DNS_FAILURE";
+  else if (code === "ECONNREFUSED" || code === "ECONNRESET") kind = "CONNECTION_REFUSED_OR_RESET";
+  else if (code === "28P01" || code === "28000" || /password authentication|Tenant or user not found/i.test(e.message ?? "")) kind = "AUTH_ERROR";
+  else if (/SSL|TLS|certificate/i.test(e.message ?? "")) kind = "SSL_ERROR";
+  let host = "unknown";
+  try {
+    const u = new URL(resolveDatabaseUrl().url);
+    host = `${u.hostname}:${u.port}`;
+  } catch {
+    // ignore
+  }
+  console.error(`[db] ${kind}`, {
+    code,
+    message: e.message,
+    address: e.address,
+    port: e.port,
+    detail: e.detail,
+    hint: e.hint,
+    host,
   });
 }
 
