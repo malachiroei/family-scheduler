@@ -19,27 +19,23 @@ const TYPE_LABEL: Record<EventType, string> = {
   dance: "ריקוד",
 };
 
-type Draft = {
+type DraftEvent = {
   date: string | null; // YYYY-MM-DD
-  time: string | null; // HH:mm
-  child_name: Child | null;
+  time: string | null; // HH:mm (start time)
   title: string | null;
   type: EventType | null;
   keyword: string | null;
+};
+
+type Draft = {
+  events: DraftEvent[];
+  child_name: Child | null; // one child for the whole batch
   sender_or_group: string | null; // WhatsApp group / chat title / contact name
 };
 
 type ChatTurn = { role: "user" | "assistant"; content: string };
 
-const emptyDraft = (): Draft => ({
-  date: null,
-  time: null,
-  child_name: null,
-  title: null,
-  type: null,
-  keyword: null,
-  sender_or_group: null,
-});
+const emptyDraft = (): Draft => ({ events: [], child_name: null, sender_or_group: null });
 
 const errMsg = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
@@ -99,15 +95,35 @@ const normalizeType = (v: unknown): EventType | null => {
 const str = (v: unknown, max = 120) =>
   typeof v === "string" && v.trim() ? v.trim().slice(0, max) : null;
 
-const sanitizeDraft = (raw: unknown): Draft => {
+const sanitizeEvent = (raw: unknown): DraftEvent => {
   const o = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
   return {
     date: normalizeDate(o.date),
     time: normalizeTime(o.time),
-    child_name: normalizeChild(o.child_name ?? o.child),
     title: str(o.title),
     type: normalizeType(o.type),
     keyword: str(o.keyword, 40),
+  };
+};
+
+const dedupeEvents = (events: DraftEvent[]) => {
+  const seen = new Set<string>();
+  return events.filter((e) => {
+    // Fully empty rows are noise; rows missing date/time are kept so we can ask about them.
+    if (!e.date && !e.time && !e.title) return false;
+    const key = `${e.date}|${e.time}|${(e.title ?? "").toLowerCase()}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+};
+
+const sanitizeDraft = (raw: unknown): Draft => {
+  const o = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
+  const list = Array.isArray(o.events) ? o.events : [];
+  return {
+    events: dedupeEvents(list.slice(0, 30).map(sanitizeEvent)),
+    child_name: normalizeChild(o.child_name ?? o.child),
     sender_or_group: str(o.sender_or_group, 80),
   };
 };
@@ -115,6 +131,8 @@ const sanitizeDraft = (raw: unknown): Draft => {
 /* ---------- learned patterns (family_learned_patterns) ---------- */
 
 const AUTO_ASSIGN_THRESHOLD = 3;
+/** keyword value meaning "any message from this sender_or_group". */
+const SOURCE_WILDCARD = "*";
 
 let patternsTableReady = false;
 const ensurePatternsTable = async () => {
@@ -182,6 +200,8 @@ const learnPattern = async (
     await ensurePatternsTable();
     const senderKey = normSender(sender);
     const uniq = [...new Set(keywords.map((k) => (k ?? "").trim().toLowerCase()).filter((k) => k.length >= 2))];
+    // Source-level record: lets the next screenshot from the same group suggest this child directly.
+    if (senderKey) uniq.push(SOURCE_WILDCARD);
     for (const keyword of uniq) {
       await sql`
         INSERT INTO family_learned_patterns
@@ -210,9 +230,12 @@ const learnPattern = async (
 /** Patterns whose keyword appears in the input AND whose source equals the draft's source. */
 const matchPatterns = (patterns: Pattern[], sender: string | null, haystacks: Array<string | null>) => {
   const hay = haystacks.filter(Boolean).join(" ").toLowerCase();
-  if (!hay) return [];
   const senderKey = normSender(sender);
-  return patterns.filter((p) => p.sender_or_group === senderKey && hay.includes(p.keyword));
+  return patterns.filter(
+    (p) =>
+      p.sender_or_group === senderKey &&
+      ((p.keyword === SOURCE_WILDCARD && senderKey !== "") || (hay !== "" && hay.includes(p.keyword))),
+  );
 };
 
 /* ---------- LLM ---------- */
@@ -221,24 +244,32 @@ const buildPrompt = (text: string, draft: Draft, history: ChatTurn[], patterns: 
   const now = israelNow();
   const learned = patterns.length
     ? patterns
+        .filter((p) => p.keyword !== SOURCE_WILDCARD)
         .slice(0, 40)
         .map((p) => `"${p.keyword}"${p.sender_or_group ? ` מ-"${p.sender_or_group}"` : ""} => ${CHILD_LABEL[p.child_name as Child] ?? p.child_name}`)
-        .join("; ")
+        .join("; ") || "אין"
     : "אין";
   const hist = history.slice(-8).map((h) => `${h.role === "user" ? "משתמש" : "סוכן"}: ${h.content}`).join("\n");
-  return `אתה סוכן לו"ז משפחתי. חלץ פרטי אירוע מהקלט (טקסט ו/או תמונה) ומזג עם הטיוטה הקיימת.
-היום: ${now.iso} (${now.weekday}), אזור זמן Asia/Jerusalem. פענח "מחר", "ביום שלישי הבא" וכו' לתאריך YYYY-MM-DD מדויק.
-ילדים אפשריים: ravid (רביד), amit (עמית), alin (אלין). child_name = רק אם הילד מוזכר במפורש בקלט החדש או בטיוטה. אם לא - החזר null. אל תנחש ואל תסיק ילד לפי סוג הפעילות או הדפוסים שנלמדו (הדפוסים רק לידיעתך; ההחלטה בצד השרת).
-sender_or_group = המקור של ההודעה: שם קבוצת הוואטסאפ, כותרת השיחה או שם איש הקשר שמופיע בראש צילום המסך (או מוזכר בטקסט). אם אין - null.
-סוגים: dog, gym, sport, lesson, dance. בחר את הקרוב ביותר (כדורסל/כדורגל = sport).
-keyword = מילה אחת/שתיים שמזהות את הפעילות או האדם (למשל "מאמן", "כדורסל", "קרל") לצורך למידה.
-דפוסים שנלמדו: ${learned}
+  return `אתה סוכן לו"ז משפחתי. חלץ את כל האירועים מהקלט (טקסט ו/או צילום מסך, לרוב הודעת וואטסאפ) ומזג עם הטיוטה הקיימת.
+היום: ${now.iso} (${now.weekday}), אזור זמן Asia/Jerusalem.
+
+כללי חילוץ (קרא בקפידה, שורה אחר שורה):
+- הודעה אחת יכולה להכיל לו"ז שבועי עם כמה ימים ושעות, למשל "יום שני 16:30, שלישי 15:30, רביעי 16:00". החזר אירוע נפרד לכל יום/שעה. אל תדלג על אף בלוק ואל תמזג שני ימים לאירוע אחד.
+- חפש בלוקים בצורת "יום X - שעה Y" (או "X ב-Y", "X בשעה Y", "X Y"). time = שעת ההתחלה בלבד בפורמט HH:mm (בטווח "16:30-17:30" קח 16:30). שעה "4" אחה"צ = 16:00 בהקשר של פעילות ילדים.
+- date = תאריך YYYY-MM-DD מדויק. אם כתוב רק יום בשבוע (ראשון..שבת) — זה המופע הקרוב הבא של אותו יום החל מהיום (או מהשבוע שצוין בהודעה). פענח גם "מחר", "מחרתיים", "ביום שלישי הבא".
+- אל תמציא שעה או יום שלא כתובים. אם חסר — החזר null לשדה הזה.
+- sender_or_group = שם קבוצת הוואטסאפ / כותרת השיחה / שם איש הקשר שמופיע בראש צילום המסך (או מוזכר בטקסט), בדיוק כפי שהוא כתוב. אם אין - null.
+- child_name = ילד אחד לכל ההודעה: ravid (רביד), amit (עמית), alin (אלין) — רק אם מוזכר במפורש בקלט החדש או בטיוטה. אחרת null. אל תנחש ואל תסיק לפי סוג הפעילות או לפי הדפוסים (ההחלטה בצד השרת).
+- סוגים: dog, gym, sport, lesson, dance. בחר את הקרוב ביותר (כדורסל/כדורגל = sport).
+- title = כותרת קצרה לאירוע (למשל "אימון כדורסל"). keyword = מילה אחת/שתיים שמזהות את הפעילות או האדם (למשל "מאמן", "כדורסל", "קרל").
+
+דפוסים שנלמדו (לידיעתך בלבד): ${learned}
 טיוטה נוכחית: ${JSON.stringify(draft)}
 ${hist ? `היסטוריית שיחה:\n${hist}\n` : ""}קלט חדש מהמשתמש: ${text || "(ללא טקסט — ראה תמונה)"}
 
-אם הקלט החדש הוא תשובה קצרה (למשל "רביד" או "18:00") — עדכן רק את השדה המתאים בטיוטה.
+אם הקלט החדש הוא תיקון/השלמה (למשל "18:00" או "ביום חמישי") — עדכן את האירוע המתאים בטיוטה והחזר את הרשימה המלאה של האירועים (כולל אלה שלא השתנו).
 החזר JSON בלבד בפורמט:
-{"date": "YYYY-MM-DD"|null, "time": "HH:mm"|null, "child_name": "ravid"|"amit"|"alin"|null, "title": string|null, "type": "dog|gym|sport|lesson|dance"|null, "keyword": string|null, "sender_or_group": string|null}`;
+{"sender_or_group": string|null, "child_name": "ravid"|"amit"|"alin"|null, "events": [{"date": "YYYY-MM-DD"|null, "time": "HH:mm"|null, "title": string|null, "type": "dog|gym|sport|lesson|dance"|null, "keyword": string|null}]}`;
 };
 
 const extractJsonObject = (t: string) => {
@@ -311,20 +342,28 @@ const runModel = async (prompt: string, img: { data: string; mime: string } | nu
 
 /* ---------- questions ---------- */
 
+const describeEvent = (e: DraftEvent) =>
+  `${e.title || (e.type ? TYPE_LABEL[e.type] : "אירוע")} ב-${e.date} ב-${e.time}`;
+
 const buildQuestion = (draft: Draft, missing: string[], suggestedChild: Child | null) => {
-  const what = draft.title || (draft.type ? TYPE_LABEL[draft.type] : "אירוע");
-  const when = [draft.date, draft.time ? `ב-${draft.time}` : ""].filter(Boolean).join(" ");
+  const complete = draft.events.filter((e) => e.date && e.time);
   if (missing.length === 1 && missing[0] === "child_name") {
+    const summary =
+      complete.length === 1
+        ? `זיהיתי ${describeEvent(complete[0])}.`
+        : `זיהיתי ${complete.length} אירועים:\n${complete.map((e) => `• ${describeEvent(e)}`).join("\n")}`;
     if (suggestedChild) {
-      return `זיהיתי ${what} ב-${draft.date} ב-${draft.time}. לשבץ עבור ${CHILD_LABEL[suggestedChild]}?`;
+      return complete.length === 1
+        ? `${summary} לשבץ עבור ${CHILD_LABEL[suggestedChild]}?`
+        : `${summary}\nלשבץ את כולם עבור ${CHILD_LABEL[suggestedChild]}?`;
     }
-    return `עבור מי ${what}${when ? ` (${when})` : ""}?`;
+    return complete.length === 1 ? `${summary} עבור מי?` : `${summary}\nעבור מי לשבץ את כולם?`;
   }
   const labels: Record<string, string> = {
+    events: "איזה אירוע/ים (יום ושעה)",
     date: "באיזה תאריך/יום",
     time: "באיזו שעה",
     child_name: "עבור מי (רביד / עמית / אלין)",
-    title: "מה שם הפעילות",
   };
   return `חסר לי מידע: ${missing.map((m) => labels[m] ?? m).join(", ")}. אפשר להשלים?`;
 };
@@ -342,7 +381,7 @@ export async function POST(request: NextRequest) {
       ? (body.history as unknown[])
           .map((h) => h as Record<string, unknown>)
           .filter((h) => (h?.role === "user" || h?.role === "assistant") && typeof h.content === "string")
-          .map((h) => ({ role: h.role as "user" | "assistant", content: String(h.content).slice(0, 500) }))
+          .map((h) => ({ role: h.role as "user" | "assistant", content: String(h.content).slice(0, 800) }))
       : [];
     const previousDraft = sanitizeDraft(body.draft);
     const senderEndpoint = typeof body.senderSubscriptionEndpoint === "string" ? body.senderSubscriptionEndpoint : "";
@@ -353,44 +392,45 @@ export async function POST(request: NextRequest) {
 
     const patterns = await loadPatterns();
 
-    // Shortcut: a short reply ("רביד", "כן, עבור רביד", "עבור עמית", or a bare "כן" to the
-    // last suggestion) answering a pending question. No LLM needed; counts as a confirmation.
+    // Shortcut: a short reply ("עמית", "כן, עבור רביד", "עבור אלין", or a bare "כן" to the last
+    // suggestion) answering the pending child question. No LLM needed; counts as a confirmation.
     const replyChild = (() => {
-      if (imageBase64 || !previousDraft.title || text.length > 30) return null;
+      if (imageBase64 || previousDraft.events.length === 0 || text.length > 30) return null;
       const named = CHILDREN.filter((c) => text.includes(CHILD_LABEL[c]));
       if (named.length === 1) return named[0];
       if (named.length === 0 && /^(כן|בטח|אישור|סבבה|אוקיי|אוקי|ok)[.!]?$/i.test(text)) {
         const lastAssistant = [...history].reverse().find((h) => h.role === "assistant")?.content ?? "";
-        const m = lastAssistant.match(/לשבץ עבור (רביד|עמית|אלין)\?/);
+        const m = lastAssistant.match(/לשבץ[^?]*עבור (רביד|עמית|אלין)\?/);
         return m ? normalizeChild(m[1]) : null;
       }
       return null;
     })();
+
     let draft: Draft;
     if (replyChild) {
       draft = { ...previousDraft, child_name: replyChild };
     } else {
       const prompt = buildPrompt(text, previousDraft, history, patterns);
-      const parsed = await runModel(prompt, imageBase64 ? { data: imageBase64, mime: imageMime } : null);
+      const parsed = (await runModel(prompt, imageBase64 ? { data: imageBase64, mime: imageMime } : null)) as
+        | Record<string, unknown>
+        | null;
       const fromModel = sanitizeDraft(parsed);
       draft = {
-        date: fromModel.date ?? previousDraft.date,
-        time: fromModel.time ?? previousDraft.time,
+        // The model returns the full merged list; if it returns none, keep what we had.
+        events: fromModel.events.length > 0 ? fromModel.events : previousDraft.events,
         child_name: fromModel.child_name ?? previousDraft.child_name,
-        title: fromModel.title ?? previousDraft.title,
-        type: fromModel.type ?? previousDraft.type,
-        keyword: fromModel.keyword ?? previousDraft.keyword,
         sender_or_group: fromModel.sender_or_group ?? previousDraft.sender_or_group,
       };
     }
 
-    // Child not stated by the user -> consult learned memory (keyword + source).
+    // Child not stated by the user -> consult learned memory (keyword/source).
     // A generic keyword alone never causes a silent save: only a pattern with auto_assign=true
     // (3+ confirmations for this exact source+child) does. Otherwise it becomes a question.
     let suggestedChild: Child | null = null;
     let childFromMemory = false;
     if (!draft.child_name) {
-      const matches = matchPatterns(patterns, draft.sender_or_group, [draft.keyword, draft.title, text]);
+      const hay = [text, ...draft.events.flatMap((e) => [e.keyword, e.title])];
+      const matches = matchPatterns(patterns, draft.sender_or_group, hay);
       const autoKids = [...new Set(matches.filter((p) => p.auto_assign).map((p) => normalizeChild(p.child_name)))].filter(
         (c): c is Child => c !== null,
       );
@@ -403,10 +443,10 @@ export async function POST(request: NextRequest) {
     }
 
     const missing: string[] = [];
-    if (!draft.date) missing.push("date");
-    if (!draft.time) missing.push("time");
+    if (draft.events.length === 0) missing.push("events");
+    if (draft.events.some((e) => !e.date)) missing.push("date");
+    if (draft.events.some((e) => !e.time)) missing.push("time");
     if (!draft.child_name) missing.push("child_name");
-    if (!draft.title) missing.push("title");
 
     if (missing.length > 0) {
       const confirmOnly = missing.length === 1 && missing[0] === "child_name" && suggestedChild;
@@ -419,50 +459,63 @@ export async function POST(request: NextRequest) {
             ]
           : CHILDREN.map((c) => CHILD_LABEL[c]);
       return NextResponse.json({
-        quick_replies: quick,
         success: false,
         missing_fields: missing,
         question: buildQuestion(draft, missing, suggestedChild),
         draft,
+        quick_replies: quick,
       });
     }
 
-    // Complete. Save.
+    // Everything is known. Save all events at once.
     const child = draft.child_name as Child;
-    const date = draft.date as string;
-    const time = draft.time as string;
-    const title = draft.title as string;
-    const type: EventType = draft.type ?? "sport";
-    const id = crypto.randomUUID();
-
     await ensureScheduleMetadataColumn();
-    const metadata = buildMetadataFromIncoming({
-      dayIndex: dayIndexOf(date),
-      time,
-      child,
-      type,
-      isRecurring: false,
-      completed: false,
-      sendNotification: true,
-      requireConfirmation: false,
-      needsAck: false,
-      reminderLeadMinutes: null,
-      userId: "agent",
-      notified: false,
-    });
-    await sql`
-      INSERT INTO schedule (id, title, "date", metadata)
-      VALUES (${id}, ${title}, ${date}, ${sqlJson(metadata)})
-    `;
 
-    // Learn: every save is a confirmation for keyword + source + child (auto_assign at 3).
-    await learnPattern([draft.keyword, title], draft.sender_or_group, child, type);
+    const saved: Array<{ id: string; title: string; date: string; time: string; child: Child; type: EventType }> = [];
+    for (const e of draft.events) {
+      const date = e.date as string;
+      const time = e.time as string;
+      const type: EventType = e.type ?? "sport";
+      const title = e.title ?? e.keyword ?? TYPE_LABEL[type];
+      const id = crypto.randomUUID();
+      const metadata = buildMetadataFromIncoming({
+        dayIndex: dayIndexOf(date),
+        time,
+        child,
+        type,
+        isRecurring: false,
+        completed: false,
+        sendNotification: true,
+        requireConfirmation: false,
+        needsAck: false,
+        reminderLeadMinutes: null,
+        userId: "agent",
+        notified: false,
+      });
+      await sql`
+        INSERT INTO schedule (id, title, "date", metadata)
+        VALUES (${id}, ${title}, ${date}, ${sqlJson(metadata)})
+      `;
+      saved.push({ id, title, date, time, child, type });
+    }
+
+    // Learn immediately: keywords + the source (sender_or_group) => this child.
+    // Each batch counts as one confirmation; auto_assign flips on at 3 for a known source.
+    await learnPattern(
+      draft.events.flatMap((e) => [e.keyword, e.title]),
+      draft.sender_or_group,
+      child,
+      draft.events.find((e) => e.type)?.type ?? null,
+    );
 
     try {
       await sendPushToAll(
         {
-          title: "משימה חדשה נוספה",
-          body: `נוספה משימה ל${CHILD_LABEL[child]}: ${title} - ${time}`,
+          title: saved.length > 1 ? "משימות חדשות נוספו" : "משימה חדשה נוספה",
+          body:
+            saved.length > 1
+              ? `נוספו ${saved.length} משימות עבור ${CHILD_LABEL[child]}`
+              : `נוספה משימה ל${CHILD_LABEL[child]}: ${saved[0].title} - ${saved[0].time}`,
           url: "/",
         },
         { excludeEndpoint: senderEndpoint },
@@ -471,12 +524,13 @@ export async function POST(request: NextRequest) {
       console.error("[agent] push failed", e);
     }
 
+    const lines = saved.map((s) => `• ${s.title} — ${s.date} ב-${s.time}`).join("\n");
     return NextResponse.json({
       success: true,
-      message: `נרשם: ${title} עבור ${CHILD_LABEL[child]}, ${date} בשעה ${time}${
+      message: `נרשמו ${saved.length} אירועים עבור ${CHILD_LABEL[child]}${
         childFromMemory ? " (שובץ אוטומטית לפי למידה מאושרת)" : ""
-      }`,
-      event: { id, title, date, time, child, type },
+      }:\n${lines}`,
+      events: saved,
       draft: emptyDraft(),
     });
   } catch (error) {
