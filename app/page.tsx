@@ -1,7 +1,7 @@
 "use client";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import Image from 'next/image';
-import { Dog, Dumbbell, Music, GraduationCap, Trophy, Printer, MessageCircle, ChevronRight, ChevronLeft, X, Plus, CalendarDays, Settings, RefreshCw, Video, ClipboardList, Trash2 } from 'lucide-react';
+import { Dog, Dumbbell, Music, GraduationCap, Trophy, Printer, MessageCircle, ChevronRight, ChevronLeft, X, Plus, CalendarDays, Settings, RefreshCw, Video, ClipboardList, Trash2, Share2 } from 'lucide-react';
 import html2canvas from 'html2canvas';
 import AgentChat from '@/app/components/AgentChat';
 import { normalizeMetadataTime, parseMetadataBoolean } from '@/app/lib/scheduleTime';
@@ -3025,6 +3025,32 @@ export default function FamilyScheduler() {
     }
   };
 
+  const shareInstallLinkOnWhatsApp = async () => {
+    const url = window.location.origin;
+    const message = [
+      'היי! הנה הקישור ללוח הזמנים המשפחתי שלנו:',
+      url,
+      '',
+      'כדי להתקין כאפליקציה בנייד:',
+      "באייפון: לוחצים על כפתור השיתוף (ריבוע עם חץ) ⭢ 'הוסף למסך הבית'",
+      "באנדרואיד: לוחצים על 3 הנקודות בדפדפן ⭢ 'התקן אפליקציה' / 'הוסף למסך הבית'",
+    ].join('\n');
+
+    const isMobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
+    if (isMobile && typeof navigator.share === 'function') {
+      try {
+        await navigator.share({ text: message });
+        return;
+      } catch (error) {
+        if (error instanceof DOMException && error.name === 'AbortError') {
+          return; // user closed the share sheet
+        }
+        // otherwise fall through to the direct WhatsApp link
+      }
+    }
+    window.open(`https://wa.me/?text=${encodeURIComponent(message)}`, '_blank', 'noopener,noreferrer');
+  };
+
   const handleManualRefresh = async () => {
     if (isRefreshing) {
       return;
@@ -4892,6 +4918,13 @@ export default function FamilyScheduler() {
                   התקן אפליקציה
                 </button>
               )}
+              <button
+                type="button"
+                onClick={() => { void shareInstallLinkOnWhatsApp(); }}
+                className="w-full flex items-center justify-center gap-2 bg-[#25D366] text-white font-bold border border-[#1ebe5a] px-4 py-2 rounded-lg shadow-sm hover:bg-[#1ebe5a] transition"
+              >
+                <Share2 size={18} /> שתף קישור להתקנה בוואטסאפ
+              </button>
               <button
                 type="button"
                 onClick={() => {
