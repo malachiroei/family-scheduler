@@ -1,10 +1,10 @@
-import { NextRequest, NextResponse } from "next/server";
+import { NextRequest, NextResponse, after } from "next/server";
 import { sql, sqlJson } from "@/app/lib/db";
-import { buildMetadataFromIncoming, ensureScheduleMetadataColumn } from "@/app/lib/scheduleTable";
+import { buildMetadataFromIncoming } from "@/app/lib/scheduleTable";
 import { sendPushToAll } from "@/app/lib/push";
 
 export const revalidate = 0;
-export const maxDuration = 60;
+export const maxDuration = 30;
 
 // Family members the agent can schedule for: the three children plus the parents.
 const CHILDREN = ["roi", "sivan", "ravid", "amit", "alin"] as const;
@@ -445,8 +445,6 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ success: false, error: "Text or image is required" }, { status: 400 });
     }
 
-    const patterns = await loadPatterns();
-
     // Shortcut: a short reply ("עמית", "כן, עבור רביד", "עבור אלין", or a bare "כן" to the last
     // suggestion) answering the pending child question. No LLM needed; counts as a confirmation.
     const replyChild = (() => {
@@ -465,6 +463,9 @@ export async function POST(request: NextRequest) {
       }
       return null;
     })();
+
+    // Fast path (owner reply) needs no learned patterns: skip that DB work entirely.
+    const patterns = replyChild ? [] : await loadPatterns();
 
     let draft: Draft;
     if (replyChild) {
@@ -556,9 +557,8 @@ export async function POST(request: NextRequest) {
 
     // Everything is known. Save all events at once.
     const child = draft.child_name as Child;
-    await ensureScheduleMetadataColumn();
-
     const saved: Array<{ id: string; title: string; date: string; time: string; child: Child; type: EventType }> = [];
+    const rowsToInsert: Array<{ id: string; title: string; date: string; metadata: ReturnType<typeof buildMetadataFromIncoming> }> = [];
     for (const e of draft.events) {
       const date = e.date as string;
       const time = e.time as string;
@@ -579,42 +579,65 @@ export async function POST(request: NextRequest) {
         userId: "agent",
         notified: false,
       });
-      try {
-        await sql`
-          INSERT INTO schedule (id, title, "date", metadata)
-          VALUES (${id}, ${title}, ${date}, ${sqlJson(metadata)})
-        `;
-      } catch (dbError) {
-        console.error("[agent] INSERT INTO schedule failed", { id, title, date, time, child, details: describeError(dbError) });
-        throw new Error(`DB insert failed: ${describeError(dbError)}`);
-      }
+      rowsToInsert.push({ id, title, date, metadata });
       saved.push({ id, title, date, time, child, type });
     }
 
-    // Learn immediately: keywords + the source (sender_or_group) => this child.
-    // Each batch counts as one confirmation; auto_assign flips on at 3 for a known source.
-    await learnPattern(
-      draft.events.flatMap((e) => [e.keyword, e.title]),
-      draft.sender_or_group,
-      child,
-      draft.events.find((e) => e.type)?.type ?? null,
-    );
-
+    // The only DB work on the critical path: INSERT(s), capped at 6s so we answer before Vercel's 504.
+    const insertAll = (async () => {
+      for (const r of rowsToInsert) {
+        await sql`
+          INSERT INTO schedule (id, title, "date", metadata)
+          VALUES (${r.id}, ${r.title}, ${r.date}, ${sqlJson(r.metadata)})
+        `;
+      }
+    })();
+    let insertTimer: ReturnType<typeof setTimeout> | undefined;
     try {
-      await sendPushToAll(
-        {
-          title: saved.length > 1 ? "משימות חדשות נוספו" : "משימה חדשה נוספה",
-          body:
-            saved.length > 1
-              ? `נוספו ${saved.length} משימות עבור ${CHILD_LABEL[child]}`
-              : `נוספה משימה ל${CHILD_LABEL[child]}: ${saved[0].title} - ${saved[0].time}`,
-          url: "/",
-        },
-        { excludeEndpoint: senderEndpoint },
+      await Promise.race([
+        insertAll,
+        new Promise<never>((_, reject) => {
+          insertTimer = setTimeout(() => reject(new Error("DB insert timed out after 6s")), 6000);
+        }),
+      ]);
+    } catch (dbError) {
+      insertAll.catch(() => undefined); // avoid unhandled rejection if it fails after the timeout
+      console.error("[agent] INSERT INTO schedule failed", { child, events: saved, details: describeError(dbError) });
+      const timedOut = dbError instanceof Error && /timed out/.test(dbError.message);
+      return NextResponse.json(
+        { success: false, error: timedOut ? "מסד הנתונים לא הגיב תוך 6 שניות, נסו שוב" : `DB insert failed: ${describeError(dbError)}` },
+        { status: timedOut ? 504 : 500 },
       );
-    } catch (e) {
-      console.error("[agent] push failed", e);
+    } finally {
+      if (insertTimer) clearTimeout(insertTimer);
     }
+
+    // Learning + push run after the response is sent, so they never delay (or time out) the save.
+    const learnEvents = draft.events;
+    const learnSender = draft.sender_or_group;
+    after(async () => {
+      await learnPattern(
+        learnEvents.flatMap((e) => [e.keyword, e.title]),
+        learnSender,
+        child,
+        learnEvents.find((e) => e.type)?.type ?? null,
+      );
+      try {
+        await sendPushToAll(
+          {
+            title: saved.length > 1 ? "משימות חדשות נוספו" : "משימה חדשה נוספה",
+            body:
+              saved.length > 1
+                ? `נוספו ${saved.length} משימות עבור ${CHILD_LABEL[child]}`
+                : `נוספה משימה ל${CHILD_LABEL[child]}: ${saved[0].title} - ${saved[0].time}`,
+            url: "/",
+          },
+          { excludeEndpoint: senderEndpoint },
+        );
+      } catch (e) {
+        console.error("[agent] push failed", e);
+      }
+    });
 
     const lines = saved.map((s) => `• ${s.title} — ${s.date} ב-${s.time}`).join("\n");
     return NextResponse.json({

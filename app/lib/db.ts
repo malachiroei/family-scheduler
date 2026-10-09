@@ -85,7 +85,7 @@ function getPostgres() {
     pg = postgres(url, {
       max: 1, // a single connection per instance: Supabase session-mode pooler has very few slots
       idle_timeout: 2, // seconds; release the pooler slot right after the query finishes
-      connect_timeout: 7, // seconds; fail fast if the network route is stuck (e.g. IPv6 unreachable)
+      connect_timeout: 5, // seconds; fail fast if the network route is stuck (e.g. IPv6 unreachable)
       // Required behind a Transaction-mode pooler (Supabase :6543 / PgBouncer), which breaks on prepared statements.
       prepare: false,
       // SSL is mandatory for Supabase's pooler (PgBouncer).
