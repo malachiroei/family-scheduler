@@ -692,6 +692,8 @@ const applyActivityDetailToDraftEvents = (events: AiEvent[], detail: string): Ai
   });
 };
 
+const SCHEDULE_FETCH_TIMEOUT_MS = 5000;
+
 const normalizeChildForSave = (value: string): ChildKey => {
   const normalized = value.trim().toLowerCase();
   if (normalized === 'ravid' || normalized === 'amit' || normalized === 'alin' || normalized === 'roi' || normalized === 'sivan') {
@@ -1700,6 +1702,7 @@ export default function FamilyScheduler() {
     [initialWeekKey]: createEmptyWeekDays(initialWeekStart),
   }));
   const [scheduleLoadedWeekKey, setScheduleLoadedWeekKey] = useState<string | null>(null);
+  const [scheduleLoadError, setScheduleLoadError] = useState<string | null>(null);
   const [editingEvent, setEditingEvent] = useState<{
     sourceWeekKey: string;
     dayIndex: number;
@@ -2891,6 +2894,9 @@ export default function FamilyScheduler() {
   const weekRangeLabel = `${toDisplayDate(weekStart)} - ${toDisplayDate(addDays(weekStart, 6))}`;
 
   const refetchEventsFromDatabase = async (targetWeekStart: Date) => {
+    // Never hang: abort the request after 5s. The timer covers body parsing too.
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), SCHEDULE_FETCH_TIMEOUT_MS);
     try {
       const weekStartIso = toIsoDate(targetWeekStart);
       const weekEndIso = toIsoDate(addDays(targetWeekStart, 6));
@@ -2900,7 +2906,10 @@ export default function FamilyScheduler() {
         end: weekEndIso,
       });
       console.log('[API] GET /api/schedule -> start');
-      const response = await fetch(toApiUrl(`/api/schedule?${query.toString()}`), { cache: 'no-store' });
+      const response = await fetch(toApiUrl(`/api/schedule?${query.toString()}`), {
+        cache: 'no-store',
+        signal: controller.signal,
+      });
       const payload = await response.json();
       console.log('[API] GET /api/schedule ->', response.status, payload);
       if (!response.ok) {
@@ -2998,10 +3007,20 @@ export default function FamilyScheduler() {
 
       setRecurringTemplates(templates);
       setWeeksData((prev) => ({ ...prev, [targetWeekKey]: weekDays }));
+      setScheduleLoadError(null);
     } catch (error) {
       console.error('[API] GET /api/schedule client failed', error);
-      throw error;
+      const aborted = controller.signal.aborted || (error instanceof Error && error.name === 'AbortError');
+      const friendly = aborted
+        ? 'השרת לא הגיב בזמן (5 שניות).'
+        : error instanceof Error && error.message
+          ? error.message
+          : 'טעינת הלו״ז נכשלה.';
+      setScheduleLoadError(friendly);
+      throw aborted ? new Error(friendly) : error;
     } finally {
+      clearTimeout(timeoutId);
+      // Always leave the loading state, on success, error and timeout alike.
       setScheduleLoadedWeekKey(toIsoDate(targetWeekStart));
     }
   };
@@ -4513,6 +4532,20 @@ export default function FamilyScheduler() {
         <div className="max-w-6xl mx-auto py-16 flex flex-col items-center justify-center gap-2 text-slate-600 print:hidden">
           <RefreshCw size={22} className="animate-spin text-indigo-600" aria-hidden />
           <span className="text-sm font-semibold">טוען לו״ז מהשרת…</span>
+        </div>
+      ) : scheduleLoadError && days.length === 0 ? (
+        <div className="max-w-6xl mx-auto py-16 flex flex-col items-center justify-center gap-3 text-center print:hidden">
+          <span className="text-sm font-semibold text-red-600">לא הצלחנו לטעון את הלו״ז: {scheduleLoadError}</span>
+          <button
+            type="button"
+            onClick={() => {
+              setScheduleLoadedWeekKey(null);
+              void refetchEventsFromDatabase(weekStart).catch(() => {});
+            }}
+            className="rounded-xl bg-indigo-600 px-5 py-2 text-sm font-bold text-white shadow hover:bg-indigo-700 transition"
+          >
+            נסה שוב
+          </button>
         </div>
       ) : (
       <div id="schedule-table" className="printable-schedule max-w-6xl mx-auto grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">

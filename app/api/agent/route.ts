@@ -7,7 +7,7 @@ export const revalidate = 0;
 export const maxDuration = 60;
 
 // Family members the agent can schedule for: the three children plus the parents.
-const CHILDREN = ["ravid", "amit", "alin", "roi", "sivan"] as const;
+const CHILDREN = ["roi", "sivan", "amit", "alin", "ravid"] as const;
 type Child = (typeof CHILDREN)[number];
 const CHILD_LABEL: Record<Child, string> = {
   ravid: "רביד",
@@ -267,6 +267,8 @@ const buildPrompt = (text: string, draft: Draft, history: ChatTurn[], patterns: 
 - date = תאריך YYYY-MM-DD מדויק. אם כתוב רק יום בשבוע (ראשון..שבת) — זה המופע הקרוב הבא של אותו יום החל מהיום (או מהשבוע שצוין בהודעה). פענח גם "מחר", "מחרתיים", "ביום שלישי הבא".
 - אל תמציא שעה או יום שלא כתובים. אם חסר — החזר null לשדה הזה.
 - sender_or_group = שם קבוצת הוואטסאפ / כותרת השיחה / שם איש הקשר שמופיע בראש צילום המסך (או מוזכר בטקסט), בדיוק כפי שהוא כתוב. אם אין - null.
+- הבחנה בין פנייה לשיוך: פנייה מנומסת לנמען השיחה, כמו "היי רועי", "רועי רשמתי", "שלום סיון", היא רק פנייה לנמען ואינה אומרת שהאירוע שייך לו! אל תקבע child_name על סמך פנייה/ברכה כזו. child_name נקבע רק כשברור שהאירוע עצמו מיועד לאותו אדם (למשל "אימון לרביד", "תרשום לרועי פגישה").
+- אירועים של הכלב (ג'וני, תספורת לג'וני, וטרינר, חיסון) ואירועים משפחתיים כלליים: אין לשייך אותם אוטומטית לאף אחד. החזר child_name: null (type="dog" לאירועי כלב).
 - child_name = בן משפחה אחד לכל ההודעה: ravid (רביד), amit (עמית), alin (אלין), roi (רועי - אבא), sivan (סיון - אמא) — רק אם מוזכר במפורש בקלט החדש או בטיוטה (למשל "תרשום לרועי פגישה ב-10:00"). אחרת null. אל תנחש ואל תסיק לפי סוג הפעילות או לפי הדפוסים (ההחלטה בצד השרת).
 - סוגים: dog, gym, sport, lesson, dance. בחר את הקרוב ביותר (כדורסל/כדורגל = sport).
 - title = כותרת קצרה לאירוע (למשל "אימון כדורסל"). keyword = מילה אחת/שתיים שמזהות את הפעילות או האדם (למשל "מאמן", "כדורסל", "קרל").
@@ -350,8 +352,18 @@ const runModel = async (prompt: string, img: { data: string; mime: string } | nu
 
 /* ---------- questions ---------- */
 
+const shortDate = (iso: string | null) => {
+  const m = (iso ?? "").match(/^\d{4}-(\d{2})-(\d{2})$/);
+  return m ? `${m[2]}/${m[1]}` : iso ?? "";
+};
+
 const describeEvent = (e: DraftEvent) =>
-  `${e.title || (e.type ? TYPE_LABEL[e.type] : "אירוע")} ב-${e.date} ב-${e.time}`;
+  `${e.title || (e.type ? TYPE_LABEL[e.type] : "אירוע")} ב-${shortDate(e.date)} ב-${e.time}`;
+
+/** Dog (Johnny) and general family events must never be auto-assigned: always ask who it is for. */
+const GENERAL_EVENT_RE = /ג['׳’]וני|וטרינר|כלב|חיסון|כל המשפחה|ארוחת משפחה|אירוע משפחתי|משפחתי/;
+const isGeneralEvent = (e: DraftEvent, text: string) =>
+  e.type === "dog" || GENERAL_EVENT_RE.test(`${e.title ?? ""} ${e.keyword ?? ""}`) || (e.type === null && GENERAL_EVENT_RE.test(text));
 
 const buildQuestion = (draft: Draft, missing: string[], suggestedChild: Child | null) => {
   const complete = draft.events.filter((e) => e.date && e.time);
@@ -365,7 +377,7 @@ const buildQuestion = (draft: Draft, missing: string[], suggestedChild: Child | 
         ? `${summary} לשבץ עבור ${CHILD_LABEL[suggestedChild]}?`
         : `${summary}\nלשבץ את כולם עבור ${CHILD_LABEL[suggestedChild]}?`;
     }
-    return complete.length === 1 ? `${summary} עבור מי?` : `${summary}\nעבור מי לשבץ את כולם?`;
+    return complete.length === 1 ? `${summary} עבור מי לשבץ?` : `${summary}\nעבור מי לשבץ את כולם?`;
   }
   const labels: Record<string, string> = {
     events: "איזה אירוע/ים (יום ושעה)",
@@ -431,12 +443,20 @@ export async function POST(request: NextRequest) {
       };
     }
 
+    // Dog / general family events on first sight: never trust a guessed owner (e.g. from "היי רועי"),
+    // never use memory. Always ask. Once the user answers (next turn) the answer is trusted.
+    const mustAsk =
+      !replyChild && previousDraft.events.length === 0 && draft.events.some((e) => isGeneralEvent(e, text));
+    if (mustAsk) {
+      draft.child_name = null;
+    }
+
     // Child not stated by the user -> consult learned memory (keyword/source).
     // A generic keyword alone never causes a silent save: only a pattern with auto_assign=true
     // (3+ confirmations for this exact source+child) does. Otherwise it becomes a question.
     let suggestedChild: Child | null = null;
     let childFromMemory = false;
-    if (!draft.child_name) {
+    if (!draft.child_name && !mustAsk) {
       const hay = [text, ...draft.events.flatMap((e) => [e.keyword, e.title])];
       const matches = matchPatterns(patterns, draft.sender_or_group, hay);
       const autoKids = [...new Set(matches.filter((p) => p.auto_assign).map((p) => normalizeChild(p.child_name)))].filter(
