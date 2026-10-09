@@ -1,7 +1,7 @@
 "use client";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import Image from 'next/image';
-import { Dog, Dumbbell, Music, GraduationCap, Trophy, Printer, Image as ImageIcon, MessageCircle, ChevronRight, ChevronLeft, X, Plus, CalendarDays, Settings, RefreshCw, Video, ClipboardList, Trash2 } from 'lucide-react';
+import { Dog, Dumbbell, Music, GraduationCap, Trophy, Printer, MessageCircle, ChevronRight, ChevronLeft, X, Plus, CalendarDays, Settings, RefreshCw, Video, ClipboardList, Trash2 } from 'lucide-react';
 import html2canvas from 'html2canvas';
 import AgentChat from '@/app/components/AgentChat';
 import { normalizeMetadataTime, parseMetadataBoolean } from '@/app/lib/scheduleTime';
@@ -10,6 +10,8 @@ const baseChildrenConfig = {
   ravid: { name: 'רביד', color: 'bg-blue-500', iconColor: 'text-blue-500' },
   amit: { name: 'עמית', color: 'bg-green-500', iconColor: 'text-green-500' },
   alin: { name: 'אלין', color: 'bg-pink-500', iconColor: 'text-pink-500' },
+  roi: { name: 'רועי', color: 'bg-orange-500', iconColor: 'text-orange-500' },
+  sivan: { name: 'סיון', color: 'bg-violet-500', iconColor: 'text-violet-500' },
 };
 
 type BaseChildKey = keyof typeof baseChildrenConfig;
@@ -116,6 +118,8 @@ const childOptions: Array<{ key: ChildKey; label: string }> = [
   { key: 'ravid', label: 'רביד' },
   { key: 'amit', label: 'עמית' },
   { key: 'alin', label: 'אלין' },
+  { key: 'roi', label: 'רועי' },
+  { key: 'sivan', label: 'סיון' },
   { key: 'amit_alin', label: 'עמית ואלין (ביחד)' },
   { key: 'alin_ravid', label: 'אלין ורביד (ביחד)' },
   { key: 'amit_ravid', label: 'עמית ורביד (ביחד)' },
@@ -361,6 +365,8 @@ const bulkImportChildLabel: Record<BaseChildKey, string> = {
   ravid: 'רביד',
   amit: 'עמית',
   alin: 'אלין',
+  roi: 'רועי',
+  sivan: 'סיון',
 };
 
 /** Text after the weekday + time on a bulk line — use as task title when descriptive (e.g. משחק בוגרות…). */
@@ -577,6 +583,8 @@ const normalizeChildKey = (value: string): BaseChildKey | null => {
   if (normalized === 'amit' || normalized === 'עמית') return 'amit';
   if (normalized === 'ravid' || normalized === 'רביד') return 'ravid';
   if (normalized === 'alin' || normalized === 'אלין') return 'alin';
+  if (normalized === 'roi' || normalized === 'רועי') return 'roi';
+  if (normalized === 'sivan' || normalized === 'סיון') return 'sivan';
   return null;
 };
 
@@ -686,7 +694,7 @@ const applyActivityDetailToDraftEvents = (events: AiEvent[], detail: string): Ai
 
 const normalizeChildForSave = (value: string): ChildKey => {
   const normalized = value.trim().toLowerCase();
-  if (normalized === 'ravid' || normalized === 'amit' || normalized === 'alin') {
+  if (normalized === 'ravid' || normalized === 'amit' || normalized === 'alin' || normalized === 'roi' || normalized === 'sivan') {
     return normalized as ChildKey;
   }
   if (normalized === 'amit_alin' || normalized === 'alin_ravid' || normalized === 'amit_ravid') {
@@ -696,7 +704,7 @@ const normalizeChildForSave = (value: string): ChildKey => {
 };
 
 const normalizeChildFilterValue = (value: unknown): 'all' | BaseChildKey => {
-  if (value === 'ravid' || value === 'amit' || value === 'alin') {
+  if (value === 'ravid' || value === 'amit' || value === 'alin' || value === 'roi' || value === 'sivan') {
     return value;
   }
   return 'all';
@@ -3582,6 +3590,8 @@ export default function FamilyScheduler() {
           ravid: '#3b82f6',
           amit: '#22c55e',
           alin: '#ec4899',
+          roi: '#f97316',
+          sivan: '#8b5cf6',
         };
 
         const dayAccent = ['#c7d2fe', '#bfdbfe', '#bbf7d0', '#fde68a', '#fecaca', '#ddd6fe', '#fbcfe8'];
@@ -4338,10 +4348,6 @@ export default function FamilyScheduler() {
         <RefreshCw size={14} className={isRefreshing ? 'animate-spin' : ''} />
         <span className="text-xs font-bold">רענן</span>
       </button>
-      <div className="fixed top-5 left-1/2 -translate-x-1/2 z-40 rounded-full border border-indigo-300 bg-indigo-100 px-3 py-1 text-xs font-extrabold text-indigo-900 shadow-lg print:hidden">
-        גרסה חדשה פעילה • V20
-      </div>
-
       <div className="max-w-6xl mx-auto mb-4 pb-4 print:hidden">
         {pendingReminderConfirmation && (
           <div className="mb-3 rounded-xl border border-indigo-200 bg-indigo-50 p-3 flex items-center justify-between gap-3">
@@ -4403,13 +4409,39 @@ export default function FamilyScheduler() {
           </div>
           {(Object.keys(baseChildrenConfig) as BaseChildKey[]).map((childKey) => {
             const config = baseChildrenConfig[childKey];
+            const isActive = activeChildFilter === childKey;
             return (
-              <div key={childKey} className="flex items-center gap-1.5 bg-white border border-slate-200 rounded-xl px-3 py-2 shadow-sm hover:bg-slate-50 transition">
+              <button
+                key={childKey}
+                type="button"
+                aria-pressed={isActive}
+                onClick={() => setSelectedChildFilter(isActive ? 'all' : childKey)}
+                title={isActive ? 'לחצו שוב להצגת הכל' : `הצג רק את ${config.name}`}
+                className={`flex items-center gap-1.5 rounded-xl border px-3 py-2 shadow-sm transition ${
+                  isActive
+                    ? 'bg-slate-800 border-slate-800 ring-2 ring-offset-1 ring-slate-400'
+                    : activeChildFilter === 'all'
+                      ? 'bg-white border-slate-200 hover:bg-slate-50'
+                      : 'bg-white border-slate-200 opacity-50 hover:opacity-100'
+                }`}
+              >
                 <span className={`w-3 h-3 rounded-full ${config.color}`} />
-                <span className="text-sm font-bold text-slate-700">{config.name}</span>
-              </div>
+                <span className={`text-sm font-bold ${isActive ? 'text-white' : 'text-slate-700'}`}>{config.name}</span>
+              </button>
             );
           })}
+          <button
+            type="button"
+            aria-pressed={activeChildFilter === 'all'}
+            onClick={() => setSelectedChildFilter('all')}
+            className={`rounded-xl border px-3 py-2 text-sm font-bold shadow-sm transition ${
+              activeChildFilter === 'all'
+                ? 'bg-indigo-600 border-indigo-600 text-white'
+                : 'bg-white border-slate-200 text-slate-700 hover:bg-slate-50'
+            }`}
+          >
+            הצג הכל
+          </button>
         </div>
 
       </div>
@@ -4712,22 +4744,6 @@ export default function FamilyScheduler() {
               </button>
             </div>
 
-            <div className="rounded-xl border border-slate-200 bg-slate-50 p-3 text-sm text-slate-700 space-y-2 leading-relaxed">
-              <div className="font-bold text-slate-800">עריכת הלו״ז</div>
-              <p>
-                <span className="font-semibold text-slate-800">הוספת משימה:</span>{' '}
-                בתחתית כל יום יש כפתור &quot;+ הוסף משימה&quot; (נשאר גלוי גם כשיש הרבה אירועים). אפשר גם ללחוץ על הרקע הריק כשאין אירועים ביום.
-              </p>
-              <p>
-                <span className="font-semibold text-slate-800">מחיקת משימה:</span>{' '}
-                לחיצה על משימה פותחת עריכה — בחרי &quot;מחק משימה&quot; בשורת הפעולות למטה, ואז הזיני את סיסמת המחיקה (ברירת מחדל <span className="font-mono">2101</span>, או הערך של <code className="text-xs bg-white px-1 rounded border border-slate-200">DELETE_PASSWORD</code> בשרת).
-              </p>
-              <p>
-                <span className="font-semibold text-slate-800">שמירה (פיתוח מקומי):</span>{' '}
-                שמירת עריכות דורשת מסד Postgres. הוסיפי בקובץ <code className="text-xs bg-white px-1 rounded border border-slate-200">.env.local</code> את <code className="text-xs bg-white px-1 rounded border border-slate-200">SUPABASE_POSTGRES_URL</code> או <code className="text-xs bg-white px-1 rounded border border-slate-200">SUPABASE_DATABASE_URL</code> (עדיפות), או <code className="text-xs bg-white px-1 rounded border border-slate-200">POSTGRES_URL</code> / <code className="text-xs bg-white px-1 rounded border border-slate-200">DATABASE_URL</code>, שמרי והפעילי מחדש את <span className="font-mono text-xs">npm run dev</span>.
-              </p>
-            </div>
-
             <div className="space-y-1.5">
               {isInstallReady && (
                 <button
@@ -4782,14 +4798,6 @@ export default function FamilyScheduler() {
                 className="w-full flex items-center justify-center gap-2 bg-white border border-slate-200 px-4 py-1.5 rounded-lg hover:bg-slate-50 transition"
               >
                 <Printer size={18} /> הדפסה
-              </button>
-              <button
-                type="button"
-                onClick={() => { void exportAsImage(); }}
-                disabled={exportImageBusy}
-                className="w-full flex items-center justify-center gap-2 bg-slate-800 text-white px-4 py-1.5 rounded-lg hover:bg-slate-700 transition disabled:opacity-60 disabled:cursor-not-allowed"
-              >
-                <ImageIcon size={18} /> {exportImageBusy ? 'מכין תמונה...' : 'תמונה לוואטסאפ'}
               </button>
               {pushUserName && (
                 <div className="text-xs text-slate-600 bg-slate-100 border border-slate-200 rounded-lg px-2 py-2 text-center">

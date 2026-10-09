@@ -6,10 +6,17 @@ import { sendPushToAll } from "@/app/lib/push";
 export const revalidate = 0;
 export const maxDuration = 60;
 
-const CHILDREN = ["ravid", "amit", "alin"] as const;
+// Family members the agent can schedule for: the three children plus the parents.
+const CHILDREN = ["ravid", "amit", "alin", "roi", "sivan"] as const;
 type Child = (typeof CHILDREN)[number];
-const CHILD_LABEL: Record<Child, string> = { ravid: "רביד", amit: "עמית", alin: "אלין" };
-const TYPES = ["dog", "gym", "sport", "lesson", "dance"] as const;
+const CHILD_LABEL: Record<Child, string> = {
+  ravid: "רביד",
+  amit: "עמית",
+  alin: "אלין",
+  roi: "רועי",
+  sivan: "סיון",
+};
+const TYPES = ["dog", "gym", "sport", "lesson", "dance", "other"] as const;
 type EventType = (typeof TYPES)[number];
 const TYPE_LABEL: Record<EventType, string> = {
   dog: "כלב",
@@ -17,6 +24,7 @@ const TYPE_LABEL: Record<EventType, string> = {
   sport: "ספורט",
   lesson: "שיעור",
   dance: "ריקוד",
+  other: "אירוע",
 };
 
 type DraftEvent = {
@@ -259,7 +267,7 @@ const buildPrompt = (text: string, draft: Draft, history: ChatTurn[], patterns: 
 - date = תאריך YYYY-MM-DD מדויק. אם כתוב רק יום בשבוע (ראשון..שבת) — זה המופע הקרוב הבא של אותו יום החל מהיום (או מהשבוע שצוין בהודעה). פענח גם "מחר", "מחרתיים", "ביום שלישי הבא".
 - אל תמציא שעה או יום שלא כתובים. אם חסר — החזר null לשדה הזה.
 - sender_or_group = שם קבוצת הוואטסאפ / כותרת השיחה / שם איש הקשר שמופיע בראש צילום המסך (או מוזכר בטקסט), בדיוק כפי שהוא כתוב. אם אין - null.
-- child_name = ילד אחד לכל ההודעה: ravid (רביד), amit (עמית), alin (אלין) — רק אם מוזכר במפורש בקלט החדש או בטיוטה. אחרת null. אל תנחש ואל תסיק לפי סוג הפעילות או לפי הדפוסים (ההחלטה בצד השרת).
+- child_name = בן משפחה אחד לכל ההודעה: ravid (רביד), amit (עמית), alin (אלין), roi (רועי - אבא), sivan (סיון - אמא) — רק אם מוזכר במפורש בקלט החדש או בטיוטה (למשל "תרשום לרועי פגישה ב-10:00"). אחרת null. אל תנחש ואל תסיק לפי סוג הפעילות או לפי הדפוסים (ההחלטה בצד השרת).
 - סוגים: dog, gym, sport, lesson, dance. בחר את הקרוב ביותר (כדורסל/כדורגל = sport).
 - title = כותרת קצרה לאירוע (למשל "אימון כדורסל"). keyword = מילה אחת/שתיים שמזהות את הפעילות או האדם (למשל "מאמן", "כדורסל", "קרל").
 
@@ -269,7 +277,7 @@ ${hist ? `היסטוריית שיחה:\n${hist}\n` : ""}קלט חדש מהמשת
 
 אם הקלט החדש הוא תיקון/השלמה (למשל "18:00" או "ביום חמישי") — עדכן את האירוע המתאים בטיוטה והחזר את הרשימה המלאה של האירועים (כולל אלה שלא השתנו).
 החזר JSON בלבד בפורמט:
-{"sender_or_group": string|null, "child_name": "ravid"|"amit"|"alin"|null, "events": [{"date": "YYYY-MM-DD"|null, "time": "HH:mm"|null, "title": string|null, "type": "dog|gym|sport|lesson|dance"|null, "keyword": string|null}]}`;
+{"sender_or_group": string|null, "child_name": "ravid"|"amit"|"alin"|"roi"|"sivan"|null, "events": [{"date": "YYYY-MM-DD"|null, "time": "HH:mm"|null, "title": string|null, "type": "dog|gym|sport|lesson|dance|other"|null, "keyword": string|null}]}`;
 };
 
 const extractJsonObject = (t: string) => {
@@ -363,7 +371,7 @@ const buildQuestion = (draft: Draft, missing: string[], suggestedChild: Child | 
     events: "איזה אירוע/ים (יום ושעה)",
     date: "באיזה תאריך/יום",
     time: "באיזו שעה",
-    child_name: "עבור מי (רביד / עמית / אלין)",
+    child_name: "עבור מי (רביד / עמית / אלין / רועי / סיון)",
   };
   return `חסר לי מידע: ${missing.map((m) => labels[m] ?? m).join(", ")}. אפשר להשלים?`;
 };
@@ -400,7 +408,7 @@ export async function POST(request: NextRequest) {
       if (named.length === 1) return named[0];
       if (named.length === 0 && /^(כן|בטח|אישור|סבבה|אוקיי|אוקי|ok)[.!]?$/i.test(text)) {
         const lastAssistant = [...history].reverse().find((h) => h.role === "assistant")?.content ?? "";
-        const m = lastAssistant.match(/לשבץ[^?]*עבור (רביד|עמית|אלין)\?/);
+        const m = lastAssistant.match(/לשבץ[^?]*עבור (רביד|עמית|אלין|רועי|סיון)\?/);
         return m ? normalizeChild(m[1]) : null;
       }
       return null;
@@ -475,7 +483,7 @@ export async function POST(request: NextRequest) {
     for (const e of draft.events) {
       const date = e.date as string;
       const time = e.time as string;
-      const type: EventType = e.type ?? "sport";
+      const type: EventType = e.type ?? (child === "roi" || child === "sivan" ? "other" : "sport");
       const title = e.title ?? e.keyword ?? TYPE_LABEL[type];
       const id = crypto.randomUUID();
       const metadata = buildMetadataFromIncoming({

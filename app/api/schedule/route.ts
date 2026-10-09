@@ -37,6 +37,8 @@ const allowedScheduleChildren = [
   "ravid",
   "amit",
   "alin",
+  "roi",
+  "sivan",
   "amit_alin",
   "alin_ravid",
   "amit_ravid",
@@ -45,12 +47,16 @@ const childLabelMap: Record<string, string> = {
   ravid: "רביד",
   amit: "עמית",
   alin: "אלין",
+  roi: "רועי",
+  sivan: "סיון",
 };
 
 const childTargetLabelMap: Record<string, string> = {
   ravid: "רביד",
   amit: "עמית",
   alin: "אלין",
+  roi: "רועי",
+  sivan: "סיון",
   amit_alin: "עמית ואלין",
   alin_ravid: "אלין ורביד",
   amit_ravid: "עמית ורביד",
