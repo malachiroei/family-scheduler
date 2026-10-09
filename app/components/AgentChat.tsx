@@ -15,6 +15,17 @@ const fileToBase64 = (file: File) =>
     r.readAsDataURL(file);
   });
 
+type AgentResponse = {
+  success?: boolean;
+  message?: string;
+  error?: string;
+  question?: string;
+  missing_fields?: unknown;
+  quick_replies?: string[];
+  draft?: Draft;
+  events?: AgentSavedEvent[];
+};
+
 export type AgentSavedEvent = {
   id: string;
   title: string;
@@ -57,7 +68,8 @@ export default function AgentChat({ onSaved }: { onSaved?: (events: AgentSavedEv
     setMessages((prev) => [...prev, { role: "user", content: text || "(צילום מסך)", image: sentImage ?? undefined }]);
     setInput("");
     setImage(null);
-    setQuickReplies([]);
+    // Quick replies stay visible until the server answers (and come back if the request fails),
+    // so the question never loses its buttons.
     setBusy(true);
     try {
       const res = await fetch("/api/agent", {
@@ -71,20 +83,26 @@ export default function AgentChat({ onSaved }: { onSaved?: (events: AgentSavedEv
           imageMimeType: sentImage?.match(/^data:([^;]+);/)?.[1],
         }),
       });
-      const data = await res.json().catch(() => ({}));
+      const raw = await res.text();
+      let data: AgentResponse = {};
+      try {
+        data = raw ? JSON.parse(raw) : {};
+      } catch {
+        // non-JSON body (e.g. a platform timeout page)
+      }
       if (data?.success) {
+        setQuickReplies([]);
         setMessages((prev) => [...prev, { role: "assistant", content: `✅ ${data.message}` }]);
         setDraft(null);
         onSaved?.(Array.isArray(data.events) ? data.events : []);
+        return;
       } else if (Array.isArray(data?.missing_fields)) {
         setDraft(data.draft ?? null);
         setQuickReplies(Array.isArray(data.quick_replies) ? data.quick_replies : []);
         setMessages((prev) => [...prev, { role: "assistant", content: data.question || "חסר לי מידע נוסף." }]);
       } else {
-        setMessages((prev) => [
-          ...prev,
-          { role: "assistant", content: `⚠️ משהו השתבש: ${data?.error ?? res.statusText}` },
-        ]);
+        const detail = data?.error || raw.replace(/<[^>]*>/g, " ").trim().slice(0, 200) || res.statusText || "אין פירוט";
+        setMessages((prev) => [...prev, { role: "assistant", content: `⚠️ משהו השתבש (${res.status}): ${detail}` }]);
       }
     } catch (e) {
       setMessages((prev) => [

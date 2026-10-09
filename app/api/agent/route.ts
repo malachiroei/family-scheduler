@@ -7,7 +7,7 @@ export const revalidate = 0;
 export const maxDuration = 60;
 
 // Family members the agent can schedule for: the three children plus the parents.
-const CHILDREN = ["roi", "sivan", "amit", "alin", "ravid"] as const;
+const CHILDREN = ["roi", "sivan", "ravid", "amit", "alin"] as const;
 type Child = (typeof CHILDREN)[number];
 const CHILD_LABEL: Record<Child, string> = {
   ravid: "רביד",
@@ -45,7 +45,18 @@ type ChatTurn = { role: "user" | "assistant"; content: string };
 
 const emptyDraft = (): Draft => ({ events: [], child_name: null, sender_or_group: null });
 
-const errMsg = (e: unknown) => (e instanceof Error ? e.message : String(e));
+/** Readable one-liner including Postgres fields (code/detail/hint/table/column) when present. */
+const describeError = (e: unknown): string => {
+  if (!e || typeof e !== "object") return String(e) || "Unknown error";
+  const o = e as Record<string, unknown>;
+  const parts: string[] = [];
+  const msg = e instanceof Error ? e.message : typeof o.message === "string" ? o.message : "";
+  if (msg) parts.push(msg);
+  for (const k of ["code", "detail", "hint", "table", "column", "constraint"]) {
+    if (typeof o[k] === "string" && o[k]) parts.push(`${k}=${o[k]}`);
+  }
+  return parts.join(" | ") || e.constructor?.name || "Unknown error";
+};
 
 /* ---------- date helpers (Asia/Jerusalem) ---------- */
 
@@ -439,8 +450,13 @@ export async function POST(request: NextRequest) {
     // Shortcut: a short reply ("עמית", "כן, עבור רביד", "עבור אלין", or a bare "כן" to the last
     // suggestion) answering the pending child question. No LLM needed; counts as a confirmation.
     const replyChild = (() => {
-      if (imageBase64 || previousDraft.events.length === 0 || text.length > 30) return null;
+      // Only while a draft is waiting for its owner, and only for a short free-text reply that does not
+      // itself carry a new time (so a new schedule pasted mid-conversation still goes to the model).
+      if (imageBase64 || previousDraft.events.length === 0 || text.length > 100) return null;
+      if (/\d{1,2}[:.]\d{2}/.test(text)) return null;
       const named = CHILDREN.filter((c) => text.includes(CHILD_LABEL[c]));
+      // Free text like "זה תספורת לגוני תשבצי על רועי": the pending date/time stay as they are, and the
+      // reply is NOT re-parsed for date/time. One mentioned name is enough.
       if (named.length === 1) return named[0];
       if (named.length === 0 && /^(כן|בטח|אישור|סבבה|אוקיי|אוקי|ok)[.!]?$/i.test(text)) {
         const lastAssistant = [...history].reverse().find((h) => h.role === "assistant")?.content ?? "";
@@ -453,6 +469,17 @@ export async function POST(request: NextRequest) {
     let draft: Draft;
     if (replyChild) {
       draft = { ...previousDraft, child_name: replyChild };
+      // The user clarified it is for Johnny: make the saved title say so ("תספורת" -> "תספורת לג'וני").
+      if (/ג['׳’]?וני/.test(text)) {
+        draft.events = draft.events.map((e) => {
+          const base = (e.title ?? "").trim() || TYPE_LABEL[e.type ?? "dog"];
+          return {
+            ...e,
+            title: /ג['׳’]?וני/.test(base) ? base : `${base} לג'וני`,
+            type: e.type ?? "dog",
+          };
+        });
+      }
     } else {
       const prompt = buildPrompt(text, previousDraft, history, patterns);
       const parsed = (await runModel(prompt, imageBase64 ? { data: imageBase64, mime: imageMime } : null)) as
@@ -552,10 +579,15 @@ export async function POST(request: NextRequest) {
         userId: "agent",
         notified: false,
       });
-      await sql`
-        INSERT INTO schedule (id, title, "date", metadata)
-        VALUES (${id}, ${title}, ${date}, ${sqlJson(metadata)})
-      `;
+      try {
+        await sql`
+          INSERT INTO schedule (id, title, "date", metadata)
+          VALUES (${id}, ${title}, ${date}, ${sqlJson(metadata)})
+        `;
+      } catch (dbError) {
+        console.error("[agent] INSERT INTO schedule failed", { id, title, date, time, child, details: describeError(dbError) });
+        throw new Error(`DB insert failed: ${describeError(dbError)}`);
+      }
       saved.push({ id, title, date, time, child, type });
     }
 
@@ -594,7 +626,8 @@ export async function POST(request: NextRequest) {
       draft: emptyDraft(),
     });
   } catch (error) {
-    console.error("[API] POST /api/agent failed", error);
-    return NextResponse.json({ success: false, error: errMsg(error) }, { status: 500 });
+    // Full detail goes to the server log (visible in Vercel); the client gets a readable, non-empty message.
+    console.error("[API] POST /api/agent failed:", describeError(error), error);
+    return NextResponse.json({ success: false, error: describeError(error) }, { status: 500 });
   }
 }
