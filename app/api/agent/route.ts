@@ -268,7 +268,8 @@ const buildPrompt = (text: string, draft: Draft, history: ChatTurn[], patterns: 
 - אל תמציא שעה או יום שלא כתובים. אם חסר — החזר null לשדה הזה.
 - sender_or_group = שם קבוצת הוואטסאפ / כותרת השיחה / שם איש הקשר שמופיע בראש צילום המסך (או מוזכר בטקסט), בדיוק כפי שהוא כתוב. אם אין - null.
 - הבחנה בין פנייה לשיוך: פנייה מנומסת לנמען השיחה, כמו "היי רועי", "רועי רשמתי", "שלום סיון", היא רק פנייה לנמען ואינה אומרת שהאירוע שייך לו! אל תקבע child_name על סמך פנייה/ברכה כזו. child_name נקבע רק כשברור שהאירוע עצמו מיועד לאותו אדם (למשל "אימון לרביד", "תרשום לרועי פגישה").
-- אירועים של הכלב (ג'וני, תספורת לג'וני, וטרינר, חיסון) ואירועים משפחתיים כלליים: אין לשייך אותם אוטומטית לאף אחד. החזר child_name: null (type="dog" לאירועי כלב).
+- שלילה מוחלטת של הסקת בעלים מביטויי אישור/ברכה: "רועי רשמתי", "היי רועי", "שלום סיון", "תודה רועי" — אלה לעולם אינם אומרים שהאירוע שייך לאדם. אל תסיק מהם child_name.
+- כלל ברזל: תספורת / וטרינר / בדיקה / טיפול / חיסון, כל אירוע של הכלב, וכל מקרה ש"ג'וני"/"גוני" מופיע בשם איש הקשר או השיחה (למשל "מירב גוני ספרית") — לעולם child_name: null, גם אם כתוב "רועי רשמתי". כותרת האירוע יכולה להיות פשוט "תספורת". לאירועי כלב type="dog". אירועים משפחתיים כלליים — גם הם null.
 - child_name = בן משפחה אחד לכל ההודעה: ravid (רביד), amit (עמית), alin (אלין), roi (רועי - אבא), sivan (סיון - אמא) — רק אם מוזכר במפורש בקלט החדש או בטיוטה (למשל "תרשום לרועי פגישה ב-10:00"). אחרת null. אל תנחש ואל תסיק לפי סוג הפעילות או לפי הדפוסים (ההחלטה בצד השרת).
 - סוגים: dog, gym, sport, lesson, dance. בחר את הקרוב ביותר (כדורסל/כדורגל = sport).
 - title = כותרת קצרה לאירוע (למשל "אימון כדורסל"). keyword = מילה אחת/שתיים שמזהות את הפעילות או האדם (למשל "מאמן", "כדורסל", "קרל").
@@ -361,9 +362,32 @@ const describeEvent = (e: DraftEvent) =>
   `${e.title || (e.type ? TYPE_LABEL[e.type] : "אירוע")} ב-${shortDate(e.date)} ב-${e.time}`;
 
 /** Dog (Johnny) and general family events must never be auto-assigned: always ask who it is for. */
-const GENERAL_EVENT_RE = /ג['׳’]וני|וטרינר|כלב|חיסון|כל המשפחה|ארוחת משפחה|אירוע משפחתי|משפחתי/;
-const isGeneralEvent = (e: DraftEvent, text: string) =>
-  e.type === "dog" || GENERAL_EVENT_RE.test(`${e.title ?? ""} ${e.keyword ?? ""}`) || (e.type === null && GENERAL_EVENT_RE.test(text));
+const GENERAL_EVENT_RE =
+  /ג['׳’]?וני|וטרינר|כלב|חיסון|תספורת|ספרי?ת|מספרה|בדיקה|טיפול|כל המשפחה|ארוחת משפחה|אירוע משפחתי|משפחתי/;
+/**
+ * Iron rule: haircut / vet / check-up / treatment events, anything about Johnny (including when "גוני/ג'וני"
+ * is only the sender or chat name, e.g. "מירב גוני ספרית"), and general family events are NEVER assigned
+ * automatically, whatever else the message says ("רועי רשמתי", "היי רועי", ...).
+ */
+const isGeneralEvent = (e: DraftEvent, text: string, sender: string | null) =>
+  e.type === "dog" ||
+  GENERAL_EVENT_RE.test(`${e.title ?? ""} ${e.keyword ?? ""}`) ||
+  GENERAL_EVENT_RE.test(sender ?? "") ||
+  GENERAL_EVENT_RE.test(text);
+
+/**
+ * A name is only an owner when it appears outside greetings / acknowledgements such as
+ * "היי רועי", "שלום סיון", "תודה רועי", "רועי רשמתי". Removes those phrases and checks what is left.
+ */
+const ACK_WORDS = "(?:היי|הי|שלום|תודה רבה|תודה|בוקר טוב|ערב טוב|אחלה)";
+const ACK_AFTER = "(?:רשמתי|רשמנו|רשום|תודה|שלום|היי|הי|שמעת|בבקשה|ok|אוקי|אוקיי)";
+const isExplicitOwnerMention = (text: string, child: Child) => {
+  const name = CHILD_LABEL[child];
+  const cleaned = text
+    .replace(new RegExp(`${ACK_WORDS}\\s*,?\\s*${name}`, "gi"), " ")
+    .replace(new RegExp(`${name}\\s*,?\\s*${ACK_AFTER}`, "gi"), " ");
+  return cleaned.includes(name) || cleaned.toLowerCase().includes(child);
+};
 
 const buildQuestion = (draft: Draft, missing: string[], suggestedChild: Child | null) => {
   const complete = draft.events.filter((e) => e.date && e.time);
@@ -435,10 +459,16 @@ export async function POST(request: NextRequest) {
         | Record<string, unknown>
         | null;
       const fromModel = sanitizeDraft(parsed);
+      // Never infer an owner from a greeting/acknowledgement ("היי רועי", "רועי רשמתי", "תודה רועי").
+      // For plain text we can verify it; for screenshots the prompt rule applies (plus the general-event rule below).
+      const verifiedModelChild =
+        fromModel.child_name && !imageBase64 && !isExplicitOwnerMention(text, fromModel.child_name)
+          ? null
+          : fromModel.child_name;
       draft = {
         // The model returns the full merged list; if it returns none, keep what we had.
         events: fromModel.events.length > 0 ? fromModel.events : previousDraft.events,
-        child_name: fromModel.child_name ?? previousDraft.child_name,
+        child_name: verifiedModelChild ?? previousDraft.child_name,
         sender_or_group: fromModel.sender_or_group ?? previousDraft.sender_or_group,
       };
     }
@@ -446,7 +476,9 @@ export async function POST(request: NextRequest) {
     // Dog / general family events on first sight: never trust a guessed owner (e.g. from "היי רועי"),
     // never use memory. Always ask. Once the user answers (next turn) the answer is trusted.
     const mustAsk =
-      !replyChild && previousDraft.events.length === 0 && draft.events.some((e) => isGeneralEvent(e, text));
+      !replyChild &&
+      previousDraft.events.length === 0 &&
+      draft.events.some((e) => isGeneralEvent(e, text, draft.sender_or_group));
     if (mustAsk) {
       draft.child_name = null;
     }

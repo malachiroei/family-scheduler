@@ -65,10 +65,6 @@ type PgClient = ReturnType<typeof postgres>;
 const globalForPg = globalThis as unknown as { __familySchedulerPg?: PgClient };
 let pg: PgClient | null = globalForPg.__familySchedulerPg ?? null;
 
-/** Supabase transaction pooler (port 6543) does not support prepared statements — see Supabase docs. */
-const isSupabaseTransactionPort = (url: string) =>
-  /db\.[^/]+\.supabase\.co:6543\b/i.test(url) || /:6543(\/|\?|$)/.test(url);
-
 function getPostgres() {
   const { url } = resolveDatabaseUrl();
   if (!url) {
@@ -76,13 +72,13 @@ function getPostgres() {
   }
   if (!pg) {
     const needsSsl = !/^postgres(ql)?:\/\/[^@]+@(localhost|127\.0\.0\.1)(:\d+)?\//i.test(url);
-    const transactionPooler = isSupabaseTransactionPort(url);
     pg = postgres(url, {
-      max: 1, // keep the pool tiny: each serverless instance holds at most one connection
+      max: 2, // lets a background refresh run in parallel with a fetch, still tiny
       idle_timeout: 10, // seconds; close idle connections quickly
-      connect_timeout: 5, // seconds; fail fast instead of hanging
+      connect_timeout: 15, // seconds; a cold start's SSL handshake can take well over 5s
+      // Required behind a Transaction-mode pooler (Supabase :6543 / PgBouncer), which breaks on prepared statements.
+      prepare: false,
       ...(needsSsl ? { ssl: "require" as const } : {}),
-      ...(transactionPooler ? { prepare: false } : {}),
     });
     globalForPg.__familySchedulerPg = pg;
   }

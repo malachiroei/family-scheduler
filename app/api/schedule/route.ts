@@ -9,8 +9,8 @@ import { sendPushToAll, sendPushToParents, sendUpcomingTaskReminders } from "@/a
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
-// Allow for a serverless cold start + DB connect (connect_timeout is 10s) before the platform cuts us off.
-export const maxDuration = 15;
+// Allow for a serverless cold start + DB connect (connect_timeout is 15s) before the platform cuts us off.
+export const maxDuration = 30;
 
 const dbConfig = getDatabaseConfig();
 const activeDatabaseUrl = dbConfig.url;

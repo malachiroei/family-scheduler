@@ -693,7 +693,7 @@ const applyActivityDetailToDraftEvents = (events: AiEvent[], detail: string): Ai
 };
 
 /** Generous enough for a serverless cold start + DB connect, short enough to never hang forever. */
-const SCHEDULE_FETCH_TIMEOUT_MS = 10000;
+const SCHEDULE_FETCH_TIMEOUT_MS = 20000;
 
 const normalizeChildForSave = (value: string): ChildKey => {
   const normalized = value.trim().toLowerCase();
@@ -2008,8 +2008,28 @@ export default function FamilyScheduler() {
     let cancelled = false;
 
     const hydrateState = async () => {
+      // 1) Local cache first: instant, works offline, and never leaves the board blank if the server is slow.
       try {
-        const response = await fetch(toApiUrl('/api/state'), { cache: 'no-store' });
+        const raw = localStorage.getItem(SCHEDULER_STORAGE_KEY);
+        if (raw) {
+          const parsed = JSON.parse(raw) as PersistedStatePayload;
+          const normalized = normalizePersistedState(parsed, initialWeekStart);
+          if (!cancelled) {
+            setWeekStart(normalized.weekStart);
+            setRecurringTemplates(normalized.recurringTemplates);
+            setWeeksData(normalized.weeksData);
+          }
+          return;
+        }
+      } catch {
+        // corrupt cache: fall through to the server state
+      }
+
+      // 2) No usable local cache: ask the server, but never wait forever (5s abort).
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 5000);
+      try {
+        const response = await fetch(toApiUrl('/api/state'), { cache: 'no-store', signal: controller.signal });
         if (response.ok) {
           const payload = await response.json() as { state?: PersistedStatePayload };
           if (payload?.state && !cancelled) {
@@ -2021,27 +2041,18 @@ export default function FamilyScheduler() {
           }
         }
       } catch {
-        // ignore and fallback to localStorage
+        // timeout / network error: use the empty fallback below
+      } finally {
+        clearTimeout(timeoutId);
       }
 
-      try {
-        const raw = localStorage.getItem(SCHEDULER_STORAGE_KEY);
-        const parsed = raw ? JSON.parse(raw) as PersistedStatePayload : null;
-        const normalized = normalizePersistedState(parsed, initialWeekStart);
-        if (!cancelled) {
-          setWeekStart(normalized.weekStart);
-          setRecurringTemplates(normalized.recurringTemplates);
-          setWeeksData(normalized.weeksData);
-        }
-      } catch {
-        if (!cancelled) {
-          const fallbackWeek = initialWeekStart;
-          setWeekStart(fallbackWeek);
-          setRecurringTemplates([]);
-          setWeeksData({
-            [toIsoDate(fallbackWeek)]: createEmptyWeekDays(fallbackWeek),
-          });
-        }
+      // 3) Fresh start. The schedule refetch from the database fills the board right after hydration.
+      if (!cancelled) {
+        setWeekStart(initialWeekStart);
+        setRecurringTemplates([]);
+        setWeeksData({
+          [toIsoDate(initialWeekStart)]: createEmptyWeekDays(initialWeekStart),
+        });
       }
     };
 
@@ -3017,7 +3028,7 @@ export default function FamilyScheduler() {
       console.error('[API] GET /api/schedule client failed', error);
       const aborted = controller.signal.aborted || (error instanceof Error && error.name === 'AbortError');
       const friendly = aborted
-        ? 'השרת לא הגיב בזמן (10 שניות).'
+        ? 'השרת לא הגיב בזמן (20 שניות).'
         : error instanceof Error && error.message
           ? error.message
           : 'טעינת הלו״ז נכשלה.';
@@ -4640,7 +4651,7 @@ export default function FamilyScheduler() {
           מסנכרן…
         </div>
       )}
-      {scheduleLoadError && days.length > 0 && (
+      {scheduleLoadError && !boardIsEmpty && (
         <div className="max-w-6xl mx-auto mb-3 flex items-center justify-between gap-3 rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700 print:hidden">
           <span>הסנכרון עם השרת נכשל: {scheduleLoadError}</span>
           <button
@@ -4657,9 +4668,10 @@ export default function FamilyScheduler() {
           <RefreshCw size={22} className="animate-spin text-indigo-600" aria-hidden />
           <span className="text-sm font-semibold">טוען לו״ז מהשרת…</span>
         </div>
-      ) : scheduleLoadError && days.length === 0 ? (
+      ) : scheduleLoadError && boardIsEmpty ? (
         <div className="max-w-6xl mx-auto py-16 flex flex-col items-center justify-center gap-3 text-center print:hidden">
-          <span className="text-sm font-semibold text-red-600">לא הצלחנו לטעון את הלו״ז: {scheduleLoadError}</span>
+          <span className="text-base font-bold text-red-600">לא הצלחנו לטעון את הלו״ז</span>
+          <span className="text-sm text-slate-600">{scheduleLoadError}</span>
           <button
             type="button"
             onClick={() => {
