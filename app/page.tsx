@@ -1479,20 +1479,28 @@ const mergeRecurringTemplatesWithDefaults = (templates: RecurringTemplate[]) => 
   return merged;
 };
 
-const getSaturdayJohnnyAssignment = (weekStart: Date): { morning: BaseChildKey; afternoon: BaseChildKey } => {
-  const reference = new Date('2026-02-15T00:00:00');
+/**
+ * Saturday Johnny rotation: a strict 3-week cycle (week index modulo 3). Each Saturday one child is
+ * fully exempt and the other two split the 08:00 / 13:00 walks.
+ *   Saturday 1: amit morning, ravid afternoon, alin free
+ *   Saturday 2: alin morning, amit afternoon, ravid free
+ *   Saturday 3: ravid morning, alin afternoon, amit free
+ * ROTATION_ANCHOR_WEEK_START is the week start (Sunday) of a "Saturday 1" week; shift it by a week to move the cycle.
+ */
+const ROTATION_ANCHOR_WEEK_START = '2026-02-15T00:00:00';
+const SATURDAY_JOHNNY_CYCLE: Array<{ morning: BaseChildKey; afternoon: BaseChildKey; free: BaseChildKey }> = [
+  { morning: 'amit', afternoon: 'ravid', free: 'alin' },
+  { morning: 'alin', afternoon: 'amit', free: 'ravid' },
+  { morning: 'ravid', afternoon: 'alin', free: 'amit' },
+];
+
+const getSaturdayJohnnyAssignment = (weekStart: Date): { morning: BaseChildKey; afternoon: BaseChildKey; free: BaseChildKey } => {
+  const reference = new Date(ROTATION_ANCHOR_WEEK_START);
   const weekMs = 7 * 24 * 60 * 60 * 1000;
-  const diffWeeks = Math.floor((getWeekStart(weekStart).getTime() - reference.getTime()) / weekMs);
-  const cycle: Array<{ morning: BaseChildKey; afternoon: BaseChildKey }> = [
-    { morning: 'alin', afternoon: 'amit' },
-    { morning: 'ravid', afternoon: 'alin' },
-    { morning: 'amit', afternoon: 'ravid' },
-    { morning: 'amit', afternoon: 'alin' },
-    { morning: 'alin', afternoon: 'ravid' },
-    { morning: 'ravid', afternoon: 'amit' },
-  ];
-  const index = ((diffWeeks % cycle.length) + cycle.length) % cycle.length;
-  return cycle[index];
+  // Math.round absorbs the 1-hour DST shift between local midnights.
+  const diffWeeks = Math.round((getWeekStart(weekStart).getTime() - reference.getTime()) / weekMs);
+  const index = ((diffWeeks % SATURDAY_JOHNNY_CYCLE.length) + SATURDAY_JOHNNY_CYCLE.length) % SATURDAY_JOHNNY_CYCLE.length;
+  return SATURDAY_JOHNNY_CYCLE[index];
 };
 
 const buildJohnnyEvents = (
@@ -4519,6 +4527,26 @@ export default function FamilyScheduler() {
                               className="rounded-lg bg-indigo-600 text-white px-2.5 py-1 text-xs font-semibold hover:bg-indigo-700 transition disabled:opacity-60 disabled:cursor-not-allowed"
                             >
                               {confirmingEventId === event.id ? 'שולח אישור...' : 'אישרתי שראיתי'}
+                            </button>
+                          )}
+                          {!parseMetadataBoolean(event.isRecurring) && (
+                            <button
+                              type="button"
+                              data-confirm-button="1"
+                              onClick={(buttonEvent) => {
+                                buttonEvent.stopPropagation();
+                                const dayDate = new Date(`${day.isoDate}T00:00:00`);
+                                void handleDelete(
+                                  { eventId: event.id, sourceEvent: event, sourceDayIndex: dayIndex },
+                                  Number.isNaN(dayDate.getTime()) ? weekStart : getWeekStart(dayDate),
+                                  () => setDbSyncStatus({ state: 'idle', message: '' }),
+                                );
+                              }}
+                              className="rounded-lg border border-red-200 bg-white text-red-600 hover:bg-red-50 p-1 transition capture-ignore print:hidden"
+                              title="מחק משימה"
+                              aria-label={`מחק ${event.title}`}
+                            >
+                              <Trash2 size={14} />
                             </button>
                           )}
                         </div>
