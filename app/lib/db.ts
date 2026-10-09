@@ -78,9 +78,9 @@ function getPostgres() {
     const needsSsl = !/^postgres(ql)?:\/\/[^@]+@(localhost|127\.0\.0\.1)(:\d+)?\//i.test(url);
     const transactionPooler = isSupabaseTransactionPort(url);
     pg = postgres(url, {
-      max: 5, // small pool: parallel queries (bulk saves) don't serialize, still gentle on poolers
-      idle_timeout: 20,
-      connect_timeout: 10, // seconds; covers a cold start without hanging for 30s
+      max: 1, // keep the pool tiny: each serverless instance holds at most one connection
+      idle_timeout: 10, // seconds; close idle connections quickly
+      connect_timeout: 5, // seconds; fail fast instead of hanging
       ...(needsSsl ? { ssl: "require" as const } : {}),
       ...(transactionPooler ? { prepare: false } : {}),
     });
