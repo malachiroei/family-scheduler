@@ -45,6 +45,10 @@ type ChatTurn = { role: "user" | "assistant"; content: string };
 
 const emptyDraft = (): Draft => ({ events: [], child_name: null, sender_or_group: null });
 
+/** ["סיון","עמית","אלין"] -> "סיון, עמית ואלין" */
+const joinNames = (names: string[]) =>
+  names.length <= 1 ? names.join("") : `${names.slice(0, -1).join(", ")} ו${names[names.length - 1]}`;
+
 /** Readable one-liner including Postgres fields (code/detail/hint/table/column) when present. */
 const describeError = (e: unknown): string => {
   if (!e || typeof e !== "object") return String(e) || "Unknown error";
@@ -447,22 +451,34 @@ export async function POST(request: NextRequest) {
 
     // Shortcut: a short reply ("עמית", "כן, עבור רביד", "עבור אלין", or a bare "כן" to the last
     // suggestion) answering the pending child question. No LLM needed; counts as a confirmation.
-    const replyChild = (() => {
+    // Names explicitly written by the user ("סיון, עמית ואלין", or "כולם" = the whole family).
+    const mentionedKids: Child[] =
+      imageBase64 || text.length > 100
+        ? []
+        : /(^|\s)(כולם|כל המשפחה|כל בני המשפחה)(\s|$|[.,!])/.test(text)
+          ? [...CHILDREN]
+          : CHILDREN.filter((c) => text.includes(CHILD_LABEL[c]));
+
+    const replyKids: Child[] | null = (() => {
       // Only while a draft is waiting for its owner, and only for a short free-text reply that does not
       // itself carry a new time (so a new schedule pasted mid-conversation still goes to the model).
       if (imageBase64 || previousDraft.events.length === 0 || text.length > 100) return null;
       if (/\d{1,2}[:.]\d{2}/.test(text)) return null;
-      const named = CHILDREN.filter((c) => text.includes(CHILD_LABEL[c]));
       // Free text like "זה תספורת לגוני תשבצי על רועי": the pending date/time stay as they are, and the
-      // reply is NOT re-parsed for date/time. One mentioned name is enough.
-      if (named.length === 1) return named[0];
-      if (named.length === 0 && /^(כן|בטח|אישור|סבבה|אוקיי|אוקי|ok)[.!]?$/i.test(text)) {
+      // reply is NOT re-parsed for date/time. One or more mentioned names are enough.
+      if (mentionedKids.length >= 1) return mentionedKids;
+      if (/^(כן|בטח|אישור|סבבה|אוקיי|אוקי|ok)[.!]?$/i.test(text)) {
         const lastAssistant = [...history].reverse().find((h) => h.role === "assistant")?.content ?? "";
         const m = lastAssistant.match(/לשבץ[^?]*עבור (רביד|עמית|אלין|רועי|סיון)\?/);
-        return m ? normalizeChild(m[1]) : null;
+        const c = m ? normalizeChild(m[1]) : null;
+        return c ? [c] : null;
       }
       return null;
     })();
+    const replyChild: Child | null = replyKids?.[0] ?? null;
+    // Several owners named explicitly: save the same event(s) for each of them, never ask again, no LLM fallback for the owner.
+    const multiKids: Child[] | null =
+      replyKids && replyKids.length > 1 ? replyKids : mentionedKids.length > 1 ? mentionedKids : null;
 
     // Fast path (owner reply) needs no learned patterns: skip that DB work entirely.
     const patterns = replyChild ? [] : await loadPatterns();
@@ -501,10 +517,13 @@ export async function POST(request: NextRequest) {
       };
     }
 
+    if (multiKids) draft.child_name = multiKids[0];
+
     // Dog / general family events on first sight: never trust a guessed owner (e.g. from "היי רועי"),
     // never use memory. Always ask. Once the user answers (next turn) the answer is trusted.
     const mustAsk =
       !replyChild &&
+      !multiKids &&
       previousDraft.events.length === 0 &&
       draft.events.some((e) => isGeneralEvent(e, text, draft.sender_or_group));
     if (mustAsk) {
@@ -545,7 +564,7 @@ export async function POST(request: NextRequest) {
               `כן, עבור ${CHILD_LABEL[suggestedChild]}`,
               ...CHILDREN.filter((c) => c !== suggestedChild).map((c) => `עבור ${CHILD_LABEL[c]}`),
             ]
-          : CHILDREN.map((c) => CHILD_LABEL[c]);
+          : [...CHILDREN.map((c) => CHILD_LABEL[c]), "כולם"];
       return NextResponse.json({
         success: false,
         missing_fields: missing,
@@ -559,16 +578,17 @@ export async function POST(request: NextRequest) {
     const child = draft.child_name as Child;
     const saved: Array<{ id: string; title: string; date: string; time: string; child: Child; type: EventType }> = [];
     const rowsToInsert: Array<{ id: string; title: string; date: string; metadata: ReturnType<typeof buildMetadataFromIncoming> }> = [];
-    for (const e of draft.events) {
+    const kids: Child[] = multiKids ?? [child];
+    for (const kid of kids) for (const e of draft.events) {
       const date = e.date as string;
       const time = e.time as string;
-      const type: EventType = e.type ?? (child === "roi" || child === "sivan" ? "other" : "sport");
+      const type: EventType = e.type ?? (kid === "roi" || kid === "sivan" ? "other" : "sport");
       const title = e.title ?? e.keyword ?? TYPE_LABEL[type];
       const id = crypto.randomUUID();
       const metadata = buildMetadataFromIncoming({
         dayIndex: dayIndexOf(date),
         time,
-        child,
+        child: kid,
         type,
         isRecurring: false,
         completed: false,
@@ -580,7 +600,7 @@ export async function POST(request: NextRequest) {
         notified: false,
       });
       rowsToInsert.push({ id, title, date, metadata });
-      saved.push({ id, title, date, time, child, type });
+      saved.push({ id, title, date, time, child: kid, type });
     }
 
     // The only DB work on the critical path: INSERT(s), capped at 6s so we answer before Vercel's 504.
@@ -615,21 +635,25 @@ export async function POST(request: NextRequest) {
     // Learning + push run after the response is sent, so they never delay (or time out) the save.
     const learnEvents = draft.events;
     const learnSender = draft.sender_or_group;
+    const kidsLabel = joinNames(kids.map((k) => CHILD_LABEL[k]));
     after(async () => {
-      await learnPattern(
-        learnEvents.flatMap((e) => [e.keyword, e.title]),
-        learnSender,
-        child,
-        learnEvents.find((e) => e.type)?.type ?? null,
-      );
+      // Learning only makes sense for a single, unambiguous owner.
+      if (kids.length === 1) {
+        await learnPattern(
+          learnEvents.flatMap((e) => [e.keyword, e.title]),
+          learnSender,
+          child,
+          learnEvents.find((e) => e.type)?.type ?? null,
+        );
+      }
       try {
         await sendPushToAll(
           {
             title: saved.length > 1 ? "משימות חדשות נוספו" : "משימה חדשה נוספה",
             body:
               saved.length > 1
-                ? `נוספו ${saved.length} משימות עבור ${CHILD_LABEL[child]}`
-                : `נוספה משימה ל${CHILD_LABEL[child]}: ${saved[0].title} - ${saved[0].time}`,
+                ? `נוספו ${saved.length} משימות עבור ${kidsLabel}`
+                : `נוספה משימה ל${kidsLabel}: ${saved[0].title} - ${saved[0].time}`,
             url: "/",
           },
           { excludeEndpoint: senderEndpoint },
@@ -639,10 +663,14 @@ export async function POST(request: NextRequest) {
       }
     });
 
-    const lines = saved.map((s) => `• ${s.title} — ${s.date} ב-${s.time}`).join("\n");
+    // One line per distinct event (not per owner).
+    const lines = saved
+      .slice(0, draft.events.length)
+      .map((s) => `• ${s.title} — ${s.date.split("-").reverse().join("-")} ב-${s.time}`)
+      .join("\n");
     return NextResponse.json({
       success: true,
-      message: `נרשמו ${saved.length} אירועים עבור ${CHILD_LABEL[child]}${
+      message: `נרשמו ${saved.length} אירועים עבור ${kidsLabel}${
         childFromMemory ? " (שובץ אוטומטית לפי למידה מאושרת)" : ""
       }:\n${lines}`,
       events: saved,
