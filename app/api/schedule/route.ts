@@ -648,7 +648,47 @@ const runReminderSweep = async (source: string) => {
   }
 };
 
+const DB_TIMEOUT_MS = 5000;
+
+class DbTimeoutError extends Error {
+  constructor() {
+    super(`Database did not respond within ${DB_TIMEOUT_MS / 1000} seconds`);
+  }
+}
+
+/** Rejects after DB_TIMEOUT_MS so the client gets an answer instead of hanging. */
+const withDbTimeout = <T,>(promise: Promise<T>): Promise<T> =>
+  new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new DbTimeoutError()), DB_TIMEOUT_MS);
+    promise.then(
+      (v) => {
+        clearTimeout(timer);
+        resolve(v);
+      },
+      (e) => {
+        clearTimeout(timer);
+        reject(e);
+      },
+    );
+  });
+
 export async function GET() {
+  try {
+    return await withDbTimeout(handleGet());
+  } catch (error) {
+    if (error instanceof DbTimeoutError) {
+      console.error("[API] GET /api/schedule timed out after 5s", getDatabaseConfig().source);
+      return NextResponse.json(
+        { error: "מסד הנתונים לא הגיב תוך 5 שניות (DB timeout)", code: "DB_TIMEOUT" },
+        { status: 504 },
+      );
+    }
+    console.error("[API] GET /api/schedule failed", formatDbError(error), error);
+    return NextResponse.json({ error: `שגיאת מסד נתונים: ${formatDbError(error)}`, code: "DB_ERROR" }, { status: 500 });
+  }
+}
+
+async function handleGet() {
   try {
     debugScheduleLog('[API] GET /api/schedule');
     const tableStatus = await ensureScheduleTableReady();
@@ -709,8 +749,8 @@ export async function GET() {
 
     return NextResponse.json({ events });
   } catch (error) {
-    console.error('[API] GET /api/schedule failed', error);
-    return Response.json({ error: getErrorMessage(error) }, { status: 500 });
+    // Handled (logged + 500/504) by GET().
+    throw error;
   }
 }
 

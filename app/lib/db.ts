@@ -19,6 +19,9 @@ const normalizeConnectionString = (raw: string | undefined): string => {
   return s.trim();
 };
 
+/** Port 6543 (transaction pooler) -> 5432 (session pooler, reachable over IPv4). Credentials untouched. */
+const forceSessionPort = (url: string): string => url.replace(/(@[^/?#]+):6543(?=[/?#]|$)/, "$1:5432");
+
 // Resolve connection string (Supabase envs first). Works with Supabase / Neon / any Postgres.
 const resolveDatabaseUrl = (): { url: string; source: DatabaseUrlSource } => {
   const supabasePostgres = normalizeConnectionString(process.env.SUPABASE_POSTGRES_URL);
@@ -26,17 +29,18 @@ const resolveDatabaseUrl = (): { url: string; source: DatabaseUrlSource } => {
   const postgresUrl = normalizeConnectionString(process.env.POSTGRES_URL);
   const databaseUrl = normalizeConnectionString(process.env.DATABASE_URL);
 
-  if (supabasePostgres) {
-    return { url: supabasePostgres, source: "SUPABASE_POSTGRES_URL" };
-  }
+  // Priority: SUPABASE_DATABASE_URL first.
   if (supabaseDatabase) {
-    return { url: supabaseDatabase, source: "SUPABASE_DATABASE_URL" };
+    return { url: forceSessionPort(supabaseDatabase), source: "SUPABASE_DATABASE_URL" };
+  }
+  if (supabasePostgres) {
+    return { url: forceSessionPort(supabasePostgres), source: "SUPABASE_POSTGRES_URL" };
   }
   if (postgresUrl) {
-    return { url: postgresUrl, source: "POSTGRES_URL" };
+    return { url: forceSessionPort(postgresUrl), source: "POSTGRES_URL" };
   }
   if (databaseUrl) {
-    return { url: databaseUrl, source: "DATABASE_URL" };
+    return { url: forceSessionPort(databaseUrl), source: "DATABASE_URL" };
   }
 
   return { url: "", source: "MISSING" };
@@ -66,11 +70,17 @@ const globalForPg = globalThis as unknown as { __familySchedulerPg?: PgClient };
 let pg: PgClient | null = globalForPg.__familySchedulerPg ?? null;
 
 function getPostgres() {
-  const { url } = resolveDatabaseUrl();
+  const { url, source } = resolveDatabaseUrl();
   if (!url) {
     return null;
   }
   if (!pg) {
+    try {
+      const u = new URL(url);
+      console.log(`[db] connecting: env=${source} host=${u.hostname} port=${u.port || "5432"}`);
+    } catch {
+      console.log(`[db] connecting: env=${source} (unparseable URL)`);
+    }
     const needsSsl = !/^postgres(ql)?:\/\/[^@]+@(localhost|127\.0\.0\.1)(:\d+)?\//i.test(url);
     pg = postgres(url, {
       max: 2, // lets a background refresh run in parallel with a fetch, still tiny
