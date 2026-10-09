@@ -55,6 +55,16 @@ export default function AgentChat({ onSaved }: { onSaved?: (events: AgentSavedEv
     endRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, busy, open]);
 
+  // Lock background scroll while the chat is open (prevents double scroll / jumping).
+  useEffect(() => {
+    if (!open) return;
+    const prev = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      document.body.style.overflow = prev;
+    };
+  }, [open]);
+
   const attach = async (file: File | undefined | null) => {
     if (!file || !file.type.startsWith("image/")) return;
     setImage(await fileToBase64(file));
@@ -118,7 +128,7 @@ export default function AgentChat({ onSaved }: { onSaved?: (events: AgentSavedEv
     <div className="print:hidden fixed bottom-5 right-5 z-40" dir="rtl">
       {open && (
         <div
-          className={`mb-3 flex h-[min(70vh,540px)] w-[min(92vw,390px)] flex-col overflow-hidden rounded-2xl border bg-white shadow-2xl ${
+          className={`mb-3 flex h-[min(70dvh,540px)] w-[min(92vw,390px)] flex-col overflow-hidden rounded-2xl border bg-white shadow-2xl ${
             dragging ? "border-indigo-500 ring-2 ring-indigo-300" : "border-slate-200"
           }`}
           onDragOver={(e) => {
@@ -146,7 +156,7 @@ export default function AgentChat({ onSaved }: { onSaved?: (events: AgentSavedEv
             </button>
           </div>
 
-          <div className="flex-1 space-y-2 overflow-y-auto bg-slate-50 p-3">
+          <div className="flex-1 space-y-2 overflow-y-auto overscroll-contain bg-slate-50 p-3">
             {messages.map((m, i) => (
               <div key={i} className={`flex ${m.role === "user" ? "justify-start" : "justify-end"}`}>
                 <div
@@ -190,7 +200,7 @@ export default function AgentChat({ onSaved }: { onSaved?: (events: AgentSavedEv
             </div>
           )}
 
-          <div className="border-t border-slate-200 bg-white p-2">
+          <div className="border-t border-slate-200 bg-white p-2 pb-[env(safe-area-inset-bottom,16px)]">
             {image && (
               <div className="mb-2 flex items-center gap-2">
                 {/* eslint-disable-next-line @next/next/no-img-element */}
@@ -243,14 +253,17 @@ export default function AgentChat({ onSaved }: { onSaved?: (events: AgentSavedEv
         </div>
       )}
 
+      {/* FAB is not rendered while the chat is open (close with the X in the chat header). */}
+      {!open && (
       <button
         type="button"
-        onClick={() => setOpen((v) => !v)}
+        onClick={() => setOpen(true)}
         className="flex h-14 w-14 items-center justify-center rounded-full bg-gradient-to-br from-indigo-600 to-violet-600 text-white shadow-xl transition hover:scale-105"
         aria-label={open ? "סגור סוכן" : "פתח סוכן AI"}
       >
         <Sparkles size={24} />
       </button>
+      )}
     </div>
   );
 }

@@ -4530,7 +4530,7 @@ export default function FamilyScheduler() {
   };
 
   return (
-    <div className="print-scheduler-shell h-screen overflow-y-auto bg-[#f8fafc] px-3 pt-12 pb-20 md:px-4 md:pt-14 md:pb-24 dir-rtl" dir="rtl">
+    <div className="print-scheduler-shell h-dvh overscroll-y-none overflow-y-auto bg-[#f8fafc] px-3 pt-12 pb-20 md:px-4 md:pt-14 md:pb-24 dir-rtl" dir="rtl">
       <button
         type="button"
         onClick={() => { void handleManualRefresh(); }}
@@ -4715,7 +4715,7 @@ export default function FamilyScheduler() {
 
             <div className="flex flex-col flex-1 min-h-0 print-day-content">
             <div
-              className="p-4 space-y-3 min-h-[120px] max-h-[min(70vh,720px)] overflow-y-auto print-day-content"
+              className="p-4 space-y-3 min-h-[120px] max-h-[min(70dvh,720px)] overflow-y-auto print-day-content"
               onClick={(event) => {
                 if (event.target === event.currentTarget) {
                   openCreateEventModal(dayIndex);
@@ -4853,7 +4853,7 @@ export default function FamilyScheduler() {
 
       {showUpcomingListModal && (
         <div className="fixed inset-0 z-[60] bg-black/35 backdrop-blur-[1px] flex items-start sm:items-center justify-center p-3 pt-6 print:hidden">
-          <div className="w-full max-w-2xl max-h-[90vh] overflow-hidden flex flex-col bg-white rounded-2xl shadow-2xl border border-slate-200">
+          <div className="w-full max-w-2xl max-h-[90dvh] overflow-hidden flex flex-col bg-white rounded-2xl shadow-2xl border border-slate-200">
             <div className="shrink-0 flex justify-between items-center border-b border-slate-200 px-4 py-3 gap-2">
               <div>
                 <h3 className="text-lg font-bold text-slate-800">כל המשימות (מהמסד)</h3>
@@ -5005,7 +5005,7 @@ export default function FamilyScheduler() {
 
       {showSettingsModal && (
         <div className="fixed inset-0 z-50 bg-black/35 backdrop-blur-[1px] flex items-start sm:items-center justify-center p-3 pt-6 print:hidden">
-          <div className="w-full max-w-lg max-h-[90vh] overflow-y-auto bg-white rounded-2xl shadow-2xl border border-slate-200 p-4 space-y-3">
+          <div className="w-full max-w-lg max-h-[90dvh] overflow-y-auto bg-white rounded-2xl shadow-2xl border border-slate-200 p-4 space-y-3">
             <div className="sticky top-0 z-10 bg-white flex justify-between items-center border-b border-slate-200 pb-2">
               <h3 className="text-lg font-bold text-slate-800">הגדרות</h3>
               <button
@@ -5262,7 +5262,7 @@ export default function FamilyScheduler() {
 
       {creatingEvent && (
         <div className="fixed inset-0 bg-black/35 backdrop-blur-[1px] flex items-center justify-center p-4 z-[60] print:hidden">
-          <div className="w-full max-w-lg max-h-[85vh] bg-white rounded-2xl shadow-2xl border border-slate-200 flex flex-col overflow-hidden">
+          <div className="w-full max-w-lg max-h-[85dvh] bg-white rounded-2xl shadow-2xl border border-slate-200 flex flex-col overflow-hidden">
             <div className="sticky top-0 z-10 bg-white border-b border-slate-200 px-5 py-4 flex justify-between items-center">
               <h2 className="text-lg font-bold text-slate-800">אירוע חדש</h2>
               <button
@@ -5274,7 +5274,7 @@ export default function FamilyScheduler() {
               </button>
             </div>
 
-            <div className="max-h-[70vh] overflow-y-auto p-5 space-y-4">
+            <div className="max-h-[70dvh] overflow-y-auto p-5 space-y-4">
 
             {apiError && (
               <div className="rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-800 leading-relaxed">
@@ -5446,7 +5446,7 @@ export default function FamilyScheduler() {
 
       {editingEvent && (
         <div className="fixed inset-0 bg-black/35 backdrop-blur-[1px] flex items-center justify-center p-4 z-[60] print:hidden">
-          <div className="w-full max-w-lg max-h-[85vh] bg-white rounded-2xl shadow-2xl border border-slate-200 flex flex-col overflow-hidden">
+          <div className="w-full max-w-lg max-h-[85dvh] bg-white rounded-2xl shadow-2xl border border-slate-200 flex flex-col overflow-hidden">
             <div className="sticky top-0 z-10 bg-white border-b border-slate-200 px-5 py-4 flex justify-between items-center">
               <h2 className="text-lg font-bold text-slate-800">עריכת משימה</h2>
               <button
@@ -5458,7 +5458,7 @@ export default function FamilyScheduler() {
               </button>
             </div>
 
-            <div className="max-h-[70vh] overflow-y-auto p-5 space-y-4">
+            <div className="max-h-[70dvh] overflow-y-auto p-5 space-y-4">
 
             {apiError && (
               <div className="rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-800 leading-relaxed">
