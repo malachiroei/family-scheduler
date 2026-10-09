@@ -83,8 +83,8 @@ function getPostgres() {
     }
     const needsSsl = !/^postgres(ql)?:\/\/[^@]+@(localhost|127\.0\.0\.1)(:\d+)?\//i.test(url);
     pg = postgres(url, {
-      max: 2, // lets a background refresh run in parallel with a fetch, still tiny
-      idle_timeout: 10, // seconds; close idle connections quickly
+      max: 1, // a single connection per instance: Supabase session-mode pooler has very few slots
+      idle_timeout: 2, // seconds; release the pooler slot right after the query finishes
       connect_timeout: 7, // seconds; fail fast if the network route is stuck (e.g. IPv6 unreachable)
       // Required behind a Transaction-mode pooler (Supabase :6543 / PgBouncer), which breaks on prepared statements.
       prepare: false,

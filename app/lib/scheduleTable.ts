@@ -130,18 +130,11 @@ export const buildMetadataFromIncoming = (incoming: {
  * Ensures JSONB `metadata` exists on `schedule` (user-created id/title/date).
  * Does not CREATE the table — only adds the column if missing.
  */
-export const ensureScheduleMetadataColumn = async () => {
-  // Fresh/local databases may not have the table yet (no-op when it already exists).
-  await sql`
-    CREATE TABLE IF NOT EXISTS schedule (
-      id TEXT PRIMARY KEY,
-      title TEXT NOT NULL,
-      "date" TEXT NOT NULL,
-      metadata JSONB NOT NULL DEFAULT '{}'::jsonb
-    )
-  `;
-  await sql`
-    ALTER TABLE schedule
-    ADD COLUMN IF NOT EXISTS metadata JSONB NOT NULL DEFAULT '{}'::jsonb
-  `;
+export const ensureScheduleMetadataColumn = async (): Promise<true> => {
+  // DISABLED: the table and its `metadata` JSONB column already exist in production. Running DDL checks
+  // on every serverless request wastes pooler (PgBouncer) session slots (EMAXCONNSESSION).
+  // For a fresh database run this SQL once manually:
+  //   CREATE TABLE IF NOT EXISTS schedule (id TEXT PRIMARY KEY, title TEXT NOT NULL,
+  //     "date" TEXT NOT NULL, metadata JSONB NOT NULL DEFAULT '{}'::jsonb);
+  return true;
 };
