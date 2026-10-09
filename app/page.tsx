@@ -1714,6 +1714,7 @@ export default function FamilyScheduler() {
   const [scheduleImportPreview, setScheduleImportPreview] = useState<ScheduleImportPreviewPending | null>(null);
   const [showSettingsModal, setShowSettingsModal] = useState(false);
   const [showUpcomingListModal, setShowUpcomingListModal] = useState(false);
+  const [upcomingListTab, setUpcomingListTab] = useState<'future' | 'past'>('future');
   const [upcomingListLoading, setUpcomingListLoading] = useState(false);
   const [upcomingListEvents, setUpcomingListEvents] = useState<ScheduleApiEvent[]>([]);
   const [deletePasswordModalOpen, setDeletePasswordModalOpen] = useState(false);
@@ -3379,9 +3380,55 @@ export default function FamilyScheduler() {
 
   useEffect(() => {
     if (showUpcomingListModal) {
+      setUpcomingListTab('future');
       void loadUpcomingList();
     }
   }, [showUpcomingListModal, loadUpcomingList]);
+
+  // "Past" = the event's calendar day is before today. Today onward counts as future.
+  const startOfToday = new Date();
+  startOfToday.setHours(0, 0, 0, 0);
+  const isPastDay = (ev: ScheduleApiEvent) => {
+    const d = parseEventDateKey(ev.date);
+    return !d || d.getTime() < startOfToday.getTime();
+  };
+  const futureListEvents = upcomingListEvents.filter((ev) => !isPastDay(ev)); // nearest first
+  const pastListEvents = upcomingListEvents.filter(isPastDay).reverse(); // newest first
+  const visibleListEvents = upcomingListTab === 'future' ? futureListEvents : pastListEvents;
+
+  const clearPastEvents = async () => {
+    // Recurring series are skipped: deleting one would remove the whole series.
+    const targets = pastListEvents.filter(
+      (ev) => !parseMetadataBoolean(ev.isRecurring) && !ev.recurringTemplateId?.trim(),
+    );
+    if (targets.length === 0) {
+      setApiError('אין משימות שעברו למחיקה (משימות קבועות לא נמחקות כאן).');
+      return;
+    }
+    if (!window.confirm(`למחוק ${targets.length} משימות שעברו? הפעולה אינה הפיכה.`)) {
+      return;
+    }
+    const deletePassword = await requestDeletePassword();
+    if (!deletePassword) {
+      return;
+    }
+    setDbSyncStatus({ state: 'saving', message: 'מוחק היסטוריה...' });
+    setApiError('');
+    try {
+      for (const ev of targets) {
+        await deleteEventFromDatabase({ eventId: ev.id.trim() }, deletePassword);
+      }
+      setSuccessMessage(`${targets.length} משימות שעברו נמחקו.`);
+      setDbSyncStatus({ state: 'idle', message: '' });
+      await loadUpcomingList();
+      await refetchEventsFromDatabase(weekStart);
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : '';
+      setApiError(msg.includes('Invalid delete password') ? 'סיסמת המחיקה שגויה.' : 'מחיקת ההיסטוריה נכשלה.');
+      setDbSyncStatus({ state: 'error', message: 'מחיקה נכשלה' });
+      await loadUpcomingList();
+    }
+  };
 
   useEffect(() => {
     if (!isHydrated) {
@@ -4621,7 +4668,7 @@ export default function FamilyScheduler() {
               <div>
                 <h3 className="text-lg font-bold text-slate-800">כל המשימות (מהמסד)</h3>
                 <p className="text-xs text-slate-500 mt-0.5">
-                  רשימה מלאה לפי מסד הנתונים — עבר, היום ועתיד, לסידור ומחיקה. ממוין לפי תאריך ושעה.
+                  רשימה מלאה לפי מסד הנתונים, לסידור ומחיקה.
                 </p>
               </div>
               <div className="flex items-center gap-1">
@@ -4643,17 +4690,53 @@ export default function FamilyScheduler() {
                 </button>
               </div>
             </div>
+            <div className="shrink-0 flex items-center gap-2 border-b border-slate-200 px-4 py-2">
+              {([
+                { key: 'future', label: 'משימות עתידיות', count: futureListEvents.length },
+                { key: 'past', label: 'משימות שעברו', count: pastListEvents.length },
+              ] as const).map((tab) => {
+                const active = upcomingListTab === tab.key;
+                return (
+                  <button
+                    key={tab.key}
+                    type="button"
+                    onClick={() => setUpcomingListTab(tab.key)}
+                    aria-pressed={active}
+                    className={`flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-sm font-bold transition ${
+                      active ? 'bg-indigo-600 text-white' : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
+                    }`}
+                  >
+                    {tab.label}
+                    <span className={`rounded-full px-1.5 text-xs ${active ? 'bg-white/25 text-white' : 'bg-white text-slate-600'}`}>
+                      {tab.count}
+                    </span>
+                  </button>
+                );
+              })}
+              {upcomingListTab === 'past' && pastListEvents.length > 0 && (
+                <button
+                  type="button"
+                  onClick={() => { void clearPastEvents(); }}
+                  disabled={dbSyncStatus.state === 'saving'}
+                  className="mr-auto rounded-lg border border-red-200 bg-white px-2.5 py-1.5 text-xs font-bold text-red-600 hover:bg-red-50 disabled:opacity-50"
+                >
+                  מחק את כל המשימות שעברו
+                </button>
+              )}
+            </div>
             <div className="flex-1 overflow-y-auto px-4 py-3 min-h-0">
               {upcomingListLoading ? (
                 <div className="flex flex-col items-center justify-center py-16 gap-2 text-slate-500">
                   <RefreshCw size={22} className="animate-spin text-indigo-600" />
                   <span className="text-sm font-semibold">טוען...</span>
                 </div>
-              ) : upcomingListEvents.length === 0 ? (
-                <p className="text-center text-slate-500 py-12 text-sm">אין משימות במסד (או שהרשימה ריקה).</p>
+              ) : visibleListEvents.length === 0 ? (
+                <p className="text-center text-slate-500 py-12 text-sm">
+                  {upcomingListTab === 'future' ? 'אין משימות עתידיות.' : 'אין משימות שעברו.'}
+                </p>
               ) : (
                 <ul className="space-y-2">
-                  {upcomingListEvents.map((ev) => {
+                  {visibleListEvents.map((ev) => {
                     const childKey = normalizeChildKey(String(ev.child));
                     const childName = childKey ? baseChildrenConfig[childKey].name : String(ev.child);
                     const now = new Date();
