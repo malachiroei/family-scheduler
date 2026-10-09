@@ -59,7 +59,11 @@ export const SCHEDULE_TABLE_NAME = "schedule" as const;
 
 type PgRow = Record<string, unknown>;
 
-let pg: ReturnType<typeof postgres> | null = null;
+type PgClient = ReturnType<typeof postgres>;
+// Keep one connection pool per server instance, also across dev hot reloads (module re-evaluation),
+// so requests reuse warm connections instead of opening a new one each time.
+const globalForPg = globalThis as unknown as { __familySchedulerPg?: PgClient };
+let pg: PgClient | null = globalForPg.__familySchedulerPg ?? null;
 
 /** Supabase transaction pooler (port 6543) does not support prepared statements — see Supabase docs. */
 const isSupabaseTransactionPort = (url: string) =>
@@ -74,12 +78,13 @@ function getPostgres() {
     const needsSsl = !/^postgres(ql)?:\/\/[^@]+@(localhost|127\.0\.0\.1)(:\d+)?\//i.test(url);
     const transactionPooler = isSupabaseTransactionPort(url);
     pg = postgres(url, {
-      max: 1,
+      max: 5, // small pool: parallel queries (bulk saves) don't serialize, still gentle on poolers
       idle_timeout: 20,
-      connect_timeout: 30,
+      connect_timeout: 10, // seconds; covers a cold start without hanging for 30s
       ...(needsSsl ? { ssl: "require" as const } : {}),
       ...(transactionPooler ? { prepare: false } : {}),
     });
+    globalForPg.__familySchedulerPg = pg;
   }
   return pg;
 }

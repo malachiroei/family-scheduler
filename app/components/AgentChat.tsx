@@ -15,7 +15,16 @@ const fileToBase64 = (file: File) =>
     r.readAsDataURL(file);
   });
 
-export default function AgentChat({ onSaved }: { onSaved?: () => void }) {
+export type AgentSavedEvent = {
+  id: string;
+  title: string;
+  date: string;
+  time: string;
+  child: string;
+  type: string;
+};
+
+export default function AgentChat({ onSaved }: { onSaved?: (events: AgentSavedEvent[]) => void }) {
   const [open, setOpen] = useState(false);
   const [messages, setMessages] = useState<Msg[]>([
     {
@@ -66,7 +75,7 @@ export default function AgentChat({ onSaved }: { onSaved?: () => void }) {
       if (data?.success) {
         setMessages((prev) => [...prev, { role: "assistant", content: `✅ ${data.message}` }]);
         setDraft(null);
-        onSaved?.();
+        onSaved?.(Array.isArray(data.events) ? data.events : []);
       } else if (Array.isArray(data?.missing_fields)) {
         setDraft(data.draft ?? null);
         setQuickReplies(Array.isArray(data.quick_replies) ? data.quick_replies : []);

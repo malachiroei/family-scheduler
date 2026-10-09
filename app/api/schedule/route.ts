@@ -7,7 +7,10 @@ import {
 } from "@/app/lib/scheduleTable";
 import { sendPushToAll, sendPushToParents, sendUpcomingTaskReminders } from "@/app/lib/push";
 
+export const dynamic = 'force-dynamic';
 export const revalidate = 0;
+// Allow for a serverless cold start + DB connect (connect_timeout is 10s) before the platform cuts us off.
+export const maxDuration = 15;
 
 const dbConfig = getDatabaseConfig();
 const activeDatabaseUrl = dbConfig.url;

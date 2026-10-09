@@ -692,7 +692,8 @@ const applyActivityDetailToDraftEvents = (events: AiEvent[], detail: string): Ai
   });
 };
 
-const SCHEDULE_FETCH_TIMEOUT_MS = 5000;
+/** Generous enough for a serverless cold start + DB connect, short enough to never hang forever. */
+const SCHEDULE_FETCH_TIMEOUT_MS = 10000;
 
 const normalizeChildForSave = (value: string): ChildKey => {
   const normalized = value.trim().toLowerCase();
@@ -1763,7 +1764,11 @@ export default function FamilyScheduler() {
 
   const weekKey = toIsoDate(weekStart);
   const days = weeksData[weekKey] ?? [];
-  const showScheduleLoading = isHydrated && scheduleLoadedWeekKey !== weekKey;
+  // The blocking spinner is only for the very first load, while the board is still completely empty.
+  // Week switches and background refreshes keep the board visible (see isSyncingSchedule).
+  const boardIsEmpty = days.every((day) => day.events.length === 0);
+  const showScheduleLoading = isHydrated && scheduleLoadedWeekKey === null && !scheduleLoadError && boardIsEmpty;
+  const isSyncingSchedule = isHydrated && !showScheduleLoading && scheduleLoadedWeekKey !== weekKey && !scheduleLoadError;
   const isShowingAll = selectedChildFilters.length === 0;
   const toggleChildFilter = (childKey: BaseChildKey) => {
     setSelectedChildFilters((prev) =>
@@ -3012,7 +3017,7 @@ export default function FamilyScheduler() {
       console.error('[API] GET /api/schedule client failed', error);
       const aborted = controller.signal.aborted || (error instanceof Error && error.name === 'AbortError');
       const friendly = aborted
-        ? 'השרת לא הגיב בזמן (5 שניות).'
+        ? 'השרת לא הגיב בזמן (10 שניות).'
         : error instanceof Error && error.message
           ? error.message
           : 'טעינת הלו״ז נכשלה.';
@@ -3207,16 +3212,86 @@ export default function FamilyScheduler() {
     return payload;
   };
 
+  /** Optimistic UI: show a one-off event on the board immediately; the server sync happens in the background. */
+  const addEventLocally = (event: SchedulerEvent) => {
+    if (parseMetadataBoolean(event.isRecurring)) {
+      return; // recurring series are materialised from templates by the refetch
+    }
+    const eventDate = parseEventDateKey(event.date);
+    if (!eventDate) {
+      return;
+    }
+    const eventWeekStart = getWeekStart(eventDate);
+    const key = toIsoDate(eventWeekStart);
+    setWeeksData((prev) => {
+      const weekDays = prev[key]
+        ? prev[key].map((day) => ({ ...day, events: [...day.events] }))
+        : createWeekDays(eventWeekStart, false, recurringTemplates, { skipDefaultRecurringTemplates: true });
+      const dayIdx = eventDate.getDay();
+      const mapped: SchedulerEvent = {
+        ...event,
+        date: toEventDateKey(eventDate),
+        time: normalizeTimeForPicker(event.time),
+      };
+      const list = weekDays[dayIdx].events;
+      const existing = list.findIndex((e) => e.id === mapped.id);
+      if (existing >= 0) {
+        list[existing] = mapped;
+      } else {
+        list.push(mapped);
+      }
+      weekDays[dayIdx].events = sortEvents(list);
+      return { ...prev, [key]: weekDays };
+    });
+  };
+
+  const removeEventLocally = (eventId: string) => {
+    setWeeksData((prev) => {
+      const next: Record<string, DaySchedule[]> = {};
+      Object.entries(prev).forEach(([key, week]) => {
+        next[key] = week.map((day) => ({ ...day, events: day.events.filter((e) => e.id !== eventId) }));
+      });
+      return next;
+    });
+  };
+
+  /** Called by the AI agent after it saved events: show them instantly, then sync quietly. */
+  const handleAgentSaved = (saved: Array<{ id: string; title: string; date: string; time: string; child: string; type: string }>) => {
+    saved.forEach((e) => {
+      addEventLocally({
+        id: e.id,
+        date: e.date,
+        time: e.time,
+        child: normalizeChildForSave(e.child),
+        title: e.title,
+        type: e.type,
+        isRecurring: false,
+        completed: false,
+        sendNotification: true,
+        requireConfirmation: false,
+      });
+    });
+    void refetchEventsFromDatabase(weekStart).catch((err) => {
+      console.error('[API] background refetch after agent save failed', err);
+    });
+  };
+
   const handleSubmit = async (event: SchedulerEvent, dayIndex: number, targetWeekStart: Date) => {
     console.log('Action triggered:', 'save');
     setDbSyncStatus({ state: 'saving', message: 'שומר...' });
+    addEventLocally(event);
     try {
       await upsertEventToDatabase(event, dayIndex);
-      await refetchEventsFromDatabase(targetWeekStart);
-
       setDbSyncStatus({ state: 'saved', message: 'נשמר' });
+      // Silent background sync; the optimistic row is already on screen.
+      void refetchEventsFromDatabase(targetWeekStart).catch((err) => {
+        console.error('[API] background refetch after save failed', err);
+      });
     } catch (error) {
       console.error('[API] handleSubmit failed', error);
+      removeEventLocally(event.id);
+      // Restore the true server state (matters when this was an edit of an existing row).
+      void refetchEventsFromDatabase(targetWeekStart).catch(() => {});
       setDbSyncStatus({ state: 'error', message: 'שמירה נכשלה' });
       throw error;
     }
@@ -4299,16 +4374,21 @@ export default function FamilyScheduler() {
       setWeekStart(targetWeekStart);
     }
 
+    // Close the dialog right away; the event appears on the board optimistically. If saving fails
+    // the dialog reopens with the same data so nothing is lost.
+    const creatingSnapshot = creatingEvent;
+    setCreatingEvent(null);
+    setSuccessMessage('המשימה נוספה ללו״ז.');
     try {
       console.log('[UI] add submit payload', { targetDayIndex, targetWeekStart: toIsoDate(targetWeekStart), eventToSave });
       await handleSubmit(eventToSave, targetDayIndex, targetWeekStart);
     } catch (error) {
+      setSuccessMessage('');
+      setCreatingEvent(creatingSnapshot);
       setApiError(formatSchedulePersistenceError(error));
       return;
     }
 
-    setCreatingEvent(null);
-    setSuccessMessage('המשימה נוספה בהצלחה ללו״ז.');
     if (apiError) {
       setApiError('');
     }
@@ -4554,6 +4634,24 @@ export default function FamilyScheduler() {
         <h2 className="text-base font-bold text-slate-700">לו״ז שבועי</h2>
       </div>
 
+      {isSyncingSchedule && (
+        <div className="fixed top-14 left-1/2 -translate-x-1/2 z-30 flex items-center gap-1.5 rounded-full border border-slate-200 bg-white/90 px-3 py-1 text-xs font-semibold text-slate-500 shadow print:hidden pointer-events-none">
+          <RefreshCw size={12} className="animate-spin text-indigo-500" aria-hidden />
+          מסנכרן…
+        </div>
+      )}
+      {scheduleLoadError && days.length > 0 && (
+        <div className="max-w-6xl mx-auto mb-3 flex items-center justify-between gap-3 rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700 print:hidden">
+          <span>הסנכרון עם השרת נכשל: {scheduleLoadError}</span>
+          <button
+            type="button"
+            onClick={() => { void refetchEventsFromDatabase(weekStart).catch(() => {}); }}
+            className="shrink-0 rounded-lg bg-red-600 px-3 py-1 text-xs font-bold text-white hover:bg-red-700 transition"
+          >
+            נסה שוב
+          </button>
+        </div>
+      )}
       {showScheduleLoading ? (
         <div className="max-w-6xl mx-auto py-16 flex flex-col items-center justify-center gap-2 text-slate-600 print:hidden">
           <RefreshCw size={22} className="animate-spin text-indigo-600" aria-hidden />
@@ -5148,7 +5246,7 @@ export default function FamilyScheduler() {
         </div>
       )}
 
-      <AgentChat onSaved={() => { void refetchEventsFromDatabase(weekStart); }} />
+      <AgentChat onSaved={handleAgentSaved} />
 
       {creatingEvent && (
         <div className="fixed inset-0 bg-black/35 backdrop-blur-[1px] flex items-center justify-center p-4 z-[60] print:hidden">
