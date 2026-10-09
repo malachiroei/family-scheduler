@@ -1714,7 +1714,7 @@ export default function FamilyScheduler() {
   const [scheduleImportPreview, setScheduleImportPreview] = useState<ScheduleImportPreviewPending | null>(null);
   const [showSettingsModal, setShowSettingsModal] = useState(false);
   const [showUpcomingListModal, setShowUpcomingListModal] = useState(false);
-  const [upcomingListTab, setUpcomingListTab] = useState<'future' | 'past'>('future');
+  const [upcomingListTab, setUpcomingListTab] = useState<'future' | 'recurring' | 'past'>('future');
   const [upcomingListLoading, setUpcomingListLoading] = useState(false);
   const [upcomingListEvents, setUpcomingListEvents] = useState<ScheduleApiEvent[]>([]);
   const [deletePasswordModalOpen, setDeletePasswordModalOpen] = useState(false);
@@ -3392,9 +3392,30 @@ export default function FamilyScheduler() {
     const d = parseEventDateKey(ev.date);
     return !d || d.getTime() < startOfToday.getTime();
   };
-  const futureListEvents = upcomingListEvents.filter((ev) => !isPastDay(ev)); // nearest first
-  const pastListEvents = upcomingListEvents.filter(isPastDay).reverse(); // newest first
-  const visibleListEvents = upcomingListTab === 'future' ? futureListEvents : pastListEvents;
+  const isRecurringListEvent = (ev: ScheduleApiEvent) =>
+    parseMetadataBoolean(ev.isRecurring) || Boolean(ev.recurringTemplateId?.trim());
+  const oneOffListEvents = upcomingListEvents.filter((ev) => !isRecurringListEvent(ev));
+  const futureListEvents = oneOffListEvents.filter((ev) => !isPastDay(ev)); // nearest first
+  const pastListEvents = oneOffListEvents.filter(isPastDay).reverse(); // newest first
+  // Recurring: one row per series (template), ordered Sunday -> Saturday, then by time.
+  const recurringListEvents = (() => {
+    const seen = new Set<string>();
+    return upcomingListEvents
+      .filter(isRecurringListEvent)
+      .filter((ev) => {
+        const key = ev.recurringTemplateId?.trim() || ev.id;
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      })
+      .sort(
+        (a, b) =>
+          (Number(a.dayIndex) || 0) - (Number(b.dayIndex) || 0) ||
+          normalizeTimeForPicker(a.time).localeCompare(normalizeTimeForPicker(b.time)),
+      );
+  })();
+  const visibleListEvents =
+    upcomingListTab === 'future' ? futureListEvents : upcomingListTab === 'recurring' ? recurringListEvents : pastListEvents;
 
   const clearPastEvents = async () => {
     // Recurring series are skipped: deleting one would remove the whole series.
@@ -4693,6 +4714,7 @@ export default function FamilyScheduler() {
             <div className="shrink-0 flex items-center gap-2 border-b border-slate-200 px-4 py-2">
               {([
                 { key: 'future', label: 'משימות עתידיות', count: futureListEvents.length },
+                { key: 'recurring', label: 'משימות קבועות', count: recurringListEvents.length },
                 { key: 'past', label: 'משימות שעברו', count: pastListEvents.length },
               ] as const).map((tab) => {
                 const active = upcomingListTab === tab.key;
@@ -4732,7 +4754,11 @@ export default function FamilyScheduler() {
                 </div>
               ) : visibleListEvents.length === 0 ? (
                 <p className="text-center text-slate-500 py-12 text-sm">
-                  {upcomingListTab === 'future' ? 'אין משימות עתידיות.' : 'אין משימות שעברו.'}
+                  {upcomingListTab === 'future'
+                    ? 'אין משימות עתידיות.'
+                    : upcomingListTab === 'recurring'
+                      ? 'אין משימות קבועות.'
+                      : 'אין משימות שעברו.'}
                 </p>
               ) : (
                 <ul className="space-y-2">
@@ -4779,7 +4805,11 @@ export default function FamilyScheduler() {
                             )}
                           </div>
                           <div className="text-xs text-slate-600 mt-1 flex flex-wrap items-center gap-x-2 gap-y-0.5 justify-end">
-                            <span className="font-semibold">{formatUpcomingListDayLabel(ev.date)}</span>
+                            <span className="font-semibold">
+                              {upcomingListTab === 'recurring'
+                                ? `${dayNames[Number(ev.dayIndex)] ?? formatUpcomingListDayLabel(ev.date)} · כל שבוע`
+                                : formatUpcomingListDayLabel(ev.date)}
+                            </span>
                             <span>·</span>
                             <span>{normalizeTimeForPicker(ev.time)}</span>
                             <span>·</span>
