@@ -2,6 +2,7 @@ import { NextRequest, NextResponse, after } from "next/server";
 import { ensureDatabaseConnectionString, getDatabaseConfig, sql, sqlJson } from "@/app/lib/db";
 import {
   buildMetadataFromIncoming,
+  ensureScheduleExtraColumns,
   ensureScheduleMetadataColumn,
   parseScheduleMetadata,
 } from "@/app/lib/scheduleTable";
@@ -548,25 +549,48 @@ const upsertScheduleEvent = async (incoming: ReturnType<typeof sanitizeDbEvent>)
     debugScheduleLog("Data to save:", { id: incoming.eventId, title: incoming.title, date: incoming.date, metadataPayload });
     console.log("Inserting event:", incoming.eventId);
 
+    // Any create/update (incl. date/time change) re-arms the reminder: notified is ALWAYS false here.
+    const hasExtraColumns = await ensureScheduleExtraColumns();
+
     let newRow;
     try {
-      newRow = await sql`
-        INSERT INTO schedule (id, title, "date", metadata)
-        VALUES (
-          ${incoming.eventId},
-          ${incoming.title},
-          ${incoming.date},
-          ${sqlJson(metadataPayload)}
-        )
-        ON CONFLICT (id)
-        DO UPDATE SET
-          title = EXCLUDED.title,
-          "date" = EXCLUDED."date",
-          metadata = EXCLUDED.metadata || jsonb_build_object(
-            'notified', COALESCE(schedule.metadata->'notified', 'false'::jsonb)
+      newRow = hasExtraColumns
+        ? await sql`
+          INSERT INTO schedule (id, title, "date", metadata, start_time, child_id, notified)
+          VALUES (
+            ${incoming.eventId},
+            ${incoming.title},
+            ${incoming.date},
+            ${sqlJson(metadataPayload)},
+            ${incoming.time},
+            ${incoming.child},
+            false
           )
-        RETURNING *
-      `;
+          ON CONFLICT (id)
+          DO UPDATE SET
+            title = EXCLUDED.title,
+            "date" = EXCLUDED."date",
+            metadata = EXCLUDED.metadata,
+            start_time = EXCLUDED.start_time,
+            child_id = EXCLUDED.child_id,
+            notified = false
+          RETURNING *
+        `
+        : await sql`
+          INSERT INTO schedule (id, title, "date", metadata)
+          VALUES (
+            ${incoming.eventId},
+            ${incoming.title},
+            ${incoming.date},
+            ${sqlJson(metadataPayload)}
+          )
+          ON CONFLICT (id)
+          DO UPDATE SET
+            title = EXCLUDED.title,
+            "date" = EXCLUDED."date",
+            metadata = EXCLUDED.metadata
+          RETURNING *
+        `;
     } catch (error) {
       const dbError = formatDbError(error);
       console.error("[API] SQL insert into schedule failed", {

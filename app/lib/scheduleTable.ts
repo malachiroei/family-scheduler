@@ -130,6 +130,42 @@ export const buildMetadataFromIncoming = (incoming: {
  * Ensures JSONB `metadata` exists on `schedule` (user-created id/title/date).
  * Does not CREATE the table — only adds the column if missing.
  */
+let extraColumnsPromise: Promise<boolean> | null = null;
+
+/**
+ * Dedicated columns mirroring metadata: start_time (HH:MM), child_id, notified.
+ * Cheap information_schema check first; ALTER only when something is missing. Cached per instance.
+ * Resolves false (never throws) if the columns can't be created, so callers fall back to metadata only.
+ */
+export const ensureScheduleExtraColumns = (): Promise<boolean> => {
+  if (!extraColumnsPromise) {
+    extraColumnsPromise = (async () => {
+      try {
+        const existing = await sql`
+          SELECT column_name FROM information_schema.columns
+          WHERE table_schema = current_schema() AND table_name = 'schedule'
+            AND column_name IN ('start_time', 'child_id', 'notified')
+        `;
+        if ((existing.rowCount ?? existing.rows.length) >= 3) {
+          return true;
+        }
+        await sql`
+          ALTER TABLE schedule
+            ADD COLUMN IF NOT EXISTS start_time TEXT,
+            ADD COLUMN IF NOT EXISTS child_id TEXT,
+            ADD COLUMN IF NOT EXISTS notified BOOLEAN NOT NULL DEFAULT false
+        `;
+        return true;
+      } catch (error) {
+        console.error("[schedule] could not ensure start_time/child_id/notified columns; using metadata only", error);
+        extraColumnsPromise = null; // retry on a later request
+        return false;
+      }
+    })();
+  }
+  return extraColumnsPromise;
+};
+
 export const ensureScheduleMetadataColumn = async (): Promise<true> => {
   // DISABLED: the table and its `metadata` JSONB column already exist in production. Running DDL checks
   // on every serverless request wastes pooler (PgBouncer) session slots (EMAXCONNSESSION).

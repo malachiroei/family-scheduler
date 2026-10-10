@@ -658,23 +658,38 @@ export const sendUpcomingTaskReminders = async (
   }
 
   const tasksRaw = await sql`
-    SELECT id, title, "date", metadata
-    FROM schedule
-    WHERE COALESCE((metadata->'sendNotification')::boolean, true) = true
-      AND COALESCE((metadata->'completed')::boolean, false) = false
-      AND COALESCE((metadata->'notified')::boolean, false) = false
+    SELECT s.id, s.title, s."date", s.metadata,
+           to_jsonb(s)->>'start_time' AS start_time,
+           to_jsonb(s)->>'child_id' AS child_id,
+           to_jsonb(s)->>'notified' AS notified_col
+    FROM schedule s
+    WHERE COALESCE((s.metadata->'sendNotification')::boolean, true) = true
+      AND COALESCE((s.metadata->'completed')::boolean, false) = false
+      AND COALESCE((s.metadata->'notified')::boolean, false) = false
+      AND COALESCE((to_jsonb(s)->>'notified')::boolean, false) = false
   `;
 
   const tasksResult = {
     rows: tasksRaw.rows.map((row) => {
-      const r = row as { id: string; title: string; date: string; metadata: unknown };
+      const r = row as {
+        id: string;
+        title: string;
+        date: string;
+        metadata: unknown;
+        start_time?: string | null;
+        child_id?: string | null;
+        notified_col?: string | null;
+      };
       const m = parseScheduleMetadata(r.metadata);
+      // Dedicated columns win; metadata is the fallback.
+      const columnTime = typeof r.start_time === "string" ? r.start_time.trim() : "";
+      const columnChild = typeof r.child_id === "string" ? r.child_id.trim().toLowerCase() : "";
       return {
         id: r.id,
         text: r.title,
         day: r.date,
-        time: m.time,
-        child: m.child,
+        time: parseTimeToMinutes(columnTime) !== null ? columnTime : m.time,
+        child: columnChild || m.child,
         type: m.type,
         is_weekly: m.isRecurring,
         completed: m.completed,
@@ -885,16 +900,22 @@ export const sendUpcomingTaskReminders = async (
     }
 
     if (deliveredForTask > 0) {
-      await sql`
-        UPDATE schedule
-        SET metadata = jsonb_set(
-          COALESCE(metadata, '{}'::jsonb),
-          '{notified}',
-          'true'::jsonb,
-          true
-        )
-        WHERE id = ${task.id}
-      `;
+      try {
+        // metadata.notified + dedicated column (when it exists)
+        await sql`
+          UPDATE schedule
+          SET metadata = jsonb_set(COALESCE(metadata, '{}'::jsonb), '{notified}', 'true'::jsonb, true),
+              notified = true
+          WHERE id = ${task.id}
+        `;
+      } catch {
+        await sql`
+          UPDATE schedule
+          SET metadata = jsonb_set(COALESCE(metadata, '{}'::jsonb), '{notified}', 'true'::jsonb, true)
+          WHERE id = ${task.id}
+        `;
+      }
+      console.log("[notifications:check] marked notified=true:", task.id);
       sent += deliveredForTask;
       debugReminderLog("sent", { taskId: task.id, deliveredForTask, diffMinutes, audienceChildren });
     } else {
