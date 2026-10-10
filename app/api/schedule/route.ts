@@ -6,7 +6,7 @@ import {
   ensureScheduleMetadataColumn,
   parseScheduleMetadata,
 } from "@/app/lib/scheduleTable";
-import { sendPushToAll, sendPushToParents, sendUpcomingTaskReminders } from "@/app/lib/push";
+import { sendPushToAll, sendPushToParents } from "@/app/lib/push";
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
@@ -658,13 +658,13 @@ const upsertScheduleEvent = async (incoming: ReturnType<typeof sanitizeDbEvent>)
   }
 };
 
+/**
+ * Intentionally a no-op. Saving a task must NEVER run the reminder worker: a sweep right after creation could
+ * deliver the timed reminder immediately and flip `notified` to true. Only /api/notifications/check
+ * (cron / client poll) may send timed reminders and set `notified = true`.
+ */
 const runReminderSweep = async (source: string) => {
-  try {
-    const reminderResult = await sendUpcomingTaskReminders();
-    console.log(`[API] Reminder sweep (${source}):`, reminderResult);
-  } catch (error) {
-    console.error(`[API] Reminder sweep failed (${source})`, error);
-  }
+  debugScheduleLog(`[API] reminder sweep skipped after save (${source}); handled by /api/notifications/check`);
 };
 
 const DB_WRITE_TIMEOUT_MS = 6000; // single INSERT/UPDATE
@@ -720,15 +720,6 @@ async function handleGet() {
     }
 
     // Reminders run on /api/notifications/check (client interval) and cron routes — do not block every schedule read.
-    void sendUpcomingTaskReminders().then(
-      (reminderResult) => {
-        debugScheduleLog("Reminder sweep (async after GET):", reminderResult);
-      },
-      (error) => {
-        console.error("[API] Reminder sweep failed (async after GET)", error);
-      },
-    );
-
     const result = await sql`
       SELECT id, title, "date", metadata
       FROM schedule
