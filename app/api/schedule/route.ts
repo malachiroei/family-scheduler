@@ -121,7 +121,7 @@ const parseBooleanValue = (value: unknown) => {
   return false;
 };
 
-const reminderLeadOptions = [5, 10, 15, 30] as const;
+const reminderLeadOptions = [5, 10, 15, 30, 60, 120, 1440] as const;
 const parseReminderLeadMinutes = (value: unknown) => {
   const numeric = Number(value);
   return reminderLeadOptions.includes(numeric as (typeof reminderLeadOptions)[number]) ? numeric : null;

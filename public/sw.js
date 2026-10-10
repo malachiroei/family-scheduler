@@ -1,11 +1,11 @@
-const CACHE_NAME = 'family-scheduler-v19';
+const CACHE_NAME = 'family-scheduler-v20';
 /** Same origin as the registered app (localhost or production) — avoids CORS when SW calls the API. */
 const apiUrl = (path) => {
   const normalized = path.startsWith('/') ? path : `/${path}`;
   return new URL(normalized, self.location.origin).href;
 };
 const APP_SHELL_FILES = ['/manifest.json?v=5', '/icon-512.png'];
-const reminderLeadOptions = [5, 10, 15, 30];
+const reminderLeadOptions = [5, 10, 15, 30, 60, 120, 1440];
 const pushSoundOptions = ['/sounds/standard.mp3', '/sounds/bell.mp3', '/sounds/modern.mp3'];
 const defaultPushPreferences = {
   reminderLeadMinutes: 10,
@@ -128,7 +128,8 @@ self.addEventListener('push', (event) => {
   const sound = sanitizePushSound(pushPreferences.sound);
 
   const options = {
-    body: payload.confirmTask ? `${payload.body} (${leadMinutes} דק׳ לפני)` : payload.body,
+    // The server already writes the exact time left into the body.
+    body: payload.body,
     icon: '/icon-512.png',
     badge: '/icon-512.png',
     vibrate: [200, 100, 200],

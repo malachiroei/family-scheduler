@@ -193,7 +193,7 @@ type BeforeInstallPromptEvent = Event & {
 
 type PushUserName = 'רביד' | 'עמית' | 'אלין' | 'סיוון' | 'רועי';
 type PushChildName = 'רביד' | 'עמית' | 'אלין';
-type ReminderLeadMinutes = 5 | 10 | 15 | 30;
+type ReminderLeadMinutes = 5 | 10 | 15 | 30 | 60 | 120 | 1440;
 type PushSoundPreset = '/sounds/standard.mp3' | '/sounds/bell.mp3' | '/sounds/modern.mp3';
 type PresenceUser = {
   userName: PushUserName;
@@ -209,7 +209,7 @@ const PUSH_USER_STORAGE_KEY = 'family-scheduler-push-user';
 const PUSH_MIGRATION_FLAG_KEY = 'family-scheduler-push-migrated-v1';
 const PUSH_PREFS_STORAGE_KEY = 'family-scheduler-push-preferences-v1';
 const NOTIFICATION_SETTINGS_STORAGE_KEY = 'notification_settings';
-const reminderLeadOptions: ReminderLeadMinutes[] = [5, 10, 15, 30];
+const reminderLeadOptions: ReminderLeadMinutes[] = [5, 10, 15, 30, 60, 120, 1440];
 const pushSoundOptions: Array<{ value: PushSoundPreset; label: string }> = [
   { value: '/sounds/standard.mp3', label: 'Standard' },
   { value: '/sounds/bell.mp3', label: 'Bell' },
@@ -217,7 +217,14 @@ const pushSoundOptions: Array<{ value: PushSoundPreset; label: string }> = [
 ];
 const defaultPushLeadMinutes: ReminderLeadMinutes = 10;
 const defaultPushSound: PushSoundPreset = '/sounds/standard.mp3';
-const SERVICE_WORKER_URL = toApiUrl('/sw.js?v=19');
+const SERVICE_WORKER_URL = toApiUrl('/sw.js?v=20');
+
+const reminderLeadLabel = (minutes: number): string => {
+  if (minutes === 60) return 'שעה לפני';
+  if (minutes === 120) return 'שעתיים לפני';
+  if (minutes === 1440) return 'יום קודם';
+  return `${minutes} דקות לפני`;
+};
 
 const sanitizeReminderLead = (value: unknown): ReminderLeadMinutes => {
   const numeric = Number(value);
@@ -2711,20 +2718,31 @@ export default function FamilyScheduler() {
         return;
       }
 
-      const response = await fetch(toApiUrl('/api/push/test'), {
-        method: 'POST',
-      });
-      const payload = await response.json();
-      if (!response.ok) {
-        throw new Error(payload?.error || 'שליחת התראת ניסיון נכשלה');
+      // Send only to THIS device: use the endpoint of the current push subscription.
+      let currentEndpoint = '';
+      try {
+        const registration = await navigator.serviceWorker.ready;
+        const current = await registration.pushManager.getSubscription();
+        currentEndpoint = current?.endpoint || currentEndpoint;
+      } catch {
+        // fall back to the stored endpoint
       }
-
-      if (Number(payload?.sent || 0) === 0) {
-        setApiError('לא נמצאו מנויים פעילים להתראות. הפעל התראות במכשיר ואז נסה שוב.');
+      if (!currentEndpoint) {
+        setApiError('המכשיר לא רשום להתראות. לחצו "הפעל התראות" ואז נסו שוב.');
         return;
       }
 
-      setSuccessMessage('התראת ניסיון נשלחה בהצלחה.');
+      const response = await fetch(toApiUrl('/api/push/test'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ endpoint: currentEndpoint }),
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(payload?.error || 'שליחת התראת בדיקה נכשלה');
+      }
+
+      setSuccessMessage('התראת בדיקה נשלחה למכשיר הזה. אם לא קפצה — בדקו הרשאות התראות של הדפדפן/אפליקציה.');
     } catch (error) {
       const message = error instanceof Error ? error.message : 'שליחת התראת ניסיון נכשלה';
       setApiError(message);
@@ -5056,7 +5074,7 @@ export default function FamilyScheduler() {
                 disabled={pushBusy || pushTestBusy}
                 className="w-full flex items-center justify-center gap-2 bg-indigo-50 text-indigo-700 border border-indigo-200 px-4 py-1.5 rounded-lg hover:bg-indigo-100 transition disabled:opacity-60 disabled:cursor-not-allowed"
               >
-                {pushTestBusy ? 'שולח התראה...' : 'שלח התראת ניסיון'}
+                {pushTestBusy ? 'שולח התראה...' : 'שלח התראת בדיקה לנייד'}
               </button>
               <button
                 type="button"
@@ -5150,7 +5168,7 @@ export default function FamilyScheduler() {
                     className="w-full rounded-xl border border-slate-300 px-3 py-1.5 text-sm text-slate-700 outline-none focus:border-blue-400"
                   >
                     {reminderLeadOptions.map((minutes) => (
-                      <option key={`settings-lead-${minutes}`} value={minutes}>{minutes} דקות לפני</option>
+                      <option key={`settings-lead-${minutes}`} value={minutes}>{reminderLeadLabel(minutes)}</option>
                     ))}
                   </select>
                 </div>
@@ -5404,7 +5422,7 @@ export default function FamilyScheduler() {
                   className="w-full rounded-xl border border-slate-300 px-3 py-1.5 text-sm text-slate-700 outline-none focus:border-blue-400 disabled:opacity-60 disabled:cursor-not-allowed"
                 >
                   {reminderLeadOptions.map((minutes) => (
-                    <option key={`create-event-lead-${minutes}`} value={minutes}>{minutes} דקות לפני</option>
+                    <option key={`create-event-lead-${minutes}`} value={minutes}>{reminderLeadLabel(minutes)}</option>
                   ))}
                 </select>
               </div>
@@ -5595,7 +5613,7 @@ export default function FamilyScheduler() {
                   className="w-full rounded-xl border border-slate-300 px-3 py-1.5 text-sm text-slate-700 outline-none focus:border-blue-400 disabled:opacity-60 disabled:cursor-not-allowed"
                 >
                   {reminderLeadOptions.map((minutes) => (
-                    <option key={`edit-event-lead-${minutes}`} value={minutes}>{minutes} דקות לפני</option>
+                    <option key={`edit-event-lead-${minutes}`} value={minutes}>{reminderLeadLabel(minutes)}</option>
                   ))}
                 </select>
               </div>

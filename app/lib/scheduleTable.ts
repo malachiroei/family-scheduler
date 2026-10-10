@@ -83,8 +83,8 @@ export const parseScheduleMetadata = (raw: unknown): ScheduleEventMetadata => {
     reminderLeadMinutes:
       reminderRaw === null || reminderRaw === undefined || Number.isNaN(reminderNum)
         ? null
-        : ([5, 10, 15, 30] as const).includes(reminderNum as 5 | 10 | 15 | 30)
-          ? (reminderNum as 5 | 10 | 15 | 30)
+        : ([5, 10, 15, 30, 60, 120, 1440] as const).includes(reminderNum as 5 | 10 | 15 | 30 | 60 | 120 | 1440)
+          ? (reminderNum as 5 | 10 | 15 | 30 | 60 | 120 | 1440)
           : null,
     userId: typeof o.userId === "string" && o.userId.trim() ? o.userId.trim() : typeof o.user_id === "string" && o.user_id.trim() ? o.user_id.trim() : base.userId,
     notified: parseMetadataBoolean(o.notified),

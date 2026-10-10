@@ -115,7 +115,16 @@ const normalizeTaskChildNames = (rawChild: string): ChildUserName[] => {
   return [...new Set(values)];
 };
 
-const reminderLeadOptions = [5, 10, 15, 30] as const;
+const reminderLeadOptions = [5, 10, 15, 30, 60, 120, 1440] as const;
+const MAX_REMINDER_LEAD_MINUTES = 1440;
+
+/** 90 -> "שעה ו-30 דקות", 1440 -> "יום", 45 -> "45 דקות" */
+const formatMinutesHe = (total: number) => {
+  if (total >= 1440) return total === 1440 ? "24 שעות" : `${Math.round(total / 60)} שעות`;
+  if (total >= 120) return `${Math.floor(total / 60)} שעות${total % 60 ? ` ו-${total % 60} דקות` : ""}`;
+  if (total >= 60) return `שעה${total % 60 ? ` ו-${total % 60} דקות` : ""}`;
+  return `${total} דקות`;
+};
 type ReminderLeadMinutes = (typeof reminderLeadOptions)[number];
 const defaultReminderLeadMinutes: ReminderLeadMinutes = 10;
 
@@ -680,16 +689,23 @@ export const sendUpcomingTaskReminders = async (
     let diffMinutes = Math.floor((taskStartUtc.getTime() - nowUtcMs) / 60000);
     if (nowInTimeZone) {
       const taskDateKey = parseTaskDateKey(String(task.day || ""));
-      if (!taskDateKey || taskDateKey !== nowInTimeZone.dateKey) {
+      if (!taskDateKey) {
         skippedByReason.date_mismatch += 1;
         debugReminderLog("skip date_mismatch", { taskId: task.id, taskDateKey, nowDateKey: nowInTimeZone.dateKey });
         continue;
       }
 
-      diffMinutes = taskMinutes - nowInTimeZone.minutes;
+      // Calendar-day distance in the target time zone (supports "day before" reminders), then minutes.
+      const toDayNumber = (key: string) => {
+        const [y, m, d] = key.split("-").map(Number);
+        return Math.round(Date.UTC(y, m - 1, d) / 86400000);
+      };
+      const dayDelta = toDayNumber(taskDateKey) - toDayNumber(nowInTimeZone.dateKey);
+      diffMinutes = dayDelta * 1440 + taskMinutes - nowInTimeZone.minutes;
     }
 
-    if (diffMinutes < 0 || diffMinutes > 45) {
+    // Widest possible lead is 24h; the per-subscription/per-task lead check below narrows it.
+    if (diffMinutes < 0 || diffMinutes > MAX_REMINDER_LEAD_MINUTES) {
       skippedByReason.outside_window += 1;
       debugReminderLog("skip outside_window", { taskId: task.id, diffMinutes, taskTime: task.time, nowUtc: nowUtc.toISOString() });
       continue;
@@ -748,7 +764,7 @@ export const sendUpcomingTaskReminders = async (
       });
       const sendResult = await sendToSubscription(subscription, {
         title: "תזכורת למשימה",
-        body: `${task.text} מתחילה ב-${diffMinutes} דקות (${task.time})`,
+        body: `${task.text} מתחילה בעוד ${formatMinutesHe(diffMinutes)} (${task.time})`,
         url: "/",
         actions: [{ action: "confirm", title: "אישרתי שראיתי" }],
         confirmTask: {
