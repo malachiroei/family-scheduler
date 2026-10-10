@@ -90,6 +90,7 @@ const childKeyToName: Record<string, ChildUserName> = {
 };
 
 const parentKeyToName: Record<string, ParentUserName> = {
+  roi: "רועי",
   roei: "רועי",
   roey: "רועי",
   "רועי": "רועי",
@@ -790,6 +791,10 @@ export const sendUpcomingTaskReminders = async (
     const targetSubscriptions = subscriptions.filter((subscription) => {
       // Task owned by a parent (e.g. "רועי"): deliver to that parent's devices.
       const subscriberName = normalizeAllowedUserName(subscription.user_name);
+      // receive_all subscribers always get every reminder, regardless of the task's child/owner.
+      if (Boolean(subscription.receive_all)) {
+        return true;
+      }
       if (subscriberName && isParentUserName(subscriberName) && taskParentNames.includes(subscriberName)) {
         return true;
       }
