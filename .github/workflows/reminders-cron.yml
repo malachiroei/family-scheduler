@@ -1,0 +1,24 @@
+name: Reminders cron
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+jobs:
+  check-reminders:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Call notifications check endpoint
+        env:
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+        run: |
+          set -e
+          URL="https://family-scheduler-topaz.vercel.app/api/notifications/check"
+          if [ -n "$CRON_SECRET" ]; then
+            curl --fail-with-body -sS -m 60 -H "Authorization: Bearer $CRON_SECRET" "$URL"
+          else
+            curl --fail-with-body -sS -m 60 "$URL"
+          fi
+          echo
