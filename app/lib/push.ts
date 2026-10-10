@@ -294,7 +294,7 @@ export const removePushSubscription = async (endpoint: string) => {
 const sendToSubscription = async (row: SubscriptionRow, payload: PushPayload) => {
   if (!initVapid()) {
     console.error("[PUSH] Missing VAPID config; cannot send notification");
-    return { ok: false as const, removed: false, reason: "missing-vapid" };
+    return { ok: false as const, removed: false, reason: "missing-vapid", statusCode: 0, message: "VAPID keys are not configured on the server" };
   }
 
   try {
@@ -324,7 +324,7 @@ const sendToSubscription = async (row: SubscriptionRow, payload: PushPayload) =>
         statusCode,
         endpointPrefix: row.endpoint.slice(0, 40),
       });
-      return { ok: false as const, removed: true, reason: "expired-subscription" };
+      return { ok: false as const, removed: true, reason: "expired-subscription", statusCode, message };
     }
 
     console.error("[PUSH] Failed to send notification", {
@@ -333,7 +333,7 @@ const sendToSubscription = async (row: SubscriptionRow, payload: PushPayload) =>
       endpointPrefix: row.endpoint.slice(0, 40),
     });
 
-    return { ok: false as const, removed: false, reason: "send-failed" };
+    return { ok: false as const, removed: false, reason: "send-failed", statusCode, message };
   }
 };
 

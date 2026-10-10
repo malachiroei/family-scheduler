@@ -1781,6 +1781,7 @@ export default function FamilyScheduler() {
   const [pushEnabled, setPushEnabled] = useState(false);
   const [pushBusy, setPushBusy] = useState(false);
   const [pushTestBusy, setPushTestBusy] = useState(false);
+  const [pushTestStatus, setPushTestStatus] = useState<{ kind: 'success' | 'error'; text: string } | null>(null);
   const [exportImageBusy, setExportImageBusy] = useState(false);
   const [presenceBusy, setPresenceBusy] = useState(false);
   const [presenceUsers, setPresenceUsers] = useState<PresenceUser[]>([]);
@@ -2517,9 +2518,9 @@ export default function FamilyScheduler() {
     }
   };
 
-  const ensureNotificationPermission = async () => {
+  const ensureNotificationPermission = async (report: (message: string) => void = setApiError) => {
     if (!("Notification" in window)) {
-      setApiError('התראות אינן נתמכות כרגע בדפדפן במכשיר זה.');
+      report('התראות אינן נתמכות כרגע בדפדפן במכשיר זה.');
       return false;
     }
 
@@ -2529,13 +2530,15 @@ export default function FamilyScheduler() {
     }
 
     if (currentPermission === 'denied') {
-      setApiError('ההתראות חסומות בדפדפן. יש לאפשר התראות בהגדרות הדפדפן.');
+      report('התראות חסומות בדפדפן - אפשרו התראות בהגדרות האתר');
       return false;
     }
 
     const requestedPermission = await Notification.requestPermission();
     if (requestedPermission !== 'granted') {
-      setApiError('לא אושרו התראות בדפדפן.');
+      report(requestedPermission === 'denied'
+        ? 'התראות חסומות בדפדפן - אפשרו התראות בהגדרות האתר'
+        : 'לא אושרו התראות בדפדפן.');
       return false;
     }
 
@@ -2670,26 +2673,27 @@ export default function FamilyScheduler() {
     }
   };
 
-  const ensurePushSubscriptionReady = async () => {
+  const ensurePushSubscriptionReady = async (report: (message: string) => void = setApiError) => {
     if (!pushSupported) {
-      setApiError('התראות אינן נתמכות כרגע בדפדפן במכשיר זה.');
+      report('התראות אינן נתמכות כרגע בדפדפן במכשיר זה.');
       return false;
     }
 
     if (!pushUserName) {
+      report('בחרו קודם מי אתם (בהגדרות ההתראות) ואז נסו שוב.');
       openPushIdentityPrompt();
       return false;
     }
 
     const registration = await ensureServiceWorkerRegistration();
     if (!registration) {
-      setApiError('Service Worker לא זמין בדפדפן זה.');
+      report('Service Worker לא זמין בדפדפן זה.');
       return false;
     }
 
     let subscription = await registration.pushManager.getSubscription();
     if (!subscription) {
-      const hasPermission = await ensureNotificationPermission();
+      const hasPermission = await ensureNotificationPermission(report);
       if (!hasPermission) {
         return false;
       }
@@ -2697,7 +2701,7 @@ export default function FamilyScheduler() {
       const configResponse = await fetch(toApiUrl('/api/notifications/subscribe'), { cache: 'no-store' });
       const configPayload = await readJsonSafe(configResponse);
       if (!configResponse.ok || !configPayload?.enabled || !configPayload?.publicKey) {
-        setApiError('התראות אינן זמינות כרגע בשרת.');
+        report('התראות אינן זמינות כרגע בשרת (חסר מפתח VAPID ציבורי).');
         return false;
       }
 
@@ -2764,8 +2768,15 @@ export default function FamilyScheduler() {
     }
 
     setPushTestBusy(true);
+    setPushTestStatus(null);
+    const fail = (message: string) => {
+      console.error('[push:test] client failure:', message);
+      setPushTestStatus({ kind: 'error', text: message });
+    };
     try {
-      const ready = await ensurePushSubscriptionReady();
+      // Makes sure there is a registration + permission + subscription saved on the server
+      // (re-subscribes with NEXT_PUBLIC_VAPID_PUBLIC_KEY via /api/notifications/subscribe if missing).
+      const ready = await ensurePushSubscriptionReady(fail);
       if (!ready) {
         return;
       }
@@ -2775,12 +2786,12 @@ export default function FamilyScheduler() {
       try {
         const registration = await navigator.serviceWorker.ready;
         const current = await registration.pushManager.getSubscription();
-        currentEndpoint = current?.endpoint || currentEndpoint;
-      } catch {
-        // fall back to the stored endpoint
+        currentEndpoint = current?.endpoint || '';
+      } catch (error) {
+        console.error('[push:test] serviceWorker.ready failed', error);
       }
       if (!currentEndpoint) {
-        setApiError('המכשיר לא רשום להתראות. לחצו "הפעל התראות" ואז נסו שוב.');
+        fail('המכשיר לא רשום להתראות (אין מנוי Push פעיל). לחצו "הפעל התראות" ונסו שוב.');
         return;
       }
 
@@ -2789,15 +2800,16 @@ export default function FamilyScheduler() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ endpoint: currentEndpoint }),
       });
-      const payload = await response.json().catch(() => ({}));
-      if (!response.ok) {
-        throw new Error(payload?.error || 'שליחת התראת בדיקה נכשלה');
+      const payload = await readJsonSafe(response);
+      if (!response.ok || payload?.ok === false) {
+        fail(String(payload?.error || `שליחת התראת הבדיקה נכשלה (HTTP ${response.status})`));
+        return;
       }
 
-      setSuccessMessage('התראת בדיקה נשלחה למכשיר הזה. אם לא קפצה — בדקו הרשאות התראות של הדפדפן/אפליקציה.');
+      setPushTestStatus({ kind: 'success', text: 'התראת בדיקה נשלחה בהצלחה! בדקו את הנייד' });
     } catch (error) {
-      const message = error instanceof Error ? error.message : 'שליחת התראת ניסיון נכשלה';
-      setApiError(message);
+      console.error('[push:test] unexpected error', error);
+      fail(error instanceof Error && error.message ? error.message : 'שליחת התראת הבדיקה נכשלה');
     } finally {
       setPushTestBusy(false);
     }
@@ -5258,8 +5270,20 @@ export default function FamilyScheduler() {
                 disabled={pushBusy || pushTestBusy}
                 className="w-full flex items-center justify-center gap-2 bg-indigo-50 text-indigo-700 border border-indigo-200 px-4 py-1.5 rounded-lg hover:bg-indigo-100 transition disabled:opacity-60 disabled:cursor-not-allowed"
               >
-                {pushTestBusy ? 'שולח התראה...' : 'שלח התראת בדיקה לנייד'}
+                {pushTestBusy ? 'שולח...' : 'שלח התראת בדיקה לנייד'}
               </button>
+              {pushTestStatus && (
+                <div
+                  role="status"
+                  className={`w-full rounded-lg border px-3 py-2 text-sm font-semibold ${
+                    pushTestStatus.kind === 'success'
+                      ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
+                      : 'bg-red-50 text-red-700 border-red-200'
+                  }`}
+                >
+                  {pushTestStatus.kind === 'success' ? '✅ ' : '⚠️ '}{pushTestStatus.text}
+                </div>
+              )}
               <button
                 type="button"
                 onClick={() => { void sendDirectTestPushToSelectedChild(); }}
