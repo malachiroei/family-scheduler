@@ -524,8 +524,18 @@ const getNowInTimeZone = (timeZone: string) => {
   };
 };
 
-const parseTaskDateKey = (value: string) => {
+// Accepts YYYY-MM-DD, ISO timestamps, DD-MM-YYYY, DD.MM.YYYY and DD/MM/YYYY (1-2 digit day/month) -> YYYY-MM-DD or ISO as-is.
+const normalizeDayString = (value: string) => {
   const trimmed = value.trim();
+  const dmy = trimmed.match(/^(\d{1,2})[./-](\d{1,2})[./-](\d{4})$/);
+  if (dmy) {
+    return `${dmy[3]}-${dmy[2].padStart(2, "0")}-${dmy[1].padStart(2, "0")}`;
+  }
+  return trimmed;
+};
+
+const parseTaskDateKey = (value: string) => {
+  const trimmed = normalizeDayString(value);
   const isoDateTime = trimmed.match(/^(\d{4}-\d{2}-\d{2})T/);
   if (isoDateTime) {
     return isoDateTime[1];
@@ -545,7 +555,7 @@ const parseTaskDateKey = (value: string) => {
 };
 
 const parseTaskStartUtc = (dayValue: string, timeValue: string) => {
-  const day = dayValue.trim();
+  const day = normalizeDayString(dayValue);
   const time = timeValue.trim();
 
   if (!day || !time) {
@@ -636,8 +646,13 @@ export const sendUpcomingTaskReminders = async (
   `;
 
   const subscriptions = subscriptionsResult.rows;
+  console.log(
+    "[notifications:check] subscriptions found:",
+    subscriptions.length,
+    JSON.stringify(subscriptions.map((s) => ({ user: s.user_name, receiveAll: s.receive_all, watch: s.watch_children, lead: s.reminder_lead_minutes })))
+  );
   if (!subscriptions.length) {
-    debugReminderLog("no subscriptions");
+    console.log("[notifications:check] no push subscriptions in DB - exiting before reading tasks");
     return { scanned: 0, sent: 0 };
   }
 
@@ -671,6 +686,22 @@ export const sendUpcomingTaskReminders = async (
     }),
     rowCount: tasksRaw.rowCount,
   };
+
+  console.log(
+    "[notifications:check] fetched tasks count:",
+    tasksResult.rows?.length,
+    "tasks:",
+    JSON.stringify(
+      tasksResult.rows?.map((t) => ({
+        id: t.id,
+        title: t.text,
+        date: t.day,
+        time: t.time,
+        notified: t.notified,
+        child: t.child,
+      }))
+    )
+  );
 
   if (nowInTimeZone) {
     const activeToday = tasksResult.rows
@@ -782,6 +813,16 @@ export const sendUpcomingTaskReminders = async (
       continue;
     }
 
+    console.log(
+      "[notifications:check] task matched window:",
+      task.id,
+      task.text,
+      "diffMinutes:",
+      diffMinutes,
+      "subscriptions:",
+      JSON.stringify(targetSubscriptions.map((s) => ({ user: s.user_name, lead: s.reminder_lead_minutes, endpoint: String(s.endpoint).slice(0, 60) })))
+    );
+
     let deliveredForTask = 0;
     let hadDueByOffset = false;
     const defaultChildName = audienceChildren[0] || "הילד";
@@ -825,6 +866,7 @@ export const sendUpcomingTaskReminders = async (
         },
       });
 
+      console.log("[notifications:check] webpush.sendNotification result:", JSON.stringify(sendResult), "user:", childSubscriptionName);
       if (sendResult.ok) {
         await markReminderDispatched(dispatchKey);
         deliveredForTask += 1;
