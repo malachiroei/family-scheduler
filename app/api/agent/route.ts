@@ -287,6 +287,9 @@ const buildPrompt = (text: string, draft: Draft, history: ChatTurn[], patterns: 
 - כלל ברזל: תספורת / וטרינר / בדיקה / טיפול / חיסון, כל אירוע של הכלב, וכל מקרה ש"ג'וני"/"גוני" מופיע בשם איש הקשר או השיחה (למשל "מירב גוני ספרית") — לעולם child_name: null, גם אם כתוב "רועי רשמתי". כותרת האירוע יכולה להיות פשוט "תספורת". לאירועי כלב type="dog". אירועים משפחתיים כלליים — גם הם null.
 - child_name = בן משפחה אחד לכל ההודעה: ravid (רביד), amit (עמית), alin (אלין), roi (רועי - אבא), sivan (סיון - אמא) — רק אם מוזכר במפורש בקלט החדש או בטיוטה (למשל "תרשום לרועי פגישה ב-10:00"). אחרת null. אל תנחש ואל תסיק לפי סוג הפעילות או לפי הדפוסים (ההחלטה בצד השרת).
 - סוגים: dog, gym, sport, lesson, dance. בחר את הקרוב ביותר (כדורסל/כדורגל = sport).
+- בחן תמיד קודם כל את החלק העליון ביותר של צילום המסך (שם קבוצת הוואטסאפ, שם השולח או כותרת השיחה) — הוא נותן את ההקשר לכל האירועים בצילום.
+- אסור להשתמש בכותרות גנריות כמו "פעילות", "אירוע", "פגישה" או "משימה". השתמש בשם הקבוצה/השיחה ובתוכן ההודעה כדי לתת כותרת משמעותית. אם הקבוצה עוסקת באימונים/משחקים (למשל "ילדות ב", "קט-סל", "נוער", "אימון", "משחקים") — כותרת האירוע "אימון כדורסל" (או "אימון" אם אין רמז לכדורסל), type="sport".
+- הקשר משפחתי: עמית ואלין הן הבנות/הילדות (רלוונטי לקבוצות כמו "ילדות ב"), רביד הבן. רועי (אבא) וסיון (אמא) הם ההורים. עדיין אין לקבוע child_name בלי אזכור מפורש — ההצעה לשיוך נעשית בצד השרת.
 - title = כותרת קצרה לאירוע (למשל "אימון כדורסל"). keyword = מילה אחת/שתיים שמזהות את הפעילות או האדם (למשל "מאמן", "כדורסל", "קרל").
 
 דפוסים שנלמדו (לידיעתך בלבד): ${learned}
@@ -404,6 +407,21 @@ const isExplicitOwnerMention = (text: string, child: Child) => {
   return cleaned.includes(name) || cleaned.toLowerCase().includes(child);
 };
 
+/** Group names like "הורים ילדות ב" are the girls' team (amit / alin). */
+const isGirlsGroup = (sender: string | null) => /ילדות\s*ב/.test(sender ?? "");
+const SPORT_CONTEXT_RE = /ילדות\s*ב|קט[\s-]?סל|נוער|אימון|משחק|כדורסל/;
+const GENERIC_TITLE_RE = /^\s*(פעילות|אירוע|פגישה|משימה|activity|event)?\s*$/i;
+
+/** Replace generic/empty titles using the group name (e.g. "הורים ילדות ב" -> "אימון כדורסל", type sport). */
+const enrichGenericTitles = (draft: Draft, text: string) => {
+  const ctx = `${draft.sender_or_group ?? ""} ${text}`;
+  if (!SPORT_CONTEXT_RE.test(ctx) || GENERAL_EVENT_RE.test(ctx)) return;
+  const title = /כדורסל|קט[\s-]?סל|ילדות\s*ב/.test(ctx) ? "אימון כדורסל" : "אימון";
+  draft.events = draft.events.map((e) =>
+    GENERIC_TITLE_RE.test(e.title ?? "") ? { ...e, title, type: e.type && e.type !== "other" ? e.type : "sport" } : e,
+  );
+};
+
 const buildQuestion = (draft: Draft, missing: string[], suggestedChild: Child | null) => {
   const complete = draft.events.filter((e) => e.date && e.time);
   if (missing.length === 1 && missing[0] === "child_name") {
@@ -415,6 +433,9 @@ const buildQuestion = (draft: Draft, missing: string[], suggestedChild: Child | 
       return complete.length === 1
         ? `${summary} לשבץ עבור ${CHILD_LABEL[suggestedChild]}?`
         : `${summary}\nלשבץ את כולם עבור ${CHILD_LABEL[suggestedChild]}?`;
+    }
+    if (isGirlsGroup(draft.sender_or_group)) {
+      return `${summary}\nעבור עמית או אלין (או שתיהן)?`;
     }
     return complete.length === 1 ? `${summary} עבור מי לשבץ?` : `${summary}\nעבור מי לשבץ את כולם?`;
   }
@@ -518,6 +539,7 @@ export async function POST(request: NextRequest) {
     }
 
     if (multiKids) draft.child_name = multiKids[0];
+    enrichGenericTitles(draft, text);
 
     // Dog / general family events on first sight: never trust a guessed owner (e.g. from "היי רועי"),
     // never use memory. Always ask. Once the user answers (next turn) the answer is trusted.
@@ -564,7 +586,9 @@ export async function POST(request: NextRequest) {
               `כן, עבור ${CHILD_LABEL[suggestedChild]}`,
               ...CHILDREN.filter((c) => c !== suggestedChild).map((c) => `עבור ${CHILD_LABEL[c]}`),
             ]
-          : [...CHILDREN.map((c) => CHILD_LABEL[c]), "כולם"];
+          : isGirlsGroup(draft.sender_or_group)
+            ? ["עמית", "אלין", "עמית ואלין", "רביד", "רועי", "סיון"]
+            : [...CHILDREN.map((c) => CHILD_LABEL[c]), "כולם"];
       return NextResponse.json({
         success: false,
         missing_fields: missing,
