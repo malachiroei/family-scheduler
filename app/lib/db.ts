@@ -35,14 +35,15 @@ const resolveDatabaseUrl = (): { url: string; source: DatabaseUrlSource } => {
   if (supabaseDatabase) {
     return { url: forceSessionPort(supabaseDatabase), source: "SUPABASE_DATABASE_URL" };
   }
+  // SUPABASE_DATABASE_URL || DATABASE_URL, then legacy fallbacks.
+  if (databaseUrl) {
+    return { url: forceSessionPort(databaseUrl), source: "DATABASE_URL" };
+  }
   if (supabasePostgres) {
     return { url: forceSessionPort(supabasePostgres), source: "SUPABASE_POSTGRES_URL" };
   }
   if (postgresUrl) {
     return { url: forceSessionPort(postgresUrl), source: "POSTGRES_URL" };
-  }
-  if (databaseUrl) {
-    return { url: forceSessionPort(databaseUrl), source: "DATABASE_URL" };
   }
 
   return { url: "", source: "MISSING" };
@@ -77,21 +78,29 @@ function getPostgres() {
     return null;
   }
   if (!pg) {
+    let connectionUrl = url;
+    let needsSsl = true;
     try {
       const u = new URL(url);
-      console.log(`[db] connecting: env=${source} host=${u.hostname} port=${u.port || "5432"}`);
+      needsSsl = !/^(localhost|127\.0\.0\.1)$/i.test(u.hostname);
+      console.log(`[db] env=${source}`);
+      console.log('[db] Attempting connection to host:', u.host, 'port:', u.port || "5432");
+      // Make sure the URL itself asks for SSL, so the handshake never waits on a plaintext fallback.
+      if (needsSsl && !u.searchParams.has("sslmode")) {
+        u.searchParams.set("sslmode", "require");
+        connectionUrl = u.toString();
+      }
     } catch {
-      console.log(`[db] connecting: env=${source} (unparseable URL)`);
+      console.log(`[db] env=${source} (unparseable URL)`);
     }
-    const needsSsl = !/^postgres(ql)?:\/\/[^@]+@(localhost|127\.0\.0\.1)(:\d+)?\//i.test(url);
-    pg = postgres(url, {
+    pg = postgres(connectionUrl, {
       max: 2, // two connections: an edit save and a background refresh must not block each other
       idle_timeout: 2, // seconds; release the pooler slot right after the query finishes
-      connect_timeout: 5, // seconds; fail fast if the network route is stuck (e.g. IPv6 unreachable)
+      connect_timeout: 10, // seconds
       // Required behind a Transaction-mode pooler (Supabase :6543 / PgBouncer), which breaks on prepared statements.
       prepare: false,
-      // SSL is mandatory for Supabase's pooler (PgBouncer).
-      ...(needsSsl ? { ssl: "require" as const } : {}),
+      // Encrypted without certificate verification: Supabase's pooler cert chain is not in every runtime's CA store.
+      ...(needsSsl ? { ssl: { rejectUnauthorized: false } } : {}),
     });
     globalForPg.__familySchedulerPg = pg;
   }
