@@ -1545,7 +1545,7 @@ const buildJohnnyEvents = (
     },
     {
       dayIndex: 2,
-      event: createJohnnyEvent(weekStart, 2, { date: dateForDay(2), time: '13:00', child: 'amit', title: 'התור של ג׳וני (צהריים)', type: 'dog', isRecurring: true }),
+      event: createJohnnyEvent(weekStart, 2, { date: dateForDay(2), time: '13:00', child: 'alin', title: 'התור של ג׳וני (צהריים)', type: 'dog', isRecurring: true }),
     },
     {
       dayIndex: 3,
