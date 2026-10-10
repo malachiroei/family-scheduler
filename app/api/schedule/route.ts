@@ -1,4 +1,4 @@
-import { NextRequest, NextResponse } from "next/server";
+import { NextRequest, NextResponse, after } from "next/server";
 import { ensureDatabaseConnectionString, getDatabaseConfig, sql, sqlJson } from "@/app/lib/db";
 import {
   buildMetadataFromIncoming,
@@ -539,17 +539,10 @@ const upsertScheduleEvent = async (incoming: ReturnType<typeof sanitizeDbEvent>)
   }
 
   try {
-    const existingRow = await sql`
-      SELECT metadata FROM schedule WHERE id = ${incoming.eventId} LIMIT 1
-    `;
-    const previousMeta =
-      existingRow.rows[0] && existingRow.rows[0].metadata != null
-        ? parseScheduleMetadata(existingRow.rows[0].metadata)
-        : null;
-
+    // Single statement only (no pre-SELECT, no DDL): `notified` of an existing row is preserved in SQL below.
     const metadataPayload = buildMetadataFromIncoming({
       ...incoming,
-      notified: previousMeta?.notified ?? false,
+      notified: false,
     });
 
     debugScheduleLog("Data to save:", { id: incoming.eventId, title: incoming.title, date: incoming.date, metadataPayload });
@@ -569,7 +562,9 @@ const upsertScheduleEvent = async (incoming: ReturnType<typeof sanitizeDbEvent>)
         DO UPDATE SET
           title = EXCLUDED.title,
           "date" = EXCLUDED."date",
-          metadata = EXCLUDED.metadata
+          metadata = EXCLUDED.metadata || jsonb_build_object(
+            'notified', COALESCE(schedule.metadata->'notified', 'false'::jsonb)
+          )
         RETURNING *
       `;
     } catch (error) {
@@ -648,18 +643,19 @@ const runReminderSweep = async (source: string) => {
   }
 };
 
-const DB_TIMEOUT_MS = 12000;
+const DB_WRITE_TIMEOUT_MS = 6000; // single INSERT/UPDATE
+const DB_TIMEOUT_MS = 12000; // reads
 
 class DbTimeoutError extends Error {
-  constructor() {
-    super(`Database did not respond within ${DB_TIMEOUT_MS / 1000} seconds`);
+  constructor(ms: number) {
+    super(`Database did not respond within ${ms / 1000} seconds`);
   }
 }
 
 /** Rejects after DB_TIMEOUT_MS so the client gets an answer instead of hanging. */
-const withDbTimeout = <T,>(promise: Promise<T>): Promise<T> =>
+const withDbTimeout = <T,>(promise: Promise<T>, ms: number = DB_TIMEOUT_MS): Promise<T> =>
   new Promise<T>((resolve, reject) => {
-    const timer = setTimeout(() => reject(new DbTimeoutError()), DB_TIMEOUT_MS);
+    const timer = setTimeout(() => reject(new DbTimeoutError(ms)), ms);
     promise.then(
       (v) => {
         clearTimeout(timer);
@@ -677,7 +673,7 @@ export async function GET() {
     return await withDbTimeout(handleGet());
   } catch (error) {
     if (error instanceof DbTimeoutError) {
-      console.error("[API] GET /api/schedule timed out after 12s", getDatabaseConfig().source);
+      console.error("[API] GET /api/schedule timed out", getDatabaseConfig().source);
       return NextResponse.json(
         { error: "מסד הנתונים לא הגיב תוך 12 שניות (DB timeout)", code: "DB_TIMEOUT" },
         { status: 504 },
@@ -768,7 +764,7 @@ export async function PUT(request: NextRequest) {
       return NextResponse.json({ error: "Invalid event payload" }, { status: 400 });
     }
 
-    const upsertResult = await withDbTimeout(upsertScheduleEvent(incoming));
+    const upsertResult = await withDbTimeout(upsertScheduleEvent(incoming), DB_WRITE_TIMEOUT_MS);
     if (!upsertResult.ok) {
       return NextResponse.json({ error: upsertResult.error }, { status: 500 });
     }
@@ -776,9 +772,9 @@ export async function PUT(request: NextRequest) {
     return NextResponse.json({ ok: true, event: upsertResult.event });
   } catch (error) {
     if (error instanceof DbTimeoutError) {
-      console.error('[API] PUT /api/schedule timed out after 12s');
+      console.error('[API] PUT /api/schedule timed out');
       return NextResponse.json(
-        { error: "מסד הנתונים לא הגיב תוך 12 שניות (DB timeout)", code: "DB_TIMEOUT" },
+        { error: "מסד הנתונים לא הגיב תוך 6 שניות (DB timeout). נסו שוב.", code: "DB_TIMEOUT" },
         { status: 504 },
       );
     }
@@ -1021,7 +1017,7 @@ export async function POST(request: NextRequest) {
           if (!incoming) {
             return { ok: false as const, error: "Invalid bulk event payload" };
           }
-          const upsertResult = await withDbTimeout(upsertScheduleEvent(incoming));
+          const upsertResult = await withDbTimeout(upsertScheduleEvent(incoming), DB_WRITE_TIMEOUT_MS);
           if (!upsertResult.ok) {
             console.error("[API] POST /api/schedule bulk upsert failed", {
               error: upsertResult.error,
@@ -1060,7 +1056,7 @@ export async function POST(request: NextRequest) {
 
     const flatIncoming = createIncomingFromFlatBody(body);
     if (flatIncoming) {
-      const upsertResult = await withDbTimeout(upsertScheduleEvent(flatIncoming));
+      const upsertResult = await withDbTimeout(upsertScheduleEvent(flatIncoming), DB_WRITE_TIMEOUT_MS);
       if (!upsertResult.ok) {
         console.error("[API] POST /api/schedule upsert failed (flatIncoming)", {
           error: upsertResult.error,
@@ -1069,16 +1065,22 @@ export async function POST(request: NextRequest) {
         return NextResponse.json({ error: upsertResult.error }, { status: 500 });
       }
 
-      await sendPushToAll(
-        {
-          title: "משימה חדשה נוספה",
-          body: `נוספה משימה ל${getChildTargetLabel(flatIncoming.child)}: ${flatIncoming.title} - ${flatIncoming.time}`,
-          url: "/",
-        },
-        { excludeEndpoint: senderSubscriptionEndpoint }
-      );
-
-      await runReminderSweep("POST flatIncoming");
+      // Push + reminder sweep run after the response is sent: the save never waits for them.
+      after(async () => {
+        try {
+          await sendPushToAll(
+            {
+              title: "משימה חדשה נוספה",
+              body: `נוספה משימה ל${getChildTargetLabel(flatIncoming.child)}: ${flatIncoming.title} - ${flatIncoming.time}`,
+              url: "/",
+            },
+            { excludeEndpoint: senderSubscriptionEndpoint }
+          );
+        } catch (e) {
+          console.error("[API] push after save failed", e);
+        }
+        await runReminderSweep("POST flatIncoming");
+      });
 
       return NextResponse.json(upsertResult.row);
     }
@@ -1089,7 +1091,7 @@ export async function POST(request: NextRequest) {
     const nestedFlatIncoming = nestedEvent ? createIncomingFromFlatBody(nestedEvent) : null;
     const incoming = sanitizeDbEvent(body?.event) ?? nestedFlatIncoming;
     if (incoming) {
-      const upsertResult = await withDbTimeout(upsertScheduleEvent(incoming));
+      const upsertResult = await withDbTimeout(upsertScheduleEvent(incoming), DB_WRITE_TIMEOUT_MS);
       if (!upsertResult.ok) {
         console.error("[API] POST /api/schedule upsert failed (incoming)", {
           error: upsertResult.error,
@@ -1098,16 +1100,21 @@ export async function POST(request: NextRequest) {
         return NextResponse.json({ error: upsertResult.error }, { status: 500 });
       }
 
-      await sendPushToAll(
-        {
-          title: "משימה חדשה נוספה",
-          body: `נוספה משימה ל${getChildTargetLabel(incoming.child)}: ${incoming.title} - ${incoming.time}`,
-          url: "/",
-        },
-        { excludeEndpoint: senderSubscriptionEndpoint }
-      );
-
-      await runReminderSweep("POST incoming");
+      after(async () => {
+        try {
+          await sendPushToAll(
+            {
+              title: "משימה חדשה נוספה",
+              body: `נוספה משימה ל${getChildTargetLabel(incoming.child)}: ${incoming.title} - ${incoming.time}`,
+              url: "/",
+            },
+            { excludeEndpoint: senderSubscriptionEndpoint }
+          );
+        } catch (e) {
+          console.error("[API] push after save failed", e);
+        }
+        await runReminderSweep("POST incoming");
+      });
 
       return NextResponse.json(upsertResult.row);
     }
@@ -1154,7 +1161,7 @@ export async function POST(request: NextRequest) {
             return { ok: false as const, error: "Invalid bulk text event payload" };
           }
 
-          const upsertResult = await withDbTimeout(upsertScheduleEvent(incoming));
+          const upsertResult = await withDbTimeout(upsertScheduleEvent(incoming), DB_WRITE_TIMEOUT_MS);
           if (!upsertResult.ok) {
             console.error("[API] POST /api/schedule bulk-text upsert failed", {
               error: upsertResult.error,
@@ -1323,8 +1330,8 @@ ${text}`;
     return NextResponse.json({ events });
   } catch (error) {
     if (error instanceof DbTimeoutError) {
-      console.error('[API] POST /api/schedule timed out after 12s');
-      return NextResponse.json({ error: 'DB timeout (12s)', code: 'DB_TIMEOUT' }, { status: 504 });
+      console.error('[API] POST /api/schedule timed out');
+      return NextResponse.json({ error: 'מסד הנתונים לא הגיב תוך 6 שניות (DB timeout). נסו שוב.', code: 'DB_TIMEOUT' }, { status: 504 });
     }
     console.error('[API] POST /api/schedule failed', error);
     return Response.json({ error: getErrorMessage(error) }, { status: 500 });

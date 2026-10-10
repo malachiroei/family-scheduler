@@ -15,13 +15,18 @@ type SubscriptionUserRow = {
   last_subscription_at: string | null;
 };
 
+let presenceTableReady = false;
 const ensurePresenceTable = async () => {
+  if (presenceTableReady) {
+    return;
+  }
   await sql`
     CREATE TABLE IF NOT EXISTS app_presence (
       user_name TEXT PRIMARY KEY,
       last_seen TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )
   `;
+  presenceTableReady = true;
 };
 
 const normalizeAllowedUser = (value: unknown): AllowedUser | null => {

@@ -219,6 +219,25 @@ const defaultPushLeadMinutes: ReminderLeadMinutes = 10;
 const defaultPushSound: PushSoundPreset = '/sounds/standard.mp3';
 const SERVICE_WORKER_URL = toApiUrl('/sw.js?v=20');
 
+/**
+ * Parse a fetch Response without ever throwing on non-JSON bodies (e.g. Vercel's HTML/plain-text 504 page).
+ * For such bodies it returns `{ error: <readable Hebrew message> }` so callers can show it.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const readJsonSafe = async (response: Response): Promise<any> => {
+  const raw = await response.text().catch(() => '');
+  try {
+    return raw ? JSON.parse(raw) : {};
+  } catch {
+    return {
+      error:
+        response.status === 504
+          ? 'השרת לא הגיב בזמן (504). נסו שוב בעוד רגע.'
+          : `שגיאת שרת (${response.status}). נסו שוב.`,
+    };
+  }
+};
+
 const reminderLeadLabel = (minutes: number): string => {
   if (minutes === 60) return 'שעה לפני';
   if (minutes === 120) return 'שעתיים לפני';
@@ -1742,6 +1761,11 @@ export default function FamilyScheduler() {
   } | null>(null);
   const [johnnySwapBusy, setJohnnySwapBusy] = useState(false);
   const [creatingEvent, setCreatingEvent] = useState<NewEventDraft | null>(null);
+  // Background polling (presence / state sync / reminder check) pauses while an edit dialog is open,
+  // so it never competes with the user's save for database connections.
+  const modalOpenRef = useRef(false);
+  const modalOpen = Boolean(editingEvent) || Boolean(creatingEvent);
+  modalOpenRef.current = modalOpen;
   const [, setIsChatOpen] = useState(false);
   const [chatClarificationPending, setChatClarificationPending] = useState<ChatClarificationPending | null>(null);
   const [scheduleImportPreview, setScheduleImportPreview] = useState<ScheduleImportPreviewPending | null>(null);
@@ -2015,6 +2039,9 @@ export default function FamilyScheduler() {
       if (typeof document !== 'undefined' && document.visibilityState !== 'visible') {
         return;
       }
+      if (modalOpenRef.current) {
+        return;
+      }
       void sendPresenceHeartbeat();
     };
 
@@ -2123,6 +2150,11 @@ export default function FamilyScheduler() {
       clearTimeout(persistDebounceRef.current);
     }
 
+    // The server snapshot is only a backup (localStorage + /api/schedule are the real sources), so sync it
+    // rarely and never while an edit dialog is open — it must not compete with the save for DB connections.
+    if (modalOpen) {
+      return;
+    }
     persistDebounceRef.current = setTimeout(() => {
       void fetch(toApiUrl('/api/state'), {
         method: 'PUT',
@@ -2131,8 +2163,8 @@ export default function FamilyScheduler() {
       }).catch(() => {
         // keep UI responsive even if server persistence fails
       });
-    }, 120);
-  }, [isHydrated, weekStart, recurringTemplates, weeksData]);
+    }, 30_000);
+  }, [isHydrated, weekStart, recurringTemplates, weeksData, modalOpen]);
 
 
   useEffect(() => {
@@ -2308,7 +2340,7 @@ export default function FamilyScheduler() {
         }
 
         const configResponse = await fetch(toApiUrl('/api/notifications/subscribe'), { cache: 'no-store' });
-        const configPayload = await configResponse.json();
+        const configPayload = await readJsonSafe(configResponse);
         if (!configResponse.ok || !configPayload?.enabled || !configPayload?.publicKey) {
           return;
         }
@@ -2536,7 +2568,7 @@ export default function FamilyScheduler() {
         }
 
         const configResponse = await fetch(toApiUrl('/api/notifications/subscribe'), { cache: 'no-store' });
-        const configPayload = await configResponse.json();
+        const configPayload = await readJsonSafe(configResponse);
         if (!configResponse.ok || !configPayload?.enabled || !configPayload?.publicKey) {
           setApiError('התראות אינן זמינות כרגע בשרת.');
           return;
@@ -2610,7 +2642,7 @@ export default function FamilyScheduler() {
       }
 
       const configResponse = await fetch(toApiUrl('/api/notifications/subscribe'), { cache: 'no-store' });
-      const configPayload = await configResponse.json();
+      const configPayload = await readJsonSafe(configResponse);
       if (!configResponse.ok || !configPayload?.enabled || !configPayload?.publicKey) {
         setApiError('התראות אינן זמינות כרגע בשרת.');
         return;
@@ -2663,7 +2695,7 @@ export default function FamilyScheduler() {
       }
 
       const configResponse = await fetch(toApiUrl('/api/notifications/subscribe'), { cache: 'no-store' });
-      const configPayload = await configResponse.json();
+      const configPayload = await readJsonSafe(configResponse);
       if (!configResponse.ok || !configPayload?.enabled || !configPayload?.publicKey) {
         setApiError('התראות אינן זמינות כרגע בשרת.');
         return false;
@@ -2795,7 +2827,7 @@ export default function FamilyScheduler() {
       const response = await fetch(toApiUrl(`/api/push/test-ravid?childName=${encodeURIComponent(selectedChildForDirectTest)}`), {
         method: 'POST',
       });
-      const payload = await response.json();
+      const payload = await readJsonSafe(response);
       if (!response.ok) {
         throw new Error(payload?.error || `שליחת בדיקה ל${selectedChildForDirectTest} נכשלה`);
       }
@@ -2921,7 +2953,7 @@ export default function FamilyScheduler() {
     let isRunning = false;
 
     const triggerReminderCheck = async () => {
-      if (isRunning) {
+      if (isRunning || modalOpenRef.current) {
         return;
       }
 
@@ -2966,7 +2998,7 @@ export default function FamilyScheduler() {
         cache: 'no-store',
         signal: controller.signal,
       });
-      const payload = await response.json();
+      const payload = await readJsonSafe(response);
       console.log('[API] GET /api/schedule ->', response.status, payload);
       if (!response.ok) {
         throw new Error(payload?.error || 'Failed fetching events');
@@ -3167,7 +3199,7 @@ export default function FamilyScheduler() {
         });
       }
 
-      const payload = await response.json();
+      const payload = await readJsonSafe(response);
       console.log('[API] POST /api/schedule ->', response.status, payload);
       if (!response.ok) {
         throw new Error(payload?.error || 'Failed saving event');
@@ -3205,7 +3237,7 @@ export default function FamilyScheduler() {
         },
       }),
     });
-    const payload = await response.json();
+    const payload = await readJsonSafe(response);
     if (!response.ok) {
       throw new Error(payload?.error || 'Failed saving Johnny tombstone');
     }
@@ -3231,7 +3263,7 @@ export default function FamilyScheduler() {
           'x-delete-password': deletePassword,
         },
       });
-      const body = await response.json();
+      const body = await readJsonSafe(response);
       console.log('[API] DELETE /api/schedule ->', response.status, body);
       if (!response.ok) {
         throw new Error(body?.error || 'Failed deleting event');
@@ -3255,7 +3287,7 @@ export default function FamilyScheduler() {
       }),
     });
 
-    const payload = await response.json();
+    const payload = await readJsonSafe(response);
     if (!response.ok) {
       throw new Error(payload?.error || 'Failed updating completion');
     }
@@ -3507,7 +3539,7 @@ export default function FamilyScheduler() {
     setApiError('');
     try {
       const response = await fetch(toApiUrl('/api/schedule'), { cache: 'no-store' });
-      const payload = await response.json();
+      const payload = await readJsonSafe(response);
       if (!response.ok) {
         throw new Error(payload?.error || 'טעינת המשימות נכשלה');
       }
@@ -4033,7 +4065,7 @@ export default function FamilyScheduler() {
           'x-delete-password': deletePassword,
         },
       });
-      const payload = await response.json();
+      const payload = await readJsonSafe(response);
       console.log('[API] DELETE /api/schedule ->', response.status, payload);
       if (!response.ok) {
         throw new Error(payload?.error || 'Failed to clear events');
@@ -4266,7 +4298,7 @@ export default function FamilyScheduler() {
         }),
       });
 
-      const payload = await response.json();
+      const payload = await readJsonSafe(response);
       if (!response.ok) {
         throw new Error(payload?.error || 'שגיאה בעדכון הלו״ז');
       }

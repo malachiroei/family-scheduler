@@ -94,7 +94,7 @@ function getPostgres() {
       console.log(`[db] env=${source} (unparseable URL)`);
     }
     pg = postgres(connectionUrl, {
-      max: 2, // two connections: an edit save and a background refresh must not block each other
+      max: 5, // short-lived connections; background calls (presence/state) must not starve a save
       idle_timeout: 2, // seconds; release the pooler slot right after the query finishes
       connect_timeout: 10, // seconds
       // Required behind a Transaction-mode pooler (Supabase :6543 / PgBouncer), which breaks on prepared statements.

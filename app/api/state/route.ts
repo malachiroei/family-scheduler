@@ -23,10 +23,14 @@ const ensurePostgresEnv = () => {
   return null;
 };
 
+let stateTableReady = false;
 const ensureTable = async () => {
   const envError = ensurePostgresEnv();
   if (envError) {
     return { ok: false as const, code: envError, error: envError };
+  }
+  if (stateTableReady) {
+    return { ok: true as const };
   }
 
   try {
@@ -37,6 +41,7 @@ const ensureTable = async () => {
         updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       )
     `;
+    stateTableReady = true;
     return { ok: true as const };
   } catch (error) {
     return {

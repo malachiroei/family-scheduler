@@ -172,7 +172,19 @@ export const hasPushConfig = () => {
 
 export const getPublicVapidKey = () => getEnv().vapidPublicKey;
 
-export const ensurePushTables = async () => {
+// DDL must run once per server instance, not on every request (it would hog pooler connections).
+let pushTablesReady: Promise<void> | null = null;
+export const ensurePushTables = (): Promise<void> => {
+  if (!pushTablesReady) {
+    pushTablesReady = ensurePushTablesUncached().catch((error) => {
+      pushTablesReady = null;
+      throw error;
+    });
+  }
+  return pushTablesReady;
+};
+
+const ensurePushTablesUncached = async (): Promise<void> => {
   await sql`
     CREATE TABLE IF NOT EXISTS push_subscriptions (
       endpoint TEXT PRIMARY KEY,
