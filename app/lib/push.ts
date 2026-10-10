@@ -89,6 +89,26 @@ const childKeyToName: Record<string, ChildUserName> = {
   "אלין": "אלין",
 };
 
+const parentKeyToName: Record<string, ParentUserName> = {
+  roei: "רועי",
+  roey: "רועי",
+  "רועי": "רועי",
+  sivan: "סיוון",
+  sivon: "סיוון",
+  "סיון": "סיוון",
+  "סיוון": "סיוון",
+};
+
+const normalizeTaskParentNames = (rawChild: string): ParentUserName[] => {
+  const tokens = rawChild
+    .trim()
+    .toLowerCase()
+    .split(/[_,\s]+/)
+    .map((token) => token.trim())
+    .filter(Boolean);
+  return Array.from(new Set(tokens.map((token) => parentKeyToName[token]).filter(Boolean)));
+};
+
 const normalizeTaskChildNames = (rawChild: string): ChildUserName[] => {
   const normalized = rawChild.trim().toLowerCase();
   if (!normalized) {
@@ -735,7 +755,14 @@ export const sendUpcomingTaskReminders = async (
 
     const audienceChildren = getTaskAudienceChildren(task);
     const taskChildNames = normalizeTaskChildNames(String(task.child || ""));
+    const taskParentNames = normalizeTaskParentNames(String(task.child || ""));
     const targetSubscriptions = subscriptions.filter((subscription) => {
+      // Task owned by a parent (e.g. "רועי"): deliver to that parent's devices.
+      const subscriberName = normalizeAllowedUserName(subscription.user_name);
+      if (subscriberName && isParentUserName(subscriberName) && taskParentNames.includes(subscriberName)) {
+        return true;
+      }
+
       const inAudience = shouldSubscriptionReceiveTask(subscription, audienceChildren);
       if (!inAudience) {
         return false;

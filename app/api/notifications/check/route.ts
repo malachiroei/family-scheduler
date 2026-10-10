@@ -46,7 +46,8 @@ const runCheck = async (request: NextRequest) => {
 
     const result = await sendUpcomingTaskReminders({
       windowForwardMinutes: 15,
-      strictChildUserOnly: true,
+      // Child tasks go to the child's device AND parents (per their watch settings); parent-owned tasks go to that parent.
+      strictChildUserOnly: false,
       timeZone: "Asia/Jerusalem",
       onAttempt: ({ userName, eventTitle }) => {
         console.log(`DEBUG: Attempting to send to ${userName} for event ${eventTitle}`);
