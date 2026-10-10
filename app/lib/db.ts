@@ -20,7 +20,9 @@ const normalizeConnectionString = (raw: string | undefined): string => {
 };
 
 /** Port 6543 (transaction pooler) -> 5432 (session pooler, reachable over IPv4). Credentials untouched. */
-const forceSessionPort = (url: string): string => url.replace(/(@[^/?#]+):6543(?=[/?#]|$)/, "$1:5432");
+// DISABLED: keep the URL exactly as configured. Transaction pooler (6543) + prepare:false + max:1 is the
+// right setup for serverless; session mode (5432) exhausted pooler slots (EMAXCONNSESSION) / timed out.
+const forceSessionPort = (url: string): string => url;
 
 // Resolve connection string (Supabase envs first). Works with Supabase / Neon / any Postgres.
 const resolveDatabaseUrl = (): { url: string; source: DatabaseUrlSource } => {
