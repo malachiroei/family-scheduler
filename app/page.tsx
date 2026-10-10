@@ -1491,18 +1491,20 @@ const mergeRecurringTemplatesWithDefaults = (templates: RecurringTemplate[]) => 
 };
 
 /**
- * Saturday Johnny rotation: a strict 3-week cycle (week index modulo 3). Each Saturday one child is
- * fully exempt and the other two split the 08:00 / 13:00 walks.
- *   Saturday 1: amit morning, ravid afternoon, alin free
- *   Saturday 2: alin morning, amit afternoon, ravid free
- *   Saturday 3: ravid morning, alin afternoon, amit free
- * ROTATION_ANCHOR_WEEK_START is the week start (Sunday) of a "Saturday 1" week; shift it by a week to move the cycle.
+ * Saturday Johnny rotation: a strict 2-week cycle (week index modulo 2), see SATURDAY_JOHNNY_CYCLE below.
+ * Built-in walks are generated in code (not stored), so changing the rule updates every existing week.
+ * ROTATION_ANCHOR_WEEK_START is the week start (Sunday) of a "Saturday A" week; shift it by a week to move the cycle.
  */
 const ROTATION_ANCHOR_WEEK_START = '2026-02-15T00:00:00';
+// Saturday rule: ravid NEVER walks Johnny on Saturday morning (08:00) — the morning alternates equally
+// between amit and alin. Ravid's Saturday turn is always the afternoon (13:00). A 2-week cycle gives
+// each of amit/alin exactly half of the Saturday mornings, and keeps the weekly total as even as the
+// fixed weekday pattern allows (alin takes the other afternoon, since she has the fewest weekday walks).
+//   Saturday A: amit morning, alin afternoon, ravid free
+//   Saturday B: alin morning, ravid afternoon, amit free
 const SATURDAY_JOHNNY_CYCLE: Array<{ morning: BaseChildKey; afternoon: BaseChildKey; free: BaseChildKey }> = [
-  { morning: 'amit', afternoon: 'ravid', free: 'alin' },
-  { morning: 'alin', afternoon: 'amit', free: 'ravid' },
-  { morning: 'ravid', afternoon: 'alin', free: 'amit' },
+  { morning: 'amit', afternoon: 'alin', free: 'ravid' },
+  { morning: 'alin', afternoon: 'ravid', free: 'amit' },
 ];
 
 const getSaturdayJohnnyAssignment = (weekStart: Date): { morning: BaseChildKey; afternoon: BaseChildKey; free: BaseChildKey } => {

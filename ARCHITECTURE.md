@@ -58,6 +58,7 @@ Table `family_learned_patterns`, unique on `(keyword, sender_or_group, child_nam
 
 ## Saturday rotation for Johnny
 
-`getSaturdayJohnnyAssignment` in `app/page.tsx`: 3-week cycle (weeks since `ROTATION_ANCHOR_WEEK_START`, mod 3).
-Saturday 1: amit morning (08:00), ravid afternoon (13:00), alin free. Saturday 2: alin / amit, ravid free.
-Saturday 3: ravid / alin, amit free.
+`getSaturdayJohnnyAssignment` in `app/page.tsx`: 2-week cycle (weeks since `ROTATION_ANCHOR_WEEK_START`, mod 2).
+Ravid never walks on Saturday morning; the 08:00 slot alternates between amit and alin, and ravid's Saturday turn is always 13:00.
+Saturday A: amit morning, alin afternoon, ravid free. Saturday B: alin morning, ravid afternoon, amit free.
+Weekday walks are unchanged (amit 5, alin 3, ravid 4 per week), so totals cannot be perfectly equal under this rule.
