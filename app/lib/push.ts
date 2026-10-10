@@ -135,9 +135,12 @@ const normalizeReminderLeadMinutes = (value: unknown): ReminderLeadMinutes => {
     : defaultReminderLeadMinutes;
 };
 
+// A delayed cron may run after the exact reminder time; still deliver up to this many minutes past task start.
+const REMINDER_GRACE_MINUTES = 15;
 const isVerboseReminderLogs = process.env.PUSH_REMINDER_VERBOSE === "1";
 const debugReminderLog = (...args: unknown[]) => {
-  if (isVerboseReminderLogs) {
+  // Always on: Vercel logs are the only way to debug missed reminders.
+  if (isVerboseReminderLogs || true) {
     console.log("[PUSH_REMIND]", ...args);
   }
 };
@@ -649,6 +652,13 @@ export const sendUpcomingTaskReminders = async (
     rowCount: tasksRaw.rowCount,
   };
 
+  if (nowInTimeZone) {
+    const activeToday = tasksResult.rows
+      .filter((task) => parseTaskDateKey(String(task.day || "")) === nowInTimeZone.dateKey)
+      .map((task) => `${task.time} ${task.text} [${task.id}] lead=${task.reminder_lead_minutes ?? "default"}`);
+    console.log("[PUSH_REMIND] active (not notified/completed) tasks today:", activeToday.length ? activeToday : "none");
+  }
+
   let sent = 0;
   const skippedByReason: Record<string, number> = {
     completed: 0,
@@ -717,7 +727,7 @@ export const sendUpcomingTaskReminders = async (
     }
 
     // Widest possible lead is 24h; the per-subscription/per-task lead check below narrows it.
-    if (diffMinutes < 0 || diffMinutes > MAX_REMINDER_LEAD_MINUTES) {
+    if (diffMinutes < -REMINDER_GRACE_MINUTES || diffMinutes > MAX_REMINDER_LEAD_MINUTES) {
       skippedByReason.outside_window += 1;
       debugReminderLog("skip outside_window", { taskId: task.id, diffMinutes, taskTime: task.time, nowUtc: nowUtc.toISOString() });
       continue;
@@ -753,7 +763,7 @@ export const sendUpcomingTaskReminders = async (
       : normalizeReminderLeadMinutes(task.reminder_lead_minutes);
     for (const subscription of targetSubscriptions) {
       const reminderLeadMinutes = taskReminderLeadMinutes ?? normalizeReminderLeadMinutes(subscription.reminder_lead_minutes);
-      const minDue = 0;
+      const minDue = -REMINDER_GRACE_MINUTES;
       const maxDue = reminderLeadMinutes;
       if (diffMinutes < minDue || diffMinutes > maxDue) {
         continue;
@@ -776,7 +786,9 @@ export const sendUpcomingTaskReminders = async (
       });
       const sendResult = await sendToSubscription(subscription, {
         title: "תזכורת למשימה",
-        body: `${task.text} מתחילה בעוד ${formatMinutesHe(diffMinutes)} (${task.time})`,
+        body: diffMinutes > 0
+          ? `${task.text} מתחילה בעוד ${formatMinutesHe(diffMinutes)} (${task.time})`
+          : `${task.text} מתחילה עכשיו (${task.time})`,
         url: "/",
         actions: [{ action: "confirm", title: "אישרתי שראיתי" }],
         confirmTask: {

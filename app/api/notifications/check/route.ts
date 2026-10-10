@@ -40,7 +40,9 @@ const runCheck = async (request: NextRequest) => {
   }
 
   try {
-    const currentIsraelTime = new Date().toLocaleString("en-US", { timeZone: "Asia/Jerusalem" });
+    const now = new Date();
+    const currentIsraelTime = now.toLocaleString("en-US", { timeZone: "Asia/Jerusalem" });
+    console.log(`[NOTIFICATIONS_CHECK] checking at Israel=${currentIsraelTime} (Asia/Jerusalem) | UTC=${now.toISOString()}`);
 
     const result = await sendUpcomingTaskReminders({
       windowForwardMinutes: 15,
