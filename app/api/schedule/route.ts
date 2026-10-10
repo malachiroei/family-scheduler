@@ -648,7 +648,7 @@ const runReminderSweep = async (source: string) => {
   }
 };
 
-const DB_TIMEOUT_MS = 5000;
+const DB_TIMEOUT_MS = 12000;
 
 class DbTimeoutError extends Error {
   constructor() {
@@ -677,9 +677,9 @@ export async function GET() {
     return await withDbTimeout(handleGet());
   } catch (error) {
     if (error instanceof DbTimeoutError) {
-      console.error("[API] GET /api/schedule timed out after 5s", getDatabaseConfig().source);
+      console.error("[API] GET /api/schedule timed out after 12s", getDatabaseConfig().source);
       return NextResponse.json(
-        { error: "מסד הנתונים לא הגיב תוך 5 שניות (DB timeout)", code: "DB_TIMEOUT" },
+        { error: "מסד הנתונים לא הגיב תוך 12 שניות (DB timeout)", code: "DB_TIMEOUT" },
         { status: 504 },
       );
     }
@@ -768,13 +768,20 @@ export async function PUT(request: NextRequest) {
       return NextResponse.json({ error: "Invalid event payload" }, { status: 400 });
     }
 
-    const upsertResult = await upsertScheduleEvent(incoming);
+    const upsertResult = await withDbTimeout(upsertScheduleEvent(incoming));
     if (!upsertResult.ok) {
       return NextResponse.json({ error: upsertResult.error }, { status: 500 });
     }
 
     return NextResponse.json({ ok: true, event: upsertResult.event });
   } catch (error) {
+    if (error instanceof DbTimeoutError) {
+      console.error('[API] PUT /api/schedule timed out after 12s');
+      return NextResponse.json(
+        { error: "מסד הנתונים לא הגיב תוך 12 שניות (DB timeout)", code: "DB_TIMEOUT" },
+        { status: 504 },
+      );
+    }
     console.error('[API] PUT /api/schedule failed', error);
     return Response.json({ error: getErrorMessage(error) }, { status: 500 });
   }
@@ -1014,7 +1021,7 @@ export async function POST(request: NextRequest) {
           if (!incoming) {
             return { ok: false as const, error: "Invalid bulk event payload" };
           }
-          const upsertResult = await upsertScheduleEvent(incoming);
+          const upsertResult = await withDbTimeout(upsertScheduleEvent(incoming));
           if (!upsertResult.ok) {
             console.error("[API] POST /api/schedule bulk upsert failed", {
               error: upsertResult.error,
@@ -1053,7 +1060,7 @@ export async function POST(request: NextRequest) {
 
     const flatIncoming = createIncomingFromFlatBody(body);
     if (flatIncoming) {
-      const upsertResult = await upsertScheduleEvent(flatIncoming);
+      const upsertResult = await withDbTimeout(upsertScheduleEvent(flatIncoming));
       if (!upsertResult.ok) {
         console.error("[API] POST /api/schedule upsert failed (flatIncoming)", {
           error: upsertResult.error,
@@ -1082,7 +1089,7 @@ export async function POST(request: NextRequest) {
     const nestedFlatIncoming = nestedEvent ? createIncomingFromFlatBody(nestedEvent) : null;
     const incoming = sanitizeDbEvent(body?.event) ?? nestedFlatIncoming;
     if (incoming) {
-      const upsertResult = await upsertScheduleEvent(incoming);
+      const upsertResult = await withDbTimeout(upsertScheduleEvent(incoming));
       if (!upsertResult.ok) {
         console.error("[API] POST /api/schedule upsert failed (incoming)", {
           error: upsertResult.error,
@@ -1147,7 +1154,7 @@ export async function POST(request: NextRequest) {
             return { ok: false as const, error: "Invalid bulk text event payload" };
           }
 
-          const upsertResult = await upsertScheduleEvent(incoming);
+          const upsertResult = await withDbTimeout(upsertScheduleEvent(incoming));
           if (!upsertResult.ok) {
             console.error("[API] POST /api/schedule bulk-text upsert failed", {
               error: upsertResult.error,
@@ -1315,6 +1322,10 @@ ${text}`;
 
     return NextResponse.json({ events });
   } catch (error) {
+    if (error instanceof DbTimeoutError) {
+      console.error('[API] POST /api/schedule timed out after 12s');
+      return NextResponse.json({ error: 'DB timeout (12s)', code: 'DB_TIMEOUT' }, { status: 504 });
+    }
     console.error('[API] POST /api/schedule failed', error);
     return Response.json({ error: getErrorMessage(error) }, { status: 500 });
   }

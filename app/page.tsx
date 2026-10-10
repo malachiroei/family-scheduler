@@ -1282,6 +1282,16 @@ const isEventStartInPast = (event: ScheduleApiEvent, now: Date): boolean => {
 
 const isJohnnyScheduleTitle = (title: string) => /ג׳וני|ג'וני/i.test(`${title}`);
 
+const isJohnnyEventLike = (event: { type?: string; title?: string }) =>
+  String(event.type || '').toLowerCase() === 'dog' || isJohnnyScheduleTitle(String(event.title || ''));
+
+const isSwapChild = (value: string): value is 'ravid' | 'amit' | 'alin' =>
+  value === 'ravid' || value === 'amit' || value === 'alin';
+
+/** Saturday rule: ravid never walks Johnny on Saturday morning. */
+const isRavidSaturdayMorning = (dayIndex: number, time: string, child: string) =>
+  dayIndex === 6 && child === 'ravid' && normalizeTimeForPicker(time) < '12:00';
+
 const createJohnnyEvent = (weekStart: Date, dayIndex: number, base: Omit<SchedulerEvent, 'id'>): SchedulerEvent => ({
   ...createEvent(base),
   id: johnnyStableEventId(weekStart, dayIndex, base.time),
@@ -1720,7 +1730,17 @@ export default function FamilyScheduler() {
     data: SchedulerEvent;
     recurringWeekly: boolean;
     originalRecurringTemplateId?: string;
+    /** Owner when the dialog was opened (used by the Johnny smart swap). */
+    originalChild?: ChildKey;
   } | null>(null);
+  const [johnnySwapPrompt, setJohnnySwapPrompt] = useState<{
+    updatedEvent: SchedulerEvent;
+    targetDayIndex: number;
+    targetWeekStart: Date;
+    fromChild: BaseChildKey;
+    toChild: BaseChildKey;
+  } | null>(null);
+  const [johnnySwapBusy, setJohnnySwapBusy] = useState(false);
   const [creatingEvent, setCreatingEvent] = useState<NewEventDraft | null>(null);
   const [, setIsChatOpen] = useState(false);
   const [chatClarificationPending, setChatClarificationPending] = useState<ChatClarificationPending | null>(null);
@@ -4385,6 +4405,13 @@ export default function FamilyScheduler() {
     const targetDayIndex = selectedDate.getDay();
     const recurringTemplateId = creatingEvent.recurringWeekly ? generateId() : undefined;
     const normalizedChild = normalizeChildForSave(creatingEvent.data.child);
+    if (
+      isJohnnyEventLike({ type: creatingEvent.data.type, title }) &&
+      isRavidSaturdayMorning(targetDayIndex, creatingEvent.data.time, normalizedChild)
+    ) {
+      setApiError('רביד לא מוריד את ג׳וני בשבת בבוקר. אפשר לשבץ אותו בשבת בצהריים (13:00).');
+      return;
+    }
     const eventToSave: SchedulerEvent = {
       id: generateId(),
       date: toApiDateString(selectedDate, selectedDate),
@@ -4468,6 +4495,32 @@ export default function FamilyScheduler() {
         : undefined,
     };
 
+    if (isJohnnyEventLike(updatedEvent)) {
+      if (isRavidSaturdayMorning(targetDayIndex, updatedEvent.time, normalizedChild)) {
+        setApiError('רביד לא מוריד את ג׳וני בשבת בבוקר. אפשר לשבץ אותו בשבת בצהריים (13:00).');
+        return;
+      }
+
+      // Built-in Johnny slots are generated in code; a one-off row with the same stable id overrides them.
+      // (A "recurring" row would be ignored on reload, so the change would silently disappear.)
+      if (updatedEvent.id.startsWith('johnny-')) {
+        updatedEvent.isRecurring = false;
+        updatedEvent.recurringTemplateId = undefined;
+
+        const fromChild = editingEvent.originalChild;
+        if (fromChild && isSwapChild(fromChild) && isSwapChild(normalizedChild) && fromChild !== normalizedChild) {
+          setJohnnySwapPrompt({
+            updatedEvent,
+            targetDayIndex,
+            targetWeekStart,
+            fromChild,
+            toChild: normalizedChild,
+          });
+          return;
+        }
+      }
+    }
+
     if (targetWeekKey !== weekKey) {
       setWeekStart(targetWeekStart);
     }
@@ -4484,6 +4537,104 @@ export default function FamilyScheduler() {
     setSuccessMessage('המשימה עודכנה בהצלחה.');
     if (apiError) {
       setApiError('');
+    }
+  };
+
+  /** Next future Johnny slot at the same time of day (morning vs morning) currently held by `toChild`. */
+  const findNextJohnnySwapSlot = async (prompt: NonNullable<typeof johnnySwapPrompt>) => {
+    const response = await fetch(toApiUrl('/api/schedule'), { cache: 'no-store' });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      throw new Error(payload?.error || 'טעינת התורנויות נכשלה');
+    }
+    const raw = (Array.isArray(payload?.events) ? payload.events : []) as ScheduleApiEvent[];
+    const suppressed = new Set(
+      raw.filter((e) => e.title === JOHNNY_SUPPRESSED_TITLE && String(e.id).startsWith('johnny-')).map((e) => e.id),
+    );
+    const overrides = new Map(
+      raw
+        .filter((e) => e.title !== JOHNNY_SUPPRESSED_TITLE && String(e.id).startsWith('johnny-'))
+        .map((e) => [e.id, e] as const),
+    );
+
+    const editedDate = parseEventDateKey(prompt.updatedEvent.date);
+    if (!editedDate) {
+      return null;
+    }
+    const slotTime = normalizeTimeForPicker(prompt.updatedEvent.time);
+    const [eh, em] = slotTime.split(':').map(Number);
+    const editedStart = new Date(editedDate.getFullYear(), editedDate.getMonth(), editedDate.getDate(), eh || 0, em || 0);
+    const baseWeek = getWeekStart(editedDate);
+
+    for (let k = 0; k < 12; k += 1) {
+      const ws = addDays(baseWeek, 7 * k);
+      const slots = buildJohnnyEvents(ws, suppressed).sort((a, b) => a.dayIndex - b.dayIndex);
+      for (const { dayIndex, event } of slots) {
+        if (normalizeTimeForPicker(event.time) !== slotTime) {
+          continue;
+        }
+        const day = parseEventDateKey(event.date);
+        if (!day) {
+          continue;
+        }
+        const start = new Date(day.getFullYear(), day.getMonth(), day.getDate(), eh || 0, em || 0);
+        if (start.getTime() <= editedStart.getTime()) {
+          continue;
+        }
+        const currentChild = String(overrides.get(event.id)?.child ?? event.child);
+        if (currentChild !== prompt.toChild) {
+          continue;
+        }
+        if (isRavidSaturdayMorning(dayIndex, event.time, prompt.fromChild)) {
+          continue;
+        }
+        return {
+          event: { ...event, child: prompt.fromChild as ChildKey, isRecurring: false, recurringTemplateId: undefined },
+          dayIndex,
+          weekStart: ws,
+        };
+      }
+    }
+    return null;
+  };
+
+  const finishJohnnySwap = async (doSwap: boolean) => {
+    const prompt = johnnySwapPrompt;
+    if (!prompt || johnnySwapBusy) {
+      return;
+    }
+    setJohnnySwapBusy(true);
+    try {
+      if (toIsoDate(prompt.targetWeekStart) !== weekKey) {
+        setWeekStart(prompt.targetWeekStart);
+      }
+      // 1) the point change (always)
+      await handleSubmit(prompt.updatedEvent, prompt.targetDayIndex, prompt.targetWeekStart);
+
+      // 2) the balancing swap (optional)
+      let message = 'התורנות עודכנה להיום בלבד.';
+      if (doSwap) {
+        const next = await findNextJohnnySwapSlot(prompt);
+        if (next) {
+          await handleSubmit(next.event, next.dayIndex, next.weekStart);
+          const nextDate = parseEventDateKey(next.event.date);
+          const nextLabel = nextDate ? `${dayNames[nextDate.getDay()]} ${toDisplayDate(nextDate)}` : 'בהמשך';
+          message = `בוצעה החלפה: ${baseChildrenConfig[prompt.fromChild].name} מורידה את ג׳וני ב${nextLabel} (${next.event.time}) במקום ${baseChildrenConfig[prompt.toChild].name}.`;
+        } else {
+          message = 'התורנות עודכנה. לא נמצאה תורנות עתידית מתאימה להחלפה.';
+        }
+      }
+      setJohnnySwapPrompt(null);
+      setEditingEvent(null);
+      setSuccessMessage(message);
+      if (apiError) {
+        setApiError('');
+      }
+    } catch (error) {
+      setJohnnySwapPrompt(null);
+      setApiError(formatSchedulePersistenceError(error));
+    } finally {
+      setJohnnySwapBusy(false);
     }
   };
 
@@ -4774,6 +4925,7 @@ export default function FamilyScheduler() {
                         },
                         recurringWeekly: parseMetadataBoolean(event.isRecurring),
                         originalRecurringTemplateId: event.recurringTemplateId,
+                        originalChild: normalizeChildForSave(String(event.child)),
                       });
                     }}
                     className="w-full text-right flex items-center justify-between p-3 rounded-2xl bg-slate-50 border border-transparent hover:border-slate-200 transition print:pointer-events-none print-event-item"
@@ -5671,6 +5823,44 @@ export default function FamilyScheduler() {
                   שמירה
                 </button>
               </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {johnnySwapPrompt && (
+        <div
+          className="fixed inset-0 z-[75] bg-black/45 backdrop-blur-[1px] flex items-center justify-center p-4 print:hidden"
+          role="dialog"
+          aria-modal="true"
+          onClick={(e) => {
+            if (e.target === e.currentTarget && !johnnySwapBusy) {
+              setJohnnySwapPrompt(null);
+            }
+          }}
+        >
+          <div className="w-full max-w-sm bg-white rounded-2xl shadow-2xl border border-slate-200 p-5 space-y-4" dir="rtl">
+            <h3 className="text-lg font-bold text-slate-800">החלפת תורנות ג׳וני</h3>
+            <p className="text-sm text-slate-600 leading-relaxed">
+              {`שמת את ${baseChildrenConfig[johnnySwapPrompt.toChild].name} במקום ${baseChildrenConfig[johnnySwapPrompt.fromChild].name}. האם לבצע החלפה מאזנת בתורנות הבאה של השבוע (ש${baseChildrenConfig[johnnySwapPrompt.fromChild].name} תוריד במקום ${baseChildrenConfig[johnnySwapPrompt.toChild].name}) כדי לשמור על חלוקה שווה?`}
+            </p>
+            <div className="flex flex-col gap-2">
+              <button
+                type="button"
+                disabled={johnnySwapBusy}
+                onClick={() => { void finishJohnnySwap(true); }}
+                className="w-full rounded-xl bg-blue-600 px-4 py-2 text-sm font-bold text-white hover:bg-blue-700 transition disabled:opacity-60"
+              >
+                {johnnySwapBusy ? 'שומר...' : 'כן, בצע החלפה'}
+              </button>
+              <button
+                type="button"
+                disabled={johnnySwapBusy}
+                onClick={() => { void finishJohnnySwap(false); }}
+                className="w-full rounded-xl border border-slate-300 bg-white px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50 transition disabled:opacity-60"
+              >
+                לא, שמור רק להיום
+              </button>
             </div>
           </div>
         </div>
