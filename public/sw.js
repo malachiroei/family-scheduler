@@ -1,10 +1,10 @@
-const CACHE_NAME = 'family-scheduler-v20';
+const CACHE_NAME = 'family-scheduler-v21';
 /** Same origin as the registered app (localhost or production) — avoids CORS when SW calls the API. */
 const apiUrl = (path) => {
   const normalized = path.startsWith('/') ? path : `/${path}`;
   return new URL(normalized, self.location.origin).href;
 };
-const APP_SHELL_FILES = ['/manifest.json?v=5', '/icon-512.png'];
+const APP_SHELL_FILES = ['/manifest.json?v=6', '/icon-512.png', '/favicon.ico'];
 const reminderLeadOptions = [5, 10, 15, 30, 60, 120, 1440];
 const pushSoundOptions = ['/sounds/standard.mp3', '/sounds/bell.mp3', '/sounds/modern.mp3'];
 const defaultPushPreferences = {

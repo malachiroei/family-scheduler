@@ -13,9 +13,10 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
+  metadataBase: new URL("https://family-scheduler-topaz.vercel.app"),
   title: "Malachi Family Time Planner",
   description: "לוח זמנים משפחתי חכם עם סנכרון בזמן אמת",
-  manifest: "/manifest.json?v=5",
+  manifest: "/manifest.json?v=6",
   applicationName: "Family Scheduler",
   appleWebApp: {
     capable: true,
@@ -23,9 +24,19 @@ export const metadata: Metadata = {
     title: "Family Scheduler",
   },
   icons: {
-    icon: "/icon-512.png",
-    shortcut: "/icon-512.png",
-    apple: "/icon-512.png",
+    icon: [
+      { url: "/favicon.ico", sizes: "48x48" },
+      { url: "/favicon-32x32.png", sizes: "32x32", type: "image/png" },
+      { url: "/icon-192.png", sizes: "192x192", type: "image/png" },
+      { url: "/icon-512.png", sizes: "512x512", type: "image/png" },
+    ],
+    shortcut: "/favicon.ico",
+    apple: "/apple-touch-icon.png",
+  },
+  openGraph: {
+    title: "Malachi Family Time Planner",
+    description: "לוח זמנים משפחתי חכם עם סנכרון בזמן אמת",
+    images: [{ url: "/icon-512.png", width: 512, height: 512 }],
   },
 };
 
@@ -38,7 +49,9 @@ export default function RootLayout({
     <html lang="he" dir="rtl">
       <head>
         <meta name="apple-mobile-web-app-capable" content="yes" />
-        <link rel="apple-touch-icon" href="/logo.png" />
+        <link rel="icon" href="/favicon.ico" sizes="any" />
+        <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png" />
+        <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
       </head>
       <body
         className={`${geistSans.variable} ${geistMono.variable} antialiased min-h-screen`}
