@@ -3,7 +3,6 @@ import { sql, sqlJson } from "@/app/lib/db";
 import { buildMetadataFromIncoming } from "@/app/lib/scheduleTable";
 import { sendPushToAll } from "@/app/lib/push";
 import {
-  FIXTURE_TEAM_NAME,
   fixtureSenderKey,
   isSpreadsheetUpload,
   normalizeLeagueKey,
@@ -50,6 +49,7 @@ type Draft = {
   needs_confirm?: boolean;
   import_kind?: "fixtures" | null;
   league?: string | null;
+  team?: string | null;
 };
 
 type ChatTurn = { role: "user" | "assistant"; content: string };
@@ -61,6 +61,7 @@ const emptyDraft = (): Draft => ({
   needs_confirm: false,
   import_kind: null,
   league: null,
+  team: null,
 });
 
 /** ["סיון","עמית","אלין"] -> "סיון, עמית ואלין" */
@@ -165,6 +166,7 @@ const sanitizeDraft = (raw: unknown, roster: FamilyRoster): Draft => {
     needs_confirm: o.needs_confirm === true,
     import_kind: o.import_kind === "fixtures" ? "fixtures" : null,
     league: str(o.league, 80),
+    team: str(o.team, 80),
   };
 };
 
@@ -268,8 +270,8 @@ const learnPattern = async (
 };
 
 /** League boards (נערים ב / ילדות ב) are a one-shot mapping: after the user answers once, auto-assign next time. */
-const learnFixtureAssignment = async (league: string | null, child: Child) => {
-  const senderKey = fixtureSenderKey(league);
+const learnFixtureAssignment = async (team: string | null, league: string | null, child: Child) => {
+  const senderKey = fixtureSenderKey(team, league);
   const leagueKey = normalizeLeagueKey(league);
   try {
     await ensurePatternsTable();
@@ -484,12 +486,16 @@ const buildQuestion = (draft: Draft, missing: string[], suggestedChild: Child | 
           ? " — הליגה הראשית של הבנות"
           : "";
     const leagueBit = draft.league ? ` בליגת ${draft.league}${kindHint}` : kindHint;
+    const teamName = draft.team?.trim() || "הקבוצה";
     const summary =
       draft.import_kind === "fixtures"
-        ? `זיהיתי ${complete.length} משחקים של ${FIXTURE_TEAM_NAME}${leagueBit}:\n${preview}${extra}\n\nזה מה שזיהיתי מהקובץ.`
+        ? `זיהיתי ${complete.length} משחקים עבור קבוצת ${teamName}${leagueBit}:\n${preview}${extra}`
         : complete.length === 1
           ? `זיהיתי ${describeEvent(complete[0])}.`
           : `זיהיתי ${complete.length} אירועים:\n${preview}`;
+    if (draft.import_kind === "fixtures" && !suggestedChild) {
+      return `${summary}\n\nלאיזה ילד/ה לשייך את המשחקים בלוח?`;
+    }
     if (suggestedChild) {
       return complete.length === 1 && draft.import_kind !== "fixtures"
         ? `${summary} לשבץ עבור ${childLabel(roster, suggestedChild)}?`
@@ -585,10 +591,11 @@ export async function POST(request: NextRequest) {
         );
       }
       if (!parsed.games.length) {
+        const hint = parsed.team ? ` של ${parsed.team}` : "";
         return NextResponse.json({
           success: false,
           missing_fields: ["events"],
-          question: `לא מצאתי משחקים של ${FIXTURE_TEAM_NAME} בקובץ. חפשו עמודות תאריך (D), מחזור (E), שעה (F), בית/חוץ או קבוצות (G/I) וכתובת (K).`,
+          question: `לא מצאתי משחקים${hint} בקובץ. חפשו עמודות ליגה, תאריך, שעה / Time, קבוצה ביתית / Home Team, קבוצה אורחת / Away Team ומגרש / Venue.`,
           draft: emptyDraft(),
           quick_replies: [],
         });
@@ -599,14 +606,15 @@ export async function POST(request: NextRequest) {
           time: g.time,
           title: g.title,
           type: "sport" as EventType,
-          keyword: normalizeLeagueKey(g.league) || normalizeLeagueKey(parsed.league) || FIXTURE_TEAM_NAME,
+          keyword: normalizeLeagueKey(g.league) || normalizeLeagueKey(parsed.league) || parsed.team,
           league: g.league,
         })),
         child_name: null,
-        sender_or_group: fixtureSenderKey(parsed.league),
+        sender_or_group: fixtureSenderKey(parsed.team, parsed.league),
         needs_confirm: true,
         import_kind: "fixtures",
         league: parsed.league,
+        team: parsed.team || null,
       };
     } else if (replyChild) {
       draft = { ...previousDraft, child_name: replyChild, needs_confirm: false };
@@ -649,6 +657,7 @@ export async function POST(request: NextRequest) {
         needs_confirm: previousDraft.needs_confirm === true,
         import_kind: previousDraft.import_kind,
         league: previousDraft.league,
+        team: previousDraft.team,
       };
     }
 
@@ -673,7 +682,7 @@ export async function POST(request: NextRequest) {
     let suggestedChild: Child | null = null;
     let childFromMemory = false;
     if (!draft.child_name && !mustAsk) {
-      const hay = [text, draft.league ?? null, ...draft.events.flatMap((e) => [e.keyword, e.title])];
+      const hay = [text, draft.league ?? null, draft.team ?? null, ...draft.events.flatMap((e) => [e.keyword, e.title])];
       const matches = matchPatterns(patterns, draft.sender_or_group, hay);
       const autoKids = [...new Set(matches.filter((p) => p.auto_assign).map((p) => normalizeChild(p.child_name, roster)))].filter(
         (c): c is Child => c !== null,
@@ -684,6 +693,10 @@ export async function POST(request: NextRequest) {
       } else if (matches.length > 0) {
         suggestedChild = normalizeChild(matches[0].child_name, roster); // highest confirmations
       }
+    }
+
+    if (draft.import_kind === "fixtures" && !draft.child_name && !suggestedChild && roster.children.length === 1) {
+      suggestedChild = roster.children[0].key;
     }
 
     if (draft.import_kind === "fixtures" && draft.needs_confirm) {
@@ -715,7 +728,7 @@ export async function POST(request: NextRequest) {
               ...roster.memberKeys.filter((c) => c !== suggestedChild).map((c) => `עבור ${childLabel(roster, c)}`),
             ]
           : draft.import_kind === "fixtures"
-            ? [...roster.childDisplayNames]
+            ? [...(roster.childDisplayNames.length ? roster.childDisplayNames : roster.memberDisplayNames)]
             : isGirlsGroup(draft.sender_or_group)
             ? [...roster.childDisplayNames, ...roster.familyPairOptions.map((pair) => pair.label.replace(" (ביחד)", "")), ...roster.memberDisplayNames]
             : [...roster.memberDisplayNames, "כולם"];
@@ -798,7 +811,7 @@ export async function POST(request: NextRequest) {
       // Learning only makes sense for a single, unambiguous owner.
       if (kids.length === 1) {
         if (draft.import_kind === "fixtures") {
-          await learnFixtureAssignment(draft.league ?? null, child);
+          await learnFixtureAssignment(draft.team ?? null, draft.league ?? null, child);
         } else {
           await learnPattern(
             learnEvents.flatMap((e) => [e.keyword, e.title]),

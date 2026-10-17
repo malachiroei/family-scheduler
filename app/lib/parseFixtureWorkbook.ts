@@ -1,10 +1,6 @@
 import { inflateRawSync } from "zlib";
 import { classifyFixtureLeague, compactLeagueLabel } from "./fixtureLeague";
 
-/** Family team this importer is built around. */
-export const FIXTURE_TEAM_NAME = "בני יהודה";
-export const FIXTURE_TEAM_RE = /בני[\s\-]*יהודה/i;
-
 export type FixtureGame = {
   date: string; // YYYY-MM-DD
   time: string; // HH:mm
@@ -23,8 +19,6 @@ export type FixtureParseResult = {
   sourceLabel: string;
 };
 
-const OUR_TEAM = FIXTURE_TEAM_RE;
-
 const cellText = (value: unknown): string => {
   if (value == null) return "";
   if (typeof value === "number" && Number.isFinite(value)) return String(value);
@@ -38,7 +32,44 @@ const normalizeHeader = (value: unknown) =>
     .replace(/\s+/g, " ")
     .trim();
 
-const looksLikeOurTeam = (value: string) => OUR_TEAM.test(value);
+/** Collapse punctuation so "הפועל-גבעתיים נשר" matches "הפועל גבעתיים נשר". */
+export const normalizeTeamKey = (raw: string | null | undefined) =>
+  cellText(raw ?? "")
+    .replace(/["'״׳`]/g, "")
+    .replace(/[()[\]{}]/g, " ")
+    .replace(/[-–—_/|,]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
+
+const teamTokens = (raw: string) =>
+  normalizeTeamKey(raw)
+    .split(" ")
+    .filter((token) => token.length >= 2);
+
+export const teamsMatch = (a: string, b: string) => {
+  const na = normalizeTeamKey(a);
+  const nb = normalizeTeamKey(b);
+  if (!na || !nb) return false;
+  if (na === nb) return true;
+  const [short, long] = na.length <= nb.length ? [na, nb] : [nb, na];
+  const tokens = short.split(" ").filter((token) => token.length >= 2);
+  if (tokens.length < 2) return false;
+  return tokens.every((token) => long.includes(token));
+};
+
+const looksLikeTeam = (value: string, team: string | null | undefined) =>
+  Boolean(team && value && teamsMatch(value, team));
+
+/** Pull a club name out of names like "2026-הפועל-גבעתיים-נשר - 17-10-2026.xlsx". */
+export const teamHintFromFileName = (fileName?: string | null): string => {
+  if (!fileName) return "";
+  let s = fileName.replace(/^.*[\\/]/, "").replace(/\.[^.]+$/, "");
+  s = s.replace(/\d{1,2}[-./]\d{1,2}[-./]\d{2,4}/g, " ");
+  s = s.replace(/\b20\d{2}\b/g, " ");
+  s = s.replace(/[-_]+/g, " ");
+  return s.replace(/\s+/g, " ").trim();
+};
 
 export const normalizeLeagueKey = (raw: string | null | undefined) => {
   const s = (raw ?? "").replace(/\s+/g, " ").trim();
@@ -50,9 +81,10 @@ export const normalizeLeagueKey = (raw: string | null | undefined) => {
     .toLowerCase();
 };
 
-export const fixtureSenderKey = (league: string | null | undefined) => {
+export const fixtureSenderKey = (team: string | null | undefined, league?: string | null) => {
+  const teamKey = cellText(team) || "קבוצה";
   const leagueKey = normalizeLeagueKey(league) || "כללי";
-  return `fixtures:${FIXTURE_TEAM_NAME}|${leagueKey}`;
+  return `fixtures:${teamKey}|${leagueKey}`;
 };
 
 const excelSerialToIso = (serial: number): string | null => {
@@ -115,11 +147,11 @@ type ColMap = {
 };
 
 const HEADER_ALIASES: Record<keyof ColMap, string[]> = {
-  date: ["תאריך", "date", "game date"],
+  date: ["תאריך", "date", "game date", "match date"],
   time: ["time", "שעה", "שעת משחק", "kickoff"],
   round: ["מחזור", "round", "cycle", "gw"],
-  homeTeam: ["home team", "קבוצת בית"],
-  awayTeam: ["away team", "קבוצת חוץ", "אורחת"],
+  homeTeam: ["home team", "קבוצה ביתית", "קבוצת בית", "ביתית"],
+  awayTeam: ["away team", "קבוצה אורחת", "קבוצת חוץ", "קבוצה אורח", "אורחת"],
   venue: ["venue", "אולם", "מגרש", "כתובת", "מיקום", "hall", "address"],
   league: ["ליגה", "league", "division"],
   homeAway: ["בית או חוץ", "בית/חוץ", "home/away", "ha"],
@@ -196,21 +228,27 @@ const buildTitle = (game: Omit<FixtureGame, "title">): string => {
   return game.venue ? `${head}\n${game.venue}` : head;
 };
 
-const pickOpponent = (homeTeam: string, awayTeam: string, explicitOpponent: string) => {
-  if (explicitOpponent && !looksLikeOurTeam(explicitOpponent)) return explicitOpponent;
-  if (looksLikeOurTeam(homeTeam) && awayTeam) return awayTeam;
-  if (looksLikeOurTeam(awayTeam) && homeTeam) return homeTeam;
+const pickOpponent = (
+  team: string | null,
+  homeTeam: string,
+  awayTeam: string,
+  explicitOpponent: string,
+) => {
+  if (explicitOpponent && !looksLikeTeam(explicitOpponent, team)) return explicitOpponent;
+  if (looksLikeTeam(homeTeam, team) && awayTeam) return awayTeam;
+  if (looksLikeTeam(awayTeam, team) && homeTeam) return homeTeam;
   return explicitOpponent || awayTeam || homeTeam;
 };
 
 const pickHomeAway = (
+  team: string | null,
   labeled: "בית" | "חוץ" | null,
   homeTeam: string,
   awayTeam: string,
 ): "בית" | "חוץ" | null => {
   if (labeled) return labeled;
-  if (looksLikeOurTeam(homeTeam)) return "בית";
-  if (looksLikeOurTeam(awayTeam)) return "חוץ";
+  if (looksLikeTeam(homeTeam, team)) return "בית";
+  if (looksLikeTeam(awayTeam, team)) return "חוץ";
   return null;
 };
 
@@ -398,11 +436,23 @@ const sheetsFromWorkbook = (buffer: Buffer): unknown[][][] => {
   return sheets;
 };
 
-const gamesFromRows = (rows: unknown[][]): FixtureGame[] => {
+type RawFixture = {
+  date: string;
+  time: string;
+  round: string | null;
+  homeTeam: string;
+  awayTeam: string;
+  explicitOpponent: string;
+  labeledHomeAway: "בית" | "חוץ" | null;
+  league: string | null;
+  venue: string | null;
+};
+
+const extractRawFixtures = (rows: unknown[][]): RawFixture[] => {
   if (!rows.length) return [];
   const cols = detectColumns(rows);
   const start = headerRowIndex(rows, cols) + 1;
-  const games: FixtureGame[] = [];
+  const out: RawFixture[] = [];
 
   for (let r = start; r < rows.length; r += 1) {
     const row = rows[r] ?? [];
@@ -414,32 +464,83 @@ const gamesFromRows = (rows: unknown[][]): FixtureGame[] => {
     const awayTeam = cellText(row[cols.awayTeam]);
     const explicitOpponent = cols.opponent >= 0 ? cellText(row[cols.opponent]) : "";
     const labeledHomeAway = cols.homeAway >= 0 ? parseHomeAwayLabel(cellText(row[cols.homeAway])) : null;
+    const roundRaw = cellText(row[cols.round]);
+    out.push({
+      date,
+      time,
+      round: roundRaw && roundRaw !== "0" ? roundRaw : null,
+      homeTeam,
+      awayTeam,
+      explicitOpponent,
+      labeledHomeAway,
+      league: cellText(row[cols.league]) || null,
+      venue: cellText(row[cols.venue]) || null,
+    });
+  }
+  return out;
+};
+
+const bumpTeamCount = (counts: Map<string, { name: string; n: number }>, name: string) => {
+  const key = normalizeTeamKey(name);
+  if (!key) return;
+  const prev = counts.get(key);
+  if (prev) prev.n += 1;
+  else counts.set(key, { name: cellText(name), n: 1 });
+};
+
+export const detectMainTeam = (fixtures: Array<{ homeTeam: string; awayTeam: string }>, fileName?: string): string | null => {
+  const counts = new Map<string, { name: string; n: number }>();
+  for (const row of fixtures) {
+    bumpTeamCount(counts, row.homeTeam);
+    bumpTeamCount(counts, row.awayTeam);
+  }
+  if (!counts.size) return null;
+
+  const ranked = [...counts.values()].sort((a, b) => b.n - a.n || b.name.length - a.name.length);
+  const fileHint = teamHintFromFileName(fileName);
+  if (fileHint) {
+    const hinted = ranked.filter((entry) => teamsMatch(entry.name, fileHint));
+    if (hinted.length) return hinted[0].name;
+    const hintTokens = teamTokens(fileHint);
+    if (hintTokens.length >= 2) {
+      const tokenHit = ranked.find((entry) => hintTokens.every((token) => normalizeTeamKey(entry.name).includes(token)));
+      if (tokenHit) return tokenHit.name;
+    }
+  }
+
+  const top = ranked[0];
+  const total = fixtures.length || 1;
+  const second = ranked[1];
+  if (top.n >= Math.max(2, Math.ceil(total * 0.5))) return top.name;
+  if (!second || top.n > second.n) return top.name;
+  return top.name;
+};
+
+const gamesFromRaw = (raw: RawFixture[], team: string | null): FixtureGame[] => {
+  const games: FixtureGame[] = [];
+  for (const row of raw) {
     const involvesUs =
-      looksLikeOurTeam(homeTeam) ||
-      looksLikeOurTeam(awayTeam) ||
-      looksLikeOurTeam(explicitOpponent) ||
-      labeledHomeAway !== null;
+      looksLikeTeam(row.homeTeam, team) ||
+      looksLikeTeam(row.awayTeam, team) ||
+      looksLikeTeam(row.explicitOpponent, team) ||
+      (!team && row.labeledHomeAway !== null);
 
     if (!involvesUs) continue;
 
-    const homeAway = pickHomeAway(labeledHomeAway, homeTeam, awayTeam);
+    const homeAway = pickHomeAway(team, row.labeledHomeAway, row.homeTeam, row.awayTeam);
     if (!homeAway) continue;
 
-    const opponent = pickOpponent(homeTeam, awayTeam, explicitOpponent);
-    if (!opponent || looksLikeOurTeam(opponent)) continue;
+    const opponent = pickOpponent(team, row.homeTeam, row.awayTeam, row.explicitOpponent);
+    if (!opponent || looksLikeTeam(opponent, team)) continue;
 
-    const league = cellText(row[cols.league]) || null;
-    const venue = cellText(row[cols.venue]) || null;
-    const roundRaw = cellText(row[cols.round]);
-    const round = roundRaw && roundRaw !== "0" ? roundRaw : null;
     const game: FixtureGame = {
-      date,
-      time,
-      round,
+      date: row.date,
+      time: row.time,
+      round: row.round,
       homeAway,
       opponent,
-      venue,
-      league,
+      venue: row.venue,
+      league: row.league,
       title: "",
     };
     game.title = buildTitle(game);
@@ -450,16 +551,16 @@ const gamesFromRows = (rows: unknown[][]): FixtureGame[] => {
 
 export const parseFixtureWorkbook = (buffer: Buffer, fileName?: string): FixtureParseResult => {
   const sheets = sheetsFromWorkbook(buffer);
-  const games: FixtureGame[] = [];
-  const leagueCounts = new Map<string, number>();
-
+  const raw: RawFixture[] = [];
   for (const rows of sheets) {
-    for (const game of gamesFromRows(rows)) {
-      games.push(game);
-      if (game.league) {
-        leagueCounts.set(game.league, (leagueCounts.get(game.league) ?? 0) + 1);
-      }
-    }
+    raw.push(...extractRawFixtures(rows));
+  }
+
+  const team = detectMainTeam(raw, fileName);
+  const games = gamesFromRaw(raw, team);
+  const leagueCounts = new Map<string, number>();
+  for (const game of games) {
+    if (game.league) leagueCounts.set(game.league, (leagueCounts.get(game.league) ?? 0) + 1);
   }
 
   const unique: FixtureGame[] = [];
@@ -484,7 +585,7 @@ export const parseFixtureWorkbook = (buffer: Buffer, fileName?: string): Fixture
   return {
     games: unique,
     league: topLeague,
-    team: FIXTURE_TEAM_NAME,
+    team: team || teamHintFromFileName(fileName) || "",
     sourceLabel: fileName?.trim() || "קובץ אקסל",
   };
 };
