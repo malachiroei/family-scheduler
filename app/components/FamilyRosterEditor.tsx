@@ -3,7 +3,6 @@
 import React, { useMemo, useState } from "react";
 import { Plus, Trash2, X } from "lucide-react";
 import {
-  blankOnboardingMembers,
   COLOR_PALETTE,
   ONBOARDING_PLACEHOLDERS,
   type FamilyMember,
@@ -27,9 +26,6 @@ type FamilyRosterEditorProps = {
   onSave: (members: StoredFamilyMember[]) => Promise<void> | void;
   onClose?: () => void;
   allowClose?: boolean;
-  /** Empty generic rows (new tenant) instead of the current household names. */
-  blankStart?: boolean;
-  requireParentAndChild?: boolean;
 };
 
 const newId = () => `new-${Math.random().toString(36).slice(2, 9)}`;
@@ -51,12 +47,8 @@ export default function FamilyRosterEditor({
   onSave,
   onClose,
   allowClose = true,
-  blankStart = false,
-  requireParentAndChild = false,
 }: FamilyRosterEditorProps) {
-  const [rows, setRows] = useState<DraftRow[]>(() =>
-    toDraft(blankStart ? blankOnboardingMembers() : initialMembers),
-  );
+  const [rows, setRows] = useState<DraftRow[]>(() => toDraft(initialMembers));
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
 
@@ -84,15 +76,9 @@ export default function FamilyRosterEditor({
         color: row.color,
         key: row.key,
       }))
-      .filter((row) => row.name && !/^הורה\s*\d+$/.test(row.name) && !/^ילד\s*\d+$/.test(row.name));
-    const hasParent = members.some((row) => row.role === "parent");
-    const hasChild = members.some((row) => row.role === "child");
+      .filter((row) => row.name);
     if (!members.length) {
       setError("יש להזין לפחות שם אחד.");
-      return;
-    }
-    if (requireParentAndChild && (!hasParent || !hasChild)) {
-      setError("יש להזין לפחות הורה אחד וילד אחד.");
       return;
     }
     setBusy(true);

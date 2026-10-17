@@ -11,7 +11,6 @@ import {
   createFamilyRoster,
   escapeRegExp,
   fallbackRoster,
-  FAMILY_ROSTER_ONBOARDING_KEY,
   type FamilyRoster,
   type StoredFamilyMember,
 } from '@/app/lib/familyMembers';
@@ -1768,12 +1767,11 @@ export default function FamilyScheduler() {
   const [johnnySwapBusy, setJohnnySwapBusy] = useState(false);
   const [creatingEvent, setCreatingEvent] = useState<NewEventDraft | null>(null);
   const [roster, setRoster] = useState<FamilyRoster>(fallbackRoster);
-  const [showFamilyOnboarding, setShowFamilyOnboarding] = useState(false);
   const [showFamilyEditor, setShowFamilyEditor] = useState(false);
   // Background polling (presence / state sync / reminder check) pauses while an edit dialog is open,
   // so it never competes with the user's save for database connections.
   const modalOpenRef = useRef(false);
-  const modalOpen = Boolean(editingEvent) || Boolean(creatingEvent) || showFamilyOnboarding || showFamilyEditor;
+  const modalOpen = Boolean(editingEvent) || Boolean(creatingEvent) || showFamilyEditor;
   modalOpenRef.current = modalOpen;
   const [, setIsChatOpen] = useState(false);
   const [chatClarificationPending, setChatClarificationPending] = useState<ChatClarificationPending | null>(null);
@@ -1874,11 +1872,6 @@ export default function FamilyScheduler() {
   useEffect(() => {
     let cancelled = false;
     void (async () => {
-      const markOnboarding = (configured: boolean) => {
-        if (!configured) {
-          setShowFamilyOnboarding(true);
-        }
-      };
       try {
         const response = await fetch(toApiUrl('/api/family'), { cache: 'no-store' });
         const payload = await response.json().catch(() => ({}));
@@ -1887,16 +1880,10 @@ export default function FamilyScheduler() {
         }
         if (response.ok && Array.isArray(payload?.members) && payload.members.length) {
           const source = payload.source === 'db' || payload.source === 'env' ? payload.source : 'default';
-          const next = createFamilyRoster(payload.members, source);
-          applyRoster(next);
-          markOnboarding(Boolean(next.configured));
-        } else {
-          markOnboarding(fallbackRoster.configured);
+          applyRoster(createFamilyRoster(payload.members, source));
         }
       } catch {
-        if (!cancelled) {
-          markOnboarding(fallbackRoster.configured);
-        }
+        // Missing/empty family_roster stays on the default household silently.
       }
     })();
     return () => {
@@ -1916,12 +1903,6 @@ export default function FamilyScheduler() {
     }
     const next = createFamilyRoster(Array.isArray(payload?.members) ? payload.members : [], 'db');
     applyRoster(next);
-    try {
-      localStorage.setItem(FAMILY_ROSTER_ONBOARDING_KEY, '1');
-    } catch {
-      // no-op
-    }
-    setShowFamilyOnboarding(false);
     setShowFamilyEditor(false);
     setApiError('');
     setSuccessMessage('בני המשפחה נשמרו בהצלחה.');
@@ -5584,19 +5565,6 @@ export default function FamilyScheduler() {
       )}
 
       <AgentChat onSaved={handleAgentSaved} childNames={roster.childDisplayNames} />
-
-      {showFamilyOnboarding && (
-        <FamilyRosterEditor
-          title="הגדרת בני המשפחה"
-          subtitle="הזינו את שמות ההורים והילדים. אפשר לשנות את זה אחר כך מהגלגל שיניים."
-          initialMembers={roster.members}
-          saveLabel="שמירת בני המשפחה"
-          onSave={saveFamilyRosterFromUi}
-          allowClose={false}
-          blankStart
-          requireParentAndChild
-        />
-      )}
 
       {showFamilyEditor && (
         <FamilyRosterEditor
