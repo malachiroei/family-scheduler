@@ -7,7 +7,7 @@ export type AppBranding = {
   app_icon: string;
 };
 
-export const APP_ICON_PRESETS = ["📅", "🏡", "👨‍👩‍👧‍👦", "⭐", "🚀", "❤️", "🐶", "🌈"] as const;
+export const APP_ICON_PRESETS = ["👨‍👩‍👧‍👦", "📅"] as const;
 
 export const ORIGINAL_APP_TITLE = "Malachi Family Time";
 export const GENERIC_APP_TITLE = "הלו״ז המשפחתי שלנו";

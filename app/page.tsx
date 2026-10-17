@@ -15,7 +15,6 @@ import {
   escapeRegExp,
   fallbackRoster,
   isOriginalHouseholdEnabled,
-  type FamilyMember,
   type FamilyRoster,
   type StoredFamilyMember,
 } from '@/app/lib/familyMembers';
@@ -1868,8 +1867,7 @@ export default function FamilyScheduler() {
   const [exportImageBusy, setExportImageBusy] = useState(false);
   const [presenceBusy, setPresenceBusy] = useState(false);
   const [presenceUsers, setPresenceUsers] = useState<PresenceUser[]>([]);
-  const [pushRavidTestBusy, setPushRavidTestBusy] = useState(false);
-  const [directTestChildKey, setDirectTestChildKey] = useState<string | null>(null);
+  const [isStandaloneApp, setIsStandaloneApp] = useState(false);
   const [confirmingEventId, setConfirmingEventId] = useState('');
   const [confirmingReminderSeen, setConfirmingReminderSeen] = useState(false);
   const [pendingReminderConfirmation, setPendingReminderConfirmation] = useState<{
@@ -2526,6 +2524,7 @@ export default function FamilyScheduler() {
 
   useEffect(() => {
     const standalone = window.matchMedia('(display-mode: standalone)').matches || Boolean((window.navigator as Navigator & { standalone?: boolean }).standalone);
+    setIsStandaloneApp(standalone);
     if (standalone) {
       setIsInstallReady(false);
       return;
@@ -2554,6 +2553,7 @@ export default function FamilyScheduler() {
 
   const installApp = async () => {
     if (!installPromptEvent) {
+      setSuccessMessage("באייפון: כפתור השיתוף ← 'הוסף למסך הבית'. באנדרואיד: תפריט ⋮ ← 'התקן אפליקציה'.");
       return;
     }
 
@@ -3014,37 +3014,6 @@ export default function FamilyScheduler() {
       fail(error instanceof Error && error.message ? error.message : 'שליחת התראת הבדיקה נכשלה');
     } finally {
       setPushTestBusy(false);
-    }
-  };
-
-  const sendDirectTestPushToChild = async (child: FamilyMember) => {
-    if (pushRavidTestBusy) {
-      return;
-    }
-
-    setDirectTestChildKey(child.key);
-    setPushRavidTestBusy(true);
-    try {
-      const ready = await ensurePushSubscriptionReady();
-      if (!ready) {
-        return;
-      }
-
-      const response = await fetch(toApiUrl(`/api/push/test-ravid?childName=${encodeURIComponent(child.pushName)}`), {
-        method: 'POST',
-      });
-      const payload = await readJsonSafe(response);
-      if (!response.ok) {
-        throw new Error(payload?.error || `שליחת בדיקה ל${child.name} נכשלה`);
-      }
-
-      setSuccessMessage(`התראת בדיקה נשלחה ל${child.name}.`);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : `שליחת בדיקה ל${child.name} נכשלה`;
-      setApiError(message);
-    } finally {
-      setPushRavidTestBusy(false);
-      setDirectTestChildKey(null);
     }
   };
 
@@ -3920,7 +3889,7 @@ export default function FamilyScheduler() {
   }, [weekKey, isHydrated]);
 
   useEffect(() => {
-    if (!isHydrated || hasAutoScrolledToTodayRef.current || days.length === 0) {
+    if (!isHydrated || days.length === 0 || showScheduleLoading) {
       return;
     }
 
@@ -3930,19 +3899,43 @@ export default function FamilyScheduler() {
       return;
     }
 
-    const todayIso = toIsoDate(today);
     const todayIndex = days.findIndex((day) => day.isoDate === todayIso);
-    const targetDayCard = dayCardRefs.current[todayIndex >= 0 ? todayIndex : today.getDay()] ?? null;
-    if (!targetDayCard) {
-      return;
-    }
+    const index = todayIndex >= 0 ? todayIndex : today.getDay();
+    let cancelled = false;
+    hasAutoScrolledToTodayRef.current = false;
 
-    const timer = window.setTimeout(() => {
-      targetDayCard.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'nearest' });
+    const scrollToToday = () => {
+      if (cancelled) {
+        return false;
+      }
+      const targetDayCard = dayCardRefs.current[index] ?? document.getElementById('today-day-card');
+      if (!targetDayCard) {
+        return false;
+      }
+      targetDayCard.scrollIntoView({ behavior: 'smooth', block: 'start', inline: 'nearest' });
+      const top = targetDayCard.getBoundingClientRect().top + window.scrollY - 16;
+      window.scrollTo({ top: Math.max(0, top), behavior: 'smooth' });
       hasAutoScrolledToTodayRef.current = true;
-    }, 120);
-    return () => window.clearTimeout(timer);
-  }, [isHydrated, weekKey, days.length, scheduleLoadedWeekKey]);
+      return true;
+    };
+
+    const timers = [0, 80, 250, 600, 1200].map((delay) =>
+      window.setTimeout(() => {
+        requestAnimationFrame(() => {
+          requestAnimationFrame(() => {
+            if (!cancelled) {
+              scrollToToday();
+            }
+          });
+        });
+      }, delay),
+    );
+
+    return () => {
+      cancelled = true;
+      timers.forEach((timer) => window.clearTimeout(timer));
+    };
+  }, [isHydrated, weekKey, days.length, scheduleLoadedWeekKey, showScheduleLoading, todayIso]);
 
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
   const parseInstructionFallback = (text: string): { targetWeekStart: Date; events: AiEvent[] } | null => {
@@ -5189,6 +5182,7 @@ export default function FamilyScheduler() {
             ref={(element) => {
               dayCardRefs.current[dayIndex] = element;
             }}
+            id={isToday ? 'today-day-card' : undefined}
             className={`bg-white rounded-3xl shadow-xl overflow-hidden border print-day-card flex flex-col min-h-[280px] ${
               isToday
                 ? 'border-indigo-400 ring-2 ring-indigo-400 ring-offset-2 ring-offset-[#f8fafc]'
@@ -5534,16 +5528,17 @@ export default function FamilyScheduler() {
               עריכת בני המשפחה
             </button>
 
+            {!isStandaloneApp && (
+              <button
+                type="button"
+                onClick={() => { void installApp(); }}
+                className="w-full flex items-center justify-center gap-2 bg-amber-50 text-amber-800 border border-amber-200 px-4 py-1.5 rounded-lg hover:bg-amber-100 transition"
+              >
+                התקן אפליקציה
+              </button>
+            )}
+
             <div className="space-y-1.5">
-              {isInstallReady && (
-                <button
-                  type="button"
-                  onClick={() => { void installApp(); }}
-                  className="w-full flex items-center justify-center gap-2 bg-amber-50 text-amber-800 border border-amber-200 px-4 py-1.5 rounded-lg hover:bg-amber-100 transition"
-                >
-                  התקן אפליקציה
-                </button>
-              )}
               <button
                 type="button"
                 onClick={() => { void shareInstallLinkOnWhatsApp(); }}
@@ -5584,19 +5579,6 @@ export default function FamilyScheduler() {
                   {pushTestStatus.kind === 'success' ? '✅ ' : '⚠️ '}{pushTestStatus.text}
                 </div>
               )}
-              {roster.children.map((child) => (
-                <button
-                  key={`direct-test-${child.key}`}
-                  type="button"
-                  onClick={() => { void sendDirectTestPushToChild(child); }}
-                  disabled={pushRavidTestBusy}
-                  className="w-full flex items-center justify-center gap-2 bg-indigo-50 text-indigo-700 border border-indigo-200 px-4 py-1.5 rounded-lg hover:bg-indigo-100 transition disabled:opacity-60 disabled:cursor-not-allowed"
-                >
-                  {pushRavidTestBusy && directTestChildKey === child.key
-                    ? `שולח ל${child.name}...`
-                    : `שלח בדיקה ל${child.name}`}
-                </button>
-              ))}
               <button
                 type="button"
                 onClick={() => { void handleClearAll(); }}
