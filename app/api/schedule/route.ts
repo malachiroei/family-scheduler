@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse, after } from "next/server";
-import { ensureDatabaseConnectionString, getDatabaseConfig, sql, sqlJson } from "@/app/lib/db";
+import { ensureDatabaseConnectionString, formatPublicDbError, getDatabaseConfig, sql, sqlJson } from "@/app/lib/db";
 import {
   buildMetadataFromIncoming,
   ensureScheduleExtraColumns,
@@ -157,7 +157,7 @@ const ensureScheduleTableReady = async () => {
     return {
       ok: false as const,
       code: "TABLE_BOOTSTRAP_FAILED",
-      error: `Failed to ensure schedule.metadata column: ${getErrorMessage(error)}`,
+      error: formatPublicDbError(error),
     };
   }
 };
@@ -679,7 +679,7 @@ export async function GET() {
       );
     }
     console.error("[API] GET /api/schedule failed", formatDbError(error), error);
-    return NextResponse.json({ error: `שגיאת מסד נתונים: ${formatDbError(error)}`, code: "DB_ERROR" }, { status: 500 });
+    return NextResponse.json({ error: `שגיאת מסד נתונים: ${formatPublicDbError(error)}`, code: "DB_ERROR" }, { status: 500 });
   }
 }
 

@@ -4,6 +4,7 @@ export type DatabaseUrlSource =
   | "SUPABASE_POSTGRES_URL"
   | "SUPABASE_DATABASE_URL"
   | "POSTGRES_URL"
+  | "POSTGRES_PRISMA_URL"
   | "DATABASE_URL"
   | "MISSING";
 
@@ -19,40 +20,75 @@ const normalizeConnectionString = (raw: string | undefined): string => {
   return s.trim();
 };
 
-/** Port 6543 (transaction pooler) -> 5432 (session pooler, reachable over IPv4). Credentials untouched. */
-// DISABLED: keep the URL exactly as configured. Transaction pooler (6543) + prepare:false + max:1 is the
-// right setup for serverless; session mode (5432) exhausted pooler slots (EMAXCONNSESSION) / timed out.
-const forceSessionPort = (url: string): string => url;
+type UrlKind = "pooled" | "direct" | "other";
 
-// Resolve connection string (Supabase envs first). Works with Supabase / Neon / any Postgres.
-const resolveDatabaseUrl = (): { url: string; source: DatabaseUrlSource } => {
-  const supabasePostgres = normalizeConnectionString(process.env.SUPABASE_POSTGRES_URL);
-  const supabaseDatabase = normalizeConnectionString(process.env.SUPABASE_DATABASE_URL);
-  const postgresUrl = normalizeConnectionString(process.env.POSTGRES_URL);
-  const databaseUrl = normalizeConnectionString(process.env.DATABASE_URL);
-
-  // Priority: SUPABASE_DATABASE_URL first.
-  if (supabaseDatabase) {
-    return { url: forceSessionPort(supabaseDatabase), source: "SUPABASE_DATABASE_URL" };
+const parseDbUrl = (url: string): URL | null => {
+  try {
+    return new URL(url);
+  } catch {
+    return null;
   }
-  // SUPABASE_DATABASE_URL || DATABASE_URL, then legacy fallbacks.
-  if (databaseUrl) {
-    return { url: forceSessionPort(databaseUrl), source: "DATABASE_URL" };
-  }
-  if (supabasePostgres) {
-    return { url: forceSessionPort(supabasePostgres), source: "SUPABASE_POSTGRES_URL" };
-  }
-  if (postgresUrl) {
-    return { url: forceSessionPort(postgresUrl), source: "POSTGRES_URL" };
-  }
-
-  return { url: "", source: "MISSING" };
 };
 
-const initialConfig = resolveDatabaseUrl();
-if (initialConfig.url) {
-  process.env.POSTGRES_URL = initialConfig.url;
-}
+/** Direct host `db.<ref>.supabase.co` is IPv6-only / often ENOTFOUND on Vercel. Use the pooler instead. */
+const classifyDatabaseUrl = (url: string): UrlKind => {
+  const parsed = parseDbUrl(url);
+  if (!parsed) {
+    return "other";
+  }
+  const host = parsed.hostname.toLowerCase();
+  const port = parsed.port || "5432";
+  if (
+    host.includes("pooler.supabase.com") ||
+    port === "6543" ||
+    parsed.searchParams.get("pgbouncer") === "true"
+  ) {
+    return "pooled";
+  }
+  if (/^db\.[a-z0-9]+\.supabase\.co$/.test(host)) {
+    return "direct";
+  }
+  return "other";
+};
+
+type DatabaseCandidate = { url: string; source: Exclude<DatabaseUrlSource, "MISSING"> };
+
+const collectDatabaseCandidates = (): DatabaseCandidate[] => {
+  const entries: DatabaseCandidate[] = [
+    { url: normalizeConnectionString(process.env.SUPABASE_DATABASE_URL), source: "SUPABASE_DATABASE_URL" },
+    { url: normalizeConnectionString(process.env.POSTGRES_URL), source: "POSTGRES_URL" },
+    { url: normalizeConnectionString(process.env.POSTGRES_PRISMA_URL), source: "POSTGRES_PRISMA_URL" },
+    { url: normalizeConnectionString(process.env.SUPABASE_POSTGRES_URL), source: "SUPABASE_POSTGRES_URL" },
+    { url: normalizeConnectionString(process.env.DATABASE_URL), source: "DATABASE_URL" },
+  ];
+  // Never use the Vercel/Supabase "non-pooling" / Direct URL on serverless.
+  return entries.filter((entry) => entry.url.length > 0);
+};
+
+const pickDatabaseCandidate = (candidates: DatabaseCandidate[]): DatabaseCandidate | null => {
+  if (!candidates.length) {
+    return null;
+  }
+  const pooled = candidates.filter((entry) => classifyDatabaseUrl(entry.url) === "pooled");
+  if (pooled.length) {
+    return pooled[0];
+  }
+  const notDirect = candidates.filter((entry) => classifyDatabaseUrl(entry.url) !== "direct");
+  if (notDirect.length) {
+    return notDirect[0];
+  }
+  return candidates[0];
+};
+
+// Resolve connection string. Prefer a Supabase transaction pooler URL over Direct `db.*.supabase.co`,
+// which fails DNS on Vercel (ENOTFOUND) even when the password is correct.
+const resolveDatabaseUrl = (): { url: string; source: DatabaseUrlSource } => {
+  const chosen = pickDatabaseCandidate(collectDatabaseCandidates());
+  if (!chosen) {
+    return { url: "", source: "MISSING" };
+  }
+  return { url: chosen.url, source: chosen.source };
+};
 
 export const getDatabaseConfig = () => resolveDatabaseUrl();
 
@@ -92,6 +128,11 @@ function getPostgres() {
       }
     } catch {
       console.log(`[db] env=${source} (unparseable URL)`);
+    }
+    if (classifyDatabaseUrl(url) === "direct") {
+      console.warn(
+        "[db] Direct Supabase host (db.*.supabase.co) is not reachable from Vercel. Set DATABASE_URL / POSTGRES_URL to the Transaction pooler URI (*.pooler.supabase.com:6543).",
+      );
     }
     pg = postgres(connectionUrl, {
       max: 5, // short-lived connections; background calls (presence/state) must not starve a save
@@ -158,6 +199,33 @@ function logDbError(error: unknown) {
     hint: e.hint,
     host,
   });
+}
+
+/** Client-facing DB error (no credentials). ENOTFOUND on db.*.supabase.co is DNS, not a bad password. */
+export function formatPublicDbError(error: unknown): string {
+  const e = (error ?? {}) as { code?: string; errno?: string | number; message?: string };
+  const message = String(e.message ?? (error instanceof Error ? error.message : error ?? ""));
+  const code = String(e.code ?? e.errno ?? "");
+  const parsed = parseDbUrl(resolveDatabaseUrl().url);
+  const host = parsed?.hostname ?? "";
+  const isDns =
+    code === "ENOTFOUND" ||
+    code === "EAI_AGAIN" ||
+    /ENOTFOUND|getaddrinfo|EAI_AGAIN/i.test(message);
+
+  if (isDns && /^db\./i.test(host) && /supabase\.co$/i.test(host)) {
+    return "הסיסמה תקינה, אבל זה Direct connection (db.…supabase.co) ש-Vercel לא מצליח לפתור. ב-Supabase: Connect → Transaction pooler, והדביקי ב-Vercel URI עם מארח pooler.supabase.com ופורט 6543.";
+  }
+  if (isDns) {
+    return `לא נמצא שרת המסד (DNS${host ? `: ${host}` : ""}). בדקי שה-URI הוא של ה-pooler, לא Direct.`;
+  }
+  if (code === "ENETUNREACH" || code === "EHOSTUNREACH" || /ENETUNREACH|EHOSTUNREACH/i.test(message)) {
+    return "אין נתיב לשרת המסד (לרוב Direct/IPv6). השתמשי ב-Transaction pooler של Supabase.";
+  }
+  if (code === "28P01" || code === "28000" || /password authentication|Tenant or user not found/i.test(message)) {
+    return "סיסמת מסד הנתונים שגויה, או ששם המשתמש ב-pooler צריך להיות postgres.<project-ref>.";
+  }
+  return message || "שגיאת מסד נתונים";
 }
 
 /** Safe JSON/JSONB parameter for `sql\`...\`` (prefer over string + `::jsonb`). */
