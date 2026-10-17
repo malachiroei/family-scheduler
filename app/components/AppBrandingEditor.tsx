@@ -3,12 +3,14 @@
 import React, { useEffect, useRef, useState } from "react";
 import {
   APP_ICON_PRESETS,
+  GENERIC_APP_ICON,
   ORIGINAL_APP_ICON,
   ORIGINAL_LOGO_SRC,
   appIconSrc,
   isImageAppIcon,
   type AppBranding,
 } from "@/app/lib/appBranding";
+import { isOriginalHouseholdEnabled } from "@/app/lib/familyMembers";
 
 type AppBrandingEditorProps = {
   value: AppBranding;
@@ -114,6 +116,17 @@ export default function AppBrandingEditor({ value, onSaved }: AppBrandingEditorP
         />
       </div>
       <div className="flex flex-wrap items-center gap-1.5">
+        <button
+          type="button"
+          onClick={() => setIcon(GENERIC_APP_ICON)}
+          className={`h-9 w-9 rounded-lg border bg-white overflow-hidden ${
+            icon === GENERIC_APP_ICON ? "border-slate-800 ring-2 ring-slate-400" : "border-slate-200 hover:bg-slate-50"
+          }`}
+          aria-label="אייקון משפחתי"
+        >
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img src={GENERIC_APP_ICON} alt="" className="h-full w-full object-cover" />
+        </button>
         {APP_ICON_PRESETS.map((preset) => (
           <button
             key={preset}
@@ -127,17 +140,19 @@ export default function AppBrandingEditor({ value, onSaved }: AppBrandingEditorP
             {preset}
           </button>
         ))}
-        <button
-          type="button"
-          onClick={() => setIcon(ORIGINAL_APP_ICON)}
-          className={`h-9 w-9 rounded-lg border bg-white overflow-hidden ${
-            icon === ORIGINAL_APP_ICON ? "border-slate-800 ring-2 ring-slate-400" : "border-slate-200 hover:bg-slate-50"
-          }`}
-          aria-label="לוגו מקורי"
-        >
-          {/* eslint-disable-next-line @next/next/no-img-element */}
-          <img src={ORIGINAL_LOGO_SRC} alt="" className="h-full w-full object-cover" />
-        </button>
+        {isOriginalHouseholdEnabled() ? (
+          <button
+            type="button"
+            onClick={() => setIcon(ORIGINAL_APP_ICON)}
+            className={`h-9 w-9 rounded-lg border bg-white overflow-hidden ${
+              icon === ORIGINAL_APP_ICON ? "border-slate-800 ring-2 ring-slate-400" : "border-slate-200 hover:bg-slate-50"
+            }`}
+            aria-label="לוגו מקורי"
+          >
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img src={ORIGINAL_LOGO_SRC} alt="" className="h-full w-full object-cover" />
+          </button>
+        ) : null}
         <button
           type="button"
           onClick={() => fileRef.current?.click()}

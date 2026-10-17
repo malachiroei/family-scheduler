@@ -6,7 +6,7 @@ import html2canvas from 'html2canvas';
 import AgentChat from '@/app/components/AgentChat';
 import FamilyRosterEditor from '@/app/components/FamilyRosterEditor';
 import AppBrandingEditor, { AppIconView } from '@/app/components/AppBrandingEditor';
-import { defaultAppBranding, mergeAppBranding, type AppBranding } from '@/app/lib/appBranding';
+import { applyDocumentFavicon, defaultAppBranding, mergeAppBranding, type AppBranding } from '@/app/lib/appBranding';
 import { normalizeMetadataTime, parseMetadataBoolean } from '@/app/lib/scheduleTime';
 import { fixtureLeagueBadge } from '@/app/lib/fixtureLeague';
 import {
@@ -1904,7 +1904,8 @@ export default function FamilyScheduler() {
 
   useEffect(() => {
     document.title = branding.app_title;
-  }, [branding.app_title]);
+    applyDocumentFavicon(branding.app_icon);
+  }, [branding.app_title, branding.app_icon]);
 
   const saveAppBrandingFromUi = async (next: AppBranding) => {
     const response = await fetch(toApiUrl('/api/branding'), {
