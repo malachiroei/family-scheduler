@@ -2552,6 +2552,10 @@ export default function FamilyScheduler() {
   }, []);
 
   const installApp = async () => {
+    if (isStandaloneApp) {
+      setSuccessMessage('האפליקציה כבר מותקנת במסך הבית.');
+      return;
+    }
     if (!installPromptEvent) {
       setSuccessMessage("באייפון: כפתור השיתוף ← 'הוסף למסך הבית'. באנדרואיד: תפריט ⋮ ← 'התקן אפליקציה'.");
       return;
@@ -5529,15 +5533,13 @@ export default function FamilyScheduler() {
               עריכת בני המשפחה
             </button>
 
-            {!isStandaloneApp && (
-              <button
-                type="button"
-                onClick={() => { void installApp(); }}
-                className="w-full flex items-center justify-center gap-2 bg-amber-50 text-amber-800 border border-amber-200 px-4 py-1.5 rounded-lg hover:bg-amber-100 transition"
-              >
-                התקן אפליקציה
-              </button>
-            )}
+            <button
+              type="button"
+              onClick={() => { void installApp(); }}
+              className="w-full flex items-center justify-center gap-2 bg-amber-50 text-amber-800 border border-amber-200 px-4 py-2 rounded-lg hover:bg-amber-100 transition font-bold"
+            >
+              התקן אפליקציה
+            </button>
 
             <div className="space-y-1.5">
               <button
