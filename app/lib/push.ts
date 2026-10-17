@@ -1,15 +1,7 @@
 import { sql } from "@/app/lib/db";
 import { ensureScheduleMetadataColumn, parseScheduleMetadata } from "@/app/lib/scheduleTable";
-import {
-  childPushNamesFromField,
-  isChildPushName,
-  isParentPushName,
-  parentPushNamesFromField,
-  pushChildNames,
-  pushParentNames,
-  pushUserNames,
-  resolvePushName,
-} from "@/app/lib/familyMembers";
+import { fallbackRoster, type FamilyRoster } from "@/app/lib/familyMembers";
+import { loadFamilyRoster } from "@/app/lib/familyRosterStore";
 import webpush from "web-push";
 
 type PushPayload = {
@@ -50,21 +42,17 @@ type TaskRow = {
   reminder_lead_minutes?: number | null;
 };
 
-const childUserNames = pushChildNames;
-const parentUserNames = pushParentNames;
-
 type ChildUserName = string;
 type ParentUserName = string;
 type AllowedUserName = string;
 
-const childNameSet = new Set<string>(childUserNames);
-const parentNameSet = new Set<string>(parentUserNames);
-const allowedUserNames = pushUserNames;
+const childNameSetOf = (roster: FamilyRoster) => new Set<string>(roster.pushChildNames);
+const parentNameSetOf = (roster: FamilyRoster) => new Set<string>(roster.pushParentNames);
 
-const isChildUserName = (value: string): value is ChildUserName => isChildPushName(value);
-const isParentUserName = (value: string): value is ParentUserName => isParentPushName(value);
+const isChildUserName = (value: string, roster: FamilyRoster): value is ChildUserName => roster.isChildPushName(value);
+const isParentUserName = (value: string, roster: FamilyRoster): value is ParentUserName => roster.isParentPushName(value);
 
-const normalizeAllowedUserName = (value: unknown): AllowedUserName | null => {
+const normalizeAllowedUserName = (value: unknown, roster: FamilyRoster = fallbackRoster): AllowedUserName | null => {
   if (typeof value !== "string") {
     return null;
   }
@@ -74,28 +62,28 @@ const normalizeAllowedUserName = (value: unknown): AllowedUserName | null => {
     return null;
   }
 
-  const direct = resolvePushName(trimmed);
+  const direct = roster.resolvePushName(trimmed);
   if (direct) {
     return direct;
   }
 
   try {
     const decoded = Buffer.from(trimmed, "latin1").toString("utf8").trim();
-    return resolvePushName(decoded);
+    return roster.resolvePushName(decoded);
   } catch {
     return null;
   }
 };
 
-const normalizeTaskParentNames = (rawChild: string): ParentUserName[] =>
-  parentPushNamesFromField(rawChild);
+const normalizeTaskParentNames = (rawChild: string, roster: FamilyRoster): ParentUserName[] =>
+  roster.parentPushNamesFromField(rawChild);
 
-const normalizeTaskChildNames = (rawChild: string): ChildUserName[] => {
-  const fromKeys = childPushNamesFromField(rawChild);
+const normalizeTaskChildNames = (rawChild: string, roster: FamilyRoster): ChildUserName[] => {
+  const fromKeys = roster.childPushNamesFromField(rawChild);
   if (fromKeys.length) {
     return fromKeys;
   }
-  return childUserNames.filter((name) => name && rawChild.includes(name));
+  return roster.pushChildNames.filter((name) => name && rawChild.includes(name));
 };
 
 const reminderLeadOptions = [5, 10, 15, 30, 60, 120, 1440] as const;
@@ -189,7 +177,8 @@ const ensurePushTablesUncached = async (): Promise<void> => {
   await sql`ALTER TABLE push_subscriptions ADD COLUMN IF NOT EXISTS watch_children TEXT`;
   await sql`ALTER TABLE push_subscriptions ADD COLUMN IF NOT EXISTS reminder_lead_minutes INT NOT NULL DEFAULT 10`;
 
-  for (const userName of allowedUserNames) {
+  const roster = await loadFamilyRoster();
+  for (const userName of roster.pushUserNames) {
     try {
       const mojibake = Buffer.from(userName, "utf8").toString("latin1");
       if (mojibake !== userName) {
@@ -229,9 +218,12 @@ export const savePushSubscription = async (subscription: unknown) => {
   }
 
   await ensurePushTables();
+  const roster = await loadFamilyRoster();
+  const childNameSet = childNameSetOf(roster);
+  const parentNameSet = parentNameSetOf(roster);
 
   const meta = (subscription as Record<string, unknown>) ?? {};
-  const userName = normalizeAllowedUserName(meta.userName);
+  const userName = normalizeAllowedUserName(meta.userName, roster);
 
   const receiveAllRaw = Boolean(meta.receiveAll);
   const incomingWatchChildren = Array.isArray(meta.watchChildren)
@@ -239,7 +231,7 @@ export const savePushSubscription = async (subscription: unknown) => {
     : [];
   const watchChildren = incomingWatchChildren
     .filter((value): value is string => typeof value === "string")
-    .map((value) => resolvePushName(value.trim()))
+    .map((value) => roster.resolvePushName(value.trim()))
     .filter((value): value is string => Boolean(value && childNameSet.has(value)));
 
   const isParent = userName ? parentNameSet.has(userName) : false;
@@ -377,19 +369,21 @@ export const sendPushToEndpoint = async (endpoint: string, payload: PushPayload)
 
 export const sendPushToParents = async (
   payload: PushPayload,
-  targetParents: ParentUserName[] = [...parentUserNames]
+  targetParents?: ParentUserName[]
 ) => {
   await ensurePushTables();
+  const roster = await loadFamilyRoster();
+  const resolvedTargets = targetParents?.length ? targetParents : roster.pushParentNames;
 
   const rowsResult = await sql<SubscriptionRow>`
     SELECT endpoint, p256dh, auth, user_name, receive_all, watch_children, reminder_lead_minutes
     FROM push_subscriptions
   `;
 
-  const targetSet = new Set<string>(targetParents);
+  const targetSet = new Set<string>(resolvedTargets);
   const targets = rowsResult.rows.filter((row) => {
-    const userName = normalizeAllowedUserName(row.user_name);
-    return Boolean(userName && isParentUserName(userName) && targetSet.has(userName));
+    const userName = normalizeAllowedUserName(row.user_name, roster);
+    return Boolean(userName && isParentUserName(userName, roster) && targetSet.has(userName));
   });
 
   if (!targets.length) {
@@ -407,23 +401,27 @@ export const sendPushToParents = async (
   return { sent, skipped: (rowsResult.rowCount || 0) - targets.length };
 };
 
-const getTaskAudienceChildren = (task: TaskRow): ChildUserName[] => {
+const getTaskAudienceChildren = (task: TaskRow, roster: FamilyRoster): ChildUserName[] => {
   const rawChild = (task.child || "").trim();
-  return normalizeTaskChildNames(rawChild);
+  return normalizeTaskChildNames(rawChild, roster);
 };
 
 const shouldSubscriptionReceiveTask = (
   subscription: SubscriptionRow,
-  audienceChildren: ChildUserName[]
+  audienceChildren: ChildUserName[],
+  roster: FamilyRoster,
 ) => {
   if (audienceChildren.length === 0) {
     return false;
   }
 
-  const userName = normalizeAllowedUserName(subscription.user_name);
+  const userName = normalizeAllowedUserName(subscription.user_name, roster);
   if (!userName) {
     return true;
   }
+
+  const childNameSet = childNameSetOf(roster);
+  const parentNameSet = parentNameSetOf(roster);
 
   if (childNameSet.has(userName)) {
     return audienceChildren.includes(userName as ChildUserName);
@@ -436,7 +434,7 @@ const shouldSubscriptionReceiveTask = (
 
     const trackedChildren = String(subscription.watch_children || "")
       .split(",")
-      .map((value) => resolvePushName(value.trim()))
+      .map((value) => roster.resolvePushName(value.trim()))
       .filter((value): value is ChildUserName => Boolean(value && childNameSet.has(value)));
 
     if (trackedChildren.length === 0) {
@@ -585,6 +583,7 @@ export const sendUpcomingTaskReminders = async (
   }
 ) => {
   await ensurePushTables();
+  const roster = await loadFamilyRoster();
   try {
     await ensureScheduleMetadataColumn();
   } catch {
@@ -762,21 +761,21 @@ export const sendUpcomingTaskReminders = async (
       continue;
     }
 
-    const audienceChildren = getTaskAudienceChildren(task);
-    const taskChildNames = normalizeTaskChildNames(String(task.child || ""));
-    const taskParentNames = normalizeTaskParentNames(String(task.child || ""));
+    const audienceChildren = getTaskAudienceChildren(task, roster);
+    const taskChildNames = normalizeTaskChildNames(String(task.child || ""), roster);
+    const taskParentNames = normalizeTaskParentNames(String(task.child || ""), roster);
     const targetSubscriptions = subscriptions.filter((subscription) => {
       // Task owned by a parent (e.g. "רועי"): deliver to that parent's devices.
-      const subscriberName = normalizeAllowedUserName(subscription.user_name);
+      const subscriberName = normalizeAllowedUserName(subscription.user_name, roster);
       // receive_all subscribers always get every reminder, regardless of the task's child/owner.
       if (Boolean(subscription.receive_all)) {
         return true;
       }
-      if (subscriberName && isParentUserName(subscriberName) && taskParentNames.includes(subscriberName)) {
+      if (subscriberName && isParentUserName(subscriberName, roster) && taskParentNames.includes(subscriberName)) {
         return true;
       }
 
-      const inAudience = shouldSubscriptionReceiveTask(subscription, audienceChildren);
+      const inAudience = shouldSubscriptionReceiveTask(subscription, audienceChildren, roster);
       if (!inAudience) {
         return false;
       }
@@ -785,8 +784,8 @@ export const sendUpcomingTaskReminders = async (
         return true;
       }
 
-      const userName = normalizeAllowedUserName(subscription.user_name);
-      return Boolean(userName && isChildUserName(userName) && taskChildNames.includes(userName));
+      const userName = normalizeAllowedUserName(subscription.user_name, roster);
+      return Boolean(userName && isChildUserName(userName, roster) && taskChildNames.includes(userName));
     });
 
     if (!targetSubscriptions.length) {
@@ -827,8 +826,8 @@ export const sendUpcomingTaskReminders = async (
         continue;
       }
 
-      const childSubscriptionName = normalizeAllowedUserName(subscription.user_name) || "";
-      const childDisplayName = isChildUserName(childSubscriptionName) ? childSubscriptionName : defaultChildName;
+      const childSubscriptionName = normalizeAllowedUserName(subscription.user_name, roster) || "";
+      const childDisplayName = isChildUserName(childSubscriptionName, roster) ? childSubscriptionName : defaultChildName;
       console.log("Pushing to device of:", childSubscriptionName || "(unknown)");
       options?.onAttempt?.({
         userName: childSubscriptionName || "(unknown)",

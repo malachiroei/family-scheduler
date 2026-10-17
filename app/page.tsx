@@ -4,25 +4,30 @@ import Image from 'next/image';
 import { Dog, Dumbbell, Music, GraduationCap, Trophy, Printer, MessageCircle, ChevronRight, ChevronLeft, X, Plus, CalendarDays, Settings, RefreshCw, Video, ClipboardList, Trash2, Share2 } from 'lucide-react';
 import html2canvas from 'html2canvas';
 import AgentChat from '@/app/components/AgentChat';
+import FamilyRosterEditor from '@/app/components/FamilyRosterEditor';
 import { normalizeMetadataTime, parseMetadataBoolean } from '@/app/lib/scheduleTime';
 import { fixtureLeagueBadge } from '@/app/lib/fixtureLeague';
 import {
-  baseChildrenConfig,
-  childDisplayNames,
-  childFormOptions,
-  defaultChildKey,
+  createFamilyRoster,
   escapeRegExp,
-  familyMembers,
-  getMemberKeysFromChildField,
-  isAllowedScheduleChild,
-  isChildMemberKey,
-  isParentMemberKey,
-  labelForMemberKey,
-  memberAliasPattern,
-  pushChildNames,
-  pushUserNames,
-  resolveMemberKey,
+  fallbackRoster,
+  FAMILY_ROSTER_ONBOARDING_KEY,
+  type FamilyRoster,
+  type StoredFamilyMember,
 } from '@/app/lib/familyMembers';
+
+let uiRoster: FamilyRoster = fallbackRoster;
+const resolveMemberKey = (value: string | null | undefined) => uiRoster.resolveMemberKey(value);
+const getMemberKeysFromChildField = (child: string) => uiRoster.getMemberKeysFromChildField(child);
+const isAllowedScheduleChild = (value: string) => uiRoster.isAllowedScheduleChild(value);
+const isChildMemberKey = (value: string) => uiRoster.isChildMemberKey(value);
+const isParentMemberKey = (value: string) => uiRoster.isParentMemberKey(value);
+const labelForMemberKey = (key: string) => uiRoster.labelForMemberKey(key);
+const memberAliasPattern = () => uiRoster.memberAliasPattern;
+const familyMembersList = () => uiRoster.members;
+const childDisplayNamesList = () => uiRoster.childDisplayNames;
+const defaultChildKeyValue = () => uiRoster.defaultChildKey;
+const baseChildrenConfigValue = () => uiRoster.baseChildrenConfig;
 
 type BaseChildKey = string;
 type ChildKey = string;
@@ -125,12 +130,10 @@ const activityTypePresets: Array<{ value: EventType; label: string; emoji: strin
   { value: 'other', label: 'אחר', emoji: '✨' },
 ];
 
-const childOptions: Array<{ key: ChildKey; label: string }> = childFormOptions;
-
-const AI_OCR_SYSTEM_PROMPT = `אתה מנתח צילום מסך של אפליקציית שיעורים (למשל "השיעורים שלי") או טקסט לוז WhatsApp.
+const buildAiOcrSystemPrompt = (roster: FamilyRoster) => `אתה מנתח צילום מסך של אפליקציית שיעורים (למשל "השיעורים שלי") או טקסט לוז WhatsApp.
 חלץ מהתמונה ומהטקסט אירועים בפורמט JSON בלבד (Array).
 אם מופיעים תאריכים כמו 20/04/26 או 17/02/26 ושעות בטווח (למשל 15:00–15:25), השתמש בשעת ההתחלה בלבד.
-בני המשפחה: ${familyMembers.map((member) => `${member.name} => child: "${member.key}"`).join(", ")}.
+בני המשפחה: ${roster.members.map((member) => `${member.name} => child: "${member.key}"`).join(", ")}.
 מורים ושיוך ילדים (חובה לפי שם המורה):
 - Karl / קארל => child: "amit" (עמית)
 - Rachel / רייצ׳ל / RAVHEL / רחל (באנגלית באפליקציה) => child: "alin" (אלין)
@@ -207,8 +210,8 @@ type PresenceUser = {
   lastSeen: string | null;
 };
 
-const pushUserOptions: PushUserName[] = pushUserNames;
-const pushChildOptions: PushChildName[] = pushChildNames;
+const pushUserOptions = () => uiRoster.pushUserNames;
+const pushChildOptions = () => uiRoster.pushChildNames;
 const PUSH_USER_STORAGE_KEY = 'family-scheduler-push-user';
 const PUSH_MIGRATION_FLAG_KEY = 'family-scheduler-push-migrated-v1';
 const PUSH_PREFS_STORAGE_KEY = 'family-scheduler-push-preferences-v1';
@@ -605,7 +608,7 @@ const coerceBaseChildKey = (value: string): BaseChildKey => {
     .replace(/[\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, '')
     .replace(/\u00a0/g, ' ')
     .trim();
-  return normalizeChildKey(cleaned) ?? defaultChildKey;
+  return normalizeChildKey(cleaned) ?? defaultChildKeyValue();
 };
 
 const normalizeAiEventForImport = (ev: AiEvent, scheduleFullText = ''): AiEvent => {
@@ -634,7 +637,7 @@ const dedupeAiEvents = (events: AiEvent[]): AiEvent[] => {
   return out;
 };
 
-const MENTIONS_CHILD_IN_SCHEDULE_TEXT = new RegExp(`(${memberAliasPattern})`, 'i');
+const MENTIONS_CHILD_IN_SCHEDULE_TEXT = () => new RegExp(`(${memberAliasPattern()})`, 'i');
 
 const isGenericTrainingTitle = (title: string) => {
   const t = title.trim();
@@ -653,13 +656,13 @@ const buildScheduleClarification = (
   events: AiEvent[],
 ): { questions: string[]; needsWho: boolean; needsWhat: boolean } => {
   const resolvedHeader = headerChild ?? inferScheduleHeaderChild(text);
-  const needsWho = !resolvedHeader && !MENTIONS_CHILD_IN_SCHEDULE_TEXT.test(text);
+  const needsWho = !resolvedHeader && !MENTIONS_CHILD_IN_SCHEDULE_TEXT().test(text);
   const sportHintInText = /(כדורסל|שחייה|כושר|ריקוד|משחק|אולם|ספורט|בריכה|מצוינות)/i.test(text);
   const needsWhat =
     events.some((e) => isGenericTrainingTitle(e.title || '')) && !sportHintInText;
   const questions: string[] = [];
   if (needsWho) {
-    questions.push(`למי לשייך את המשימות? (כתבי למשל: ${childDisplayNames.join(', ')})`);
+    questions.push(`למי לשייך את המשימות? (כתבי למשל: ${childDisplayNamesList().join(', ')})`);
   }
   if (needsWhat) {
     questions.push('על איזו פעילות מדובר? (למשל: כדורסל, שחייה, כושר...)');
@@ -672,10 +675,10 @@ const parseClarificationReply = (reply: string): { child: BaseChildKey | null; a
   if (!raw) {
     return { child: null, activityNote: null };
   }
-  const childMatch = raw.match(new RegExp(`(${memberAliasPattern})`, 'i'));
+  const childMatch = raw.match(new RegExp(`(${memberAliasPattern()})`, 'i'));
   const child = childMatch ? normalizeChildKey(childMatch[1]) : null;
   const rest = raw
-    .replace(new RegExp(`(${memberAliasPattern})`, 'gi'), ' ')
+    .replace(new RegExp(`(${memberAliasPattern()})`, 'gi'), ' ')
     .replace(/[,;،]/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
@@ -711,7 +714,7 @@ const normalizeChildForSave = (value: string): ChildKey => {
   if (isAllowedScheduleChild(trimmed)) {
     return resolveMemberKey(trimmed) ?? trimmed;
   }
-  return defaultChildKey;
+  return defaultChildKeyValue();
 };
 
 const normalizeChildFilterValue = (value: unknown): 'all' | BaseChildKey => {
@@ -720,7 +723,7 @@ const normalizeChildFilterValue = (value: unknown): 'all' | BaseChildKey => {
 };
 
 const detectChildFromText = (text: string): BaseChildKey | null => {
-  const match = text.match(new RegExp(`(${memberAliasPattern})`, 'i'));
+  const match = text.match(new RegExp(`(${memberAliasPattern()})`, 'i'));
   if (match) {
     return normalizeChildKey(match[1]);
   }
@@ -763,7 +766,7 @@ const detectDefaultChildFromScheduleHeader = (text: string): BaseChildKey | null
   ) {
     return 'ravid';
   }
-  for (const member of familyMembers) {
+  for (const member of familyMembersList()) {
     const name = escapeRegExp(member.name);
     const key = escapeRegExp(member.key);
     if (
@@ -786,10 +789,10 @@ const inferScheduleHeaderChild = (text: string): BaseChildKey | null => {
   let head = normalizeScheduleHeaderQuotes(text.slice(0, 2200));
   head = head.replace(/[\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, '');
   const patterns = [
-    new RegExp(`לו\\s*["׳'\\u05F3\\u05F4]?\\s*ז\\s+ל\\s*(${memberAliasPattern})\\b`, 'i'),
-    new RegExp(`לו\\s*["׳'\\u05F3\\u05F4]?\\s*ז\\s+(${memberAliasPattern})\\b`, 'i'),
-    new RegExp(`לוז\\s+(${memberAliasPattern})\\b`, 'i'),
-    new RegExp(`לו\\s*ז\\s+(${memberAliasPattern})\\b`, 'i'),
+    new RegExp(`לו\\s*["׳'\\u05F3\\u05F4]?\\s*ז\\s+ל\\s*(${memberAliasPattern()})\\b`, 'i'),
+    new RegExp(`לו\\s*["׳'\\u05F3\\u05F4]?\\s*ז\\s+(${memberAliasPattern()})\\b`, 'i'),
+    new RegExp(`לוז\\s+(${memberAliasPattern()})\\b`, 'i'),
+    new RegExp(`לו\\s*ז\\s+(${memberAliasPattern()})\\b`, 'i'),
   ];
   for (const p of patterns) {
     const m = head.match(p);
@@ -817,7 +820,7 @@ const inferScheduleHeaderChild = (text: string): BaseChildKey | null => {
   if (/(?:לו\s*["׳'\u05F3\u05F4]?\s*ז|לוז)\s+[^\n]{0,48}\bאלין\b/i.test(head) || /\bאלין\s+לשבוע/i.test(head)) {
     return 'alin';
   }
-  for (const member of familyMembers) {
+  for (const member of familyMembersList()) {
     const name = escapeRegExp(member.name);
     if (
       new RegExp(`(?:לו\\s*["׳'\\u05F3\\u05F4]?\\s*ז|לוז)\\s+[^\\n]{0,48}${name}`, 'i').test(head) ||
@@ -1020,7 +1023,7 @@ const parseComplexWhatsAppMessage = (
             effectiveHeaderChild ??
             detectChildFromText(lineFromMatch) ??
             detectChildFromText(line) ??
-            defaultChildKey;
+            defaultChildKeyValue();
 
           const targetDate = addDays(targetWeekStart, dayIndex);
           const key = `${dayIndex}|${mainTime}|${resolvedTitle}|${child}`;
@@ -1067,7 +1070,7 @@ const parseComplexWhatsAppMessage = (
         resolvedTitle = `${resolvedTitle} (${rangeTimesB[0]}–${rangeTimesB[rangeTimesB.length - 1]})`;
       }
 
-      const child = effectiveHeaderChild ?? detectChildFromText(line) ?? defaultChildKey;
+      const child = effectiveHeaderChild ?? detectChildFromText(line) ?? defaultChildKeyValue();
 
       const targetDate = addDays(targetWeekStart, dayIndex);
       const key = `${dayIndex}|${mainTime}|${resolvedTitle}|${child}`;
@@ -1372,7 +1375,7 @@ const formatSchedulePersistenceError = (error: unknown): string => {
 const getChildKeys = (key: ChildKey): BaseChildKey[] => getMemberKeysFromChildField(key);
 
 const memberVisual = (key: string) =>
-  baseChildrenConfig[key] ?? {
+  baseChildrenConfigValue()[key] ?? {
     name: labelForMemberKey(key) || key,
     color: 'bg-slate-400',
     iconColor: 'text-slate-500',
@@ -1764,10 +1767,13 @@ export default function FamilyScheduler() {
   } | null>(null);
   const [johnnySwapBusy, setJohnnySwapBusy] = useState(false);
   const [creatingEvent, setCreatingEvent] = useState<NewEventDraft | null>(null);
+  const [roster, setRoster] = useState<FamilyRoster>(fallbackRoster);
+  const [showFamilyOnboarding, setShowFamilyOnboarding] = useState(false);
+  const [showFamilyEditor, setShowFamilyEditor] = useState(false);
   // Background polling (presence / state sync / reminder check) pauses while an edit dialog is open,
   // so it never competes with the user's save for database connections.
   const modalOpenRef = useRef(false);
-  const modalOpen = Boolean(editingEvent) || Boolean(creatingEvent);
+  const modalOpen = Boolean(editingEvent) || Boolean(creatingEvent) || showFamilyOnboarding || showFamilyEditor;
   modalOpenRef.current = modalOpen;
   const [, setIsChatOpen] = useState(false);
   const [chatClarificationPending, setChatClarificationPending] = useState<ChatClarificationPending | null>(null);
@@ -1801,7 +1807,7 @@ export default function FamilyScheduler() {
   const [hasConfirmedPushIdentitySelection, setHasConfirmedPushIdentitySelection] = useState(false);
   const [hasLoadedPushUser, setHasLoadedPushUser] = useState(false);
   const [parentReceiveAll, setParentReceiveAll] = useState(true);
-  const [parentWatchChildren, setParentWatchChildren] = useState<PushChildName[]>([...pushChildOptions]);
+  const [parentWatchChildren, setParentWatchChildren] = useState<PushChildName[]>([...pushChildOptions()]);
   const [reminderLeadMinutes, setReminderLeadMinutes] = useState<ReminderLeadMinutes>(defaultPushLeadMinutes);
   const [pushSound, setPushSound] = useState<PushSoundPreset>(defaultPushSound);
   const [installPromptEvent, setInstallPromptEvent] = useState<BeforeInstallPromptEvent | null>(null);
@@ -1860,6 +1866,86 @@ export default function FamilyScheduler() {
     };
   }, []);
 
+  const applyRoster = useCallback((next: FamilyRoster) => {
+    uiRoster = next;
+    setRoster(next);
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      const markOnboarding = (configured: boolean) => {
+        let seen = false;
+        try {
+          seen = localStorage.getItem(FAMILY_ROSTER_ONBOARDING_KEY) === '1';
+        } catch {
+          seen = false;
+        }
+        if (!configured && !seen) {
+          setShowFamilyOnboarding(true);
+        }
+      };
+      try {
+        const response = await fetch(toApiUrl('/api/family'), { cache: 'no-store' });
+        const payload = await response.json().catch(() => ({}));
+        if (cancelled) {
+          return;
+        }
+        if (response.ok && Array.isArray(payload?.members) && payload.members.length) {
+          const source = payload.source === 'db' || payload.source === 'env' ? payload.source : 'default';
+          const next = createFamilyRoster(payload.members, source);
+          applyRoster(next);
+          markOnboarding(Boolean(next.configured));
+        } else {
+          markOnboarding(fallbackRoster.configured);
+        }
+      } catch {
+        if (!cancelled) {
+          markOnboarding(fallbackRoster.configured);
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [applyRoster]);
+
+  const saveFamilyRosterFromUi = async (members: StoredFamilyMember[]) => {
+    const response = await fetch(toApiUrl('/api/family'), {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ members }),
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok || payload?.ok === false) {
+      throw new Error(String(payload?.error || 'שמירת בני המשפחה נכשלה'));
+    }
+    const next = createFamilyRoster(Array.isArray(payload?.members) ? payload.members : [], 'db');
+    applyRoster(next);
+    try {
+      localStorage.setItem(FAMILY_ROSTER_ONBOARDING_KEY, '1');
+    } catch {
+      // no-op
+    }
+    setShowFamilyOnboarding(false);
+    setShowFamilyEditor(false);
+    setSuccessMessage('בני המשפחה נשמרו בהצלחה.');
+    setParentWatchChildren((prev) => {
+      const allowed = new Set(next.pushChildNames);
+      const kept = prev.filter((name) => allowed.has(name));
+      return kept.length ? kept : [...next.pushChildNames];
+    });
+  };
+
+  const skipFamilyOnboarding = () => {
+    try {
+      localStorage.setItem(FAMILY_ROSTER_ONBOARDING_KEY, '1');
+    } catch {
+      // no-op
+    }
+    setShowFamilyOnboarding(false);
+  };
+
   const formatPresenceLastSeen = (value: string | null, isOnline: boolean) => {
     if (isOnline) {
       return 'פעיל עכשיו';
@@ -1910,7 +1996,7 @@ export default function FamilyScheduler() {
         .map((row: unknown) => {
           const candidate = row && typeof row === 'object' ? row as Record<string, unknown> : {};
           const userName = typeof candidate.userName === 'string' ? candidate.userName as PushUserName : null;
-          if (!userName || !pushUserOptions.includes(userName)) {
+          if (!userName || !pushUserOptions().includes(userName)) {
             return null;
           }
 
@@ -2306,7 +2392,7 @@ export default function FamilyScheduler() {
         const migrationDone = localStorage.getItem(PUSH_MIGRATION_FLAG_KEY) === '1';
         if (!migrationDone && supportsPush) {
           const savedUser = localStorage.getItem(PUSH_USER_STORAGE_KEY) || '';
-          const hasKnownUser = pushUserOptions.includes(savedUser as PushUserName);
+          const hasKnownUser = pushUserOptions().includes(savedUser as PushUserName);
           if (hasKnownUser) {
             localStorage.setItem(PUSH_MIGRATION_FLAG_KEY, '1');
           } else {
@@ -2435,7 +2521,7 @@ export default function FamilyScheduler() {
 
     if (isParentUserOption(user)) {
       setParentReceiveAll(true);
-      setParentWatchChildren([...pushChildOptions]);
+      setParentWatchChildren([...pushChildOptions()]);
     }
   };
 
@@ -2447,14 +2533,14 @@ export default function FamilyScheduler() {
         return;
       }
 
-      if (pushUserOptions.includes(savedUser as PushUserName)) {
+      if (pushUserOptions().includes(savedUser as PushUserName)) {
         const user = savedUser as PushUserName;
         setPushUserName(user);
         setHasConfirmedPushIdentitySelection(true);
         setShowPushIdentityPrompt(false);
         if (isParentUserOption(user)) {
           setParentReceiveAll(true);
-          setParentWatchChildren([...pushChildOptions]);
+          setParentWatchChildren([...pushChildOptions()]);
         }
       }
     } catch {
@@ -2828,7 +2914,7 @@ export default function FamilyScheduler() {
     }
 
     if (!selectedChildForDirectTest) {
-      setApiError(`בחרו קודם משתמש ילד (${childDisplayNames.join('/')}) כדי לשלוח בדיקה ישירה.`);
+      setApiError(`בחרו קודם משתמש ילד (${childDisplayNamesList().join('/')}) כדי לשלוח בדיקה ישירה.`);
       return;
     }
 
@@ -3452,7 +3538,7 @@ export default function FamilyScheduler() {
 
     setPushUserName('');
     setParentReceiveAll(true);
-    setParentWatchChildren([...pushChildOptions]);
+    setParentWatchChildren([...pushChildOptions()]);
     setReminderLeadMinutes(defaultPushLeadMinutes);
     setPushSound(defaultPushSound);
     setSuccessMessage('ההגדרות אופסו בהצלחה.');
@@ -4307,7 +4393,7 @@ export default function FamilyScheduler() {
         body: JSON.stringify({
           text: outgoingText,
           weekStart: weekKey,
-          systemPrompt: AI_OCR_SYSTEM_PROMPT,
+          systemPrompt: buildAiOcrSystemPrompt(uiRoster),
           model: PRIMARY_GEMINI_MODEL,
           fallbackModel: FALLBACK_GEMINI_MODEL,
           imagePart,
@@ -4418,7 +4504,7 @@ export default function FamilyScheduler() {
       recurringWeekly: false,
       data: {
         time: '08:00',
-        child: defaultChildKey,
+        child: defaultChildKeyValue(),
         title: '',
         type: 'lesson',
         sendNotification: true,
@@ -4821,7 +4907,7 @@ export default function FamilyScheduler() {
               <ClipboardList size={17} />
             </button>
           </div>
-          {(Object.keys(baseChildrenConfig) as BaseChildKey[]).map((childKey) => {
+          {(Object.keys(roster.baseChildrenConfig) as BaseChildKey[]).map((childKey) => {
             const config = memberVisual(childKey);
             const isActive = selectedChildFilters.includes(childKey);
             return (
@@ -5248,6 +5334,17 @@ export default function FamilyScheduler() {
               </button>
             </div>
 
+            <button
+              type="button"
+              onClick={() => {
+                setShowSettingsModal(false);
+                setShowFamilyEditor(true);
+              }}
+              className="w-full flex items-center justify-center gap-2 bg-slate-800 text-white font-bold px-4 py-2 rounded-lg hover:bg-slate-700 transition"
+            >
+              עריכת בני המשפחה
+            </button>
+
             <div className="space-y-1.5">
               {isInstallReady && (
                 <button
@@ -5431,7 +5528,7 @@ export default function FamilyScheduler() {
             <p className="text-xs text-slate-500">יש לבחור שם משתמש למכשיר כדי שסטטוס הפעילות יעבוד בצורה מדויקת.</p>
 
             <div className="grid grid-cols-2 gap-2">
-              {pushUserOptions.map((option) => (
+              {pushUserOptions().map((option) => (
                 <button
                   key={`push-user-${option}`}
                   type="button"
@@ -5458,7 +5555,7 @@ export default function FamilyScheduler() {
                   <div>
                     <div className="text-xs text-slate-500 mb-2">בחר/י ילדים למעקב:</div>
                     <div className="flex flex-wrap gap-2">
-                      {pushChildOptions.map((child) => {
+                      {pushChildOptions().map((child) => {
                         const checked = parentWatchChildren.includes(child);
                         return (
                           <button
@@ -5500,7 +5597,31 @@ export default function FamilyScheduler() {
         </div>
       )}
 
-      <AgentChat onSaved={handleAgentSaved} />
+      <AgentChat onSaved={handleAgentSaved} childNames={roster.childDisplayNames} />
+
+      {showFamilyOnboarding && (
+        <FamilyRosterEditor
+          title="הגדרת בני המשפחה"
+          subtitle="הזינו את שמות ההורים והילדים. אפשר לשנות את זה אחר כך מהגלגל שיניים."
+          initialMembers={roster.members}
+          saveLabel="שמירת בני המשפחה"
+          skipLabel="המשך עם ברירת המחדל"
+          onSave={saveFamilyRosterFromUi}
+          onSkip={skipFamilyOnboarding}
+          allowClose={false}
+        />
+      )}
+
+      {showFamilyEditor && (
+        <FamilyRosterEditor
+          title="עריכת בני המשפחה"
+          subtitle="הוסיפו, מחקו או שנו שמות וצבעים. השינוי נשמר במסד הנתונים לכל המכשירים."
+          initialMembers={roster.members}
+          saveLabel="שמירה"
+          onSave={saveFamilyRosterFromUi}
+          onClose={() => setShowFamilyEditor(false)}
+        />
+      )}
 
       {creatingEvent && (
         <div className="fixed inset-0 bg-black/35 backdrop-blur-[1px] flex items-center justify-center p-4 z-[60] print:hidden">
@@ -5545,7 +5666,7 @@ export default function FamilyScheduler() {
                   onChange={(e) => setCreatingEvent((prev) => prev ? ({ ...prev, data: { ...prev.data, child: e.target.value as ChildKey } }) : prev)}
                   className="mt-1 w-full border border-slate-300 rounded-xl px-3 py-2 outline-none focus:border-blue-400"
                 >
-                  {childOptions.map((option) => (
+                  {roster.childFormOptions.map((option) => (
                     <option key={option.key} value={option.key}>{option.label}</option>
                   ))}
                 </select>
@@ -5737,7 +5858,7 @@ export default function FamilyScheduler() {
                   disabled={Boolean(editingEvent.data.completed)}
                   className="mt-1 w-full border border-slate-300 rounded-xl px-3 py-2 outline-none focus:border-blue-400"
                 >
-                  {childOptions.map((option) => (
+                  {roster.childFormOptions.map((option) => (
                     <option key={option.key} value={option.key}>{option.label}</option>
                   ))}
                 </select>

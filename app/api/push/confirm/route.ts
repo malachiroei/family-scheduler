@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { sql } from "@/app/lib/db";
 import { ensureScheduleMetadataColumn, parseScheduleMetadata } from "@/app/lib/scheduleTable";
 import { sendPushToParents } from "@/app/lib/push";
-import { labelForMemberKey } from "@/app/lib/familyMembers";
+import { loadFamilyRoster } from "@/app/lib/familyRosterStore";
 
 export async function POST(request: NextRequest) {
   try {
@@ -35,7 +35,8 @@ export async function POST(request: NextRequest) {
 
     const meta = parseScheduleMetadata(row.metadata);
     const childFromDb = meta.child.trim();
-    const childName = childNameRaw || labelForMemberKey(childFromDb) || "הילד";
+    const roster = await loadFamilyRoster();
+    const childName = childNameRaw || roster.labelForMemberKey(childFromDb) || "הילד";
     const taskTitle = String(row.title || "משימה").trim() || "משימה";
 
     await sendPushToParents({

@@ -1,7 +1,7 @@
 "use client";
 import React, { useEffect, useRef, useState } from "react";
 import { Bot, FileSpreadsheet, ImagePlus, Send, Sparkles, X } from "lucide-react";
-import { childDisplayNames } from "@/app/lib/familyMembers";
+import { childDisplayNames as fallbackChildDisplayNames } from "@/app/lib/familyMembers";
 
 type Msg = { role: "user" | "assistant"; content: string; image?: string; fileName?: string };
 type SpreadsheetAttach = { dataUrl: string; name: string; mime: string };
@@ -11,7 +11,6 @@ const isSpreadsheetFile = (file: File) =>
   SPREADSHEET_RE.test(file.name) || /spreadsheet|excel|csv/i.test(file.type);
 type Draft = Record<string, unknown> | null;
 
-const CHILD_BUTTONS = childDisplayNames;
 
 const fileToBase64 = (file: File) =>
   new Promise<string>((resolve, reject) => {
@@ -41,7 +40,14 @@ export type AgentSavedEvent = {
   type: string;
 };
 
-export default function AgentChat({ onSaved }: { onSaved?: (events: AgentSavedEvent[]) => void }) {
+export default function AgentChat({
+  onSaved,
+  childNames,
+}: {
+  onSaved?: (events: AgentSavedEvent[]) => void;
+  childNames?: string[];
+}) {
+  const CHILD_BUTTONS = childNames?.length ? childNames : fallbackChildDisplayNames;
   const [open, setOpen] = useState(false);
   const [messages, setMessages] = useState<Msg[]>([
     {

@@ -11,26 +11,17 @@ import {
 } from "@/app/lib/parseFixtureWorkbook";
 import { classifyFixtureLeague } from "@/app/lib/fixtureLeague";
 import {
-  childDisplayNames,
-  familyMemberKeys,
-  familyMembers,
-  familyPairOptions,
   escapeRegExp,
-  findMembersMentionedInText,
-  isParentMemberKey,
-  memberAliasPattern,
-  memberDisplayNames,
-  resolveMemberKey,
+  type FamilyRoster,
 } from "@/app/lib/familyMembers";
+import { loadFamilyRoster } from "@/app/lib/familyRosterStore";
 
 export const revalidate = 0;
 export const maxDuration = 30;
 
-const CHILDREN = familyMemberKeys;
 type Child = string;
-const CHILD_LABEL: Record<string, string> = Object.fromEntries(
-  familyMembers.map((member) => [member.key, member.name]),
-);
+const childLabel = (roster: FamilyRoster, key: string | null | undefined) =>
+  key ? roster.labelForMemberKey(key) : "";
 const TYPES = ["dog", "gym", "sport", "lesson", "dance", "other"] as const;
 type EventType = (typeof TYPES)[number];
 const TYPE_LABEL: Record<EventType, string> = {
@@ -126,9 +117,9 @@ const normalizeTime = (v: unknown): string | null => {
   return `${String(h).padStart(2, "0")}:${String(min).padStart(2, "0")}`;
 };
 
-const normalizeChild = (v: unknown): Child | null => {
+const normalizeChild = (v: unknown, roster: FamilyRoster): Child | null => {
   if (typeof v !== "string") return null;
-  return resolveMemberKey(v);
+  return roster.resolveMemberKey(v);
 };
 
 const normalizeType = (v: unknown): EventType | null => {
@@ -164,12 +155,12 @@ const dedupeEvents = (events: DraftEvent[]) => {
   });
 };
 
-const sanitizeDraft = (raw: unknown): Draft => {
+const sanitizeDraft = (raw: unknown, roster: FamilyRoster): Draft => {
   const o = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
   const list = Array.isArray(o.events) ? o.events : [];
   return {
     events: dedupeEvents(list.slice(0, 80).map(sanitizeEvent)),
-    child_name: normalizeChild(o.child_name ?? o.child),
+    child_name: normalizeChild(o.child_name ?? o.child, roster),
     sender_or_group: str(o.sender_or_group, 80),
     needs_confirm: o.needs_confirm === true,
     import_kind: o.import_kind === "fixtures" ? "fixtures" : null,
@@ -314,13 +305,13 @@ const matchPatterns = (patterns: Pattern[], sender: string | null, haystacks: Ar
 
 /* ---------- LLM ---------- */
 
-const buildPrompt = (text: string, draft: Draft, history: ChatTurn[], patterns: Pattern[]) => {
+const buildPrompt = (text: string, draft: Draft, history: ChatTurn[], patterns: Pattern[], roster: FamilyRoster) => {
   const now = israelNow();
   const learned = patterns.length
     ? patterns
         .filter((p) => p.keyword !== SOURCE_WILDCARD)
         .slice(0, 40)
-        .map((p) => `"${p.keyword}"${p.sender_or_group ? ` מ-"${p.sender_or_group}"` : ""} => ${CHILD_LABEL[p.child_name as Child] ?? p.child_name}`)
+        .map((p) => `"${p.keyword}"${p.sender_or_group ? ` מ-"${p.sender_or_group}"` : ""} => ${childLabel(roster, p.child_name) || p.child_name}`)
         .join("; ") || "אין"
     : "אין";
   const hist = history.slice(-8).map((h) => `${h.role === "user" ? "משתמש" : "סוכן"}: ${h.content}`).join("\n");
@@ -336,11 +327,11 @@ const buildPrompt = (text: string, draft: Draft, history: ChatTurn[], patterns: 
 - הבחנה בין פנייה לשיוך: פנייה מנומסת לנמען השיחה, כמו "היי רועי", "רועי רשמתי", "שלום סיון", היא רק פנייה לנמען ואינה אומרת שהאירוע שייך לו! אל תקבע child_name על סמך פנייה/ברכה כזו. child_name נקבע רק כשברור שהאירוע עצמו מיועד לאותו אדם (למשל "אימון לרביד", "תרשום לרועי פגישה").
 - שלילה מוחלטת של הסקת בעלים מביטויי אישור/ברכה: "רועי רשמתי", "היי רועי", "שלום סיון", "תודה רועי" — אלה לעולם אינם אומרים שהאירוע שייך לאדם. אל תסיק מהם child_name.
 - כלל ברזל: תספורת / וטרינר / בדיקה / טיפול / חיסון, כל אירוע של הכלב, וכל מקרה ש"ג'וני"/"גוני" מופיע בשם איש הקשר או השיחה (למשל "מירב גוני ספרית") — לעולם child_name: null, גם אם כתוב "רועי רשמתי". כותרת האירוע יכולה להיות פשוט "תספורת". לאירועי כלב type="dog". אירועים משפחתיים כלליים — גם הם null.
-- child_name = בן משפחה אחד לכל ההודעה: ${familyMembers.map((m) => `${m.key} (${m.name})`).join(", ")} — רק אם מוזכר במפורש בקלט החדש או בטיוטה. אחרת null. אל תנחש ואל תסיק לפי סוג הפעילות או לפי הדפוסים (ההחלטה בצד השרת).
+- child_name = בן משפחה אחד לכל ההודעה: ${roster.members.map((m) => `${m.key} (${m.name})`).join(", ")} — רק אם מוזכר במפורש בקלט החדש או בטיוטה. אחרת null. אל תנחש ואל תסיק לפי סוג הפעילות או לפי הדפוסים (ההחלטה בצד השרת).
 - סוגים: dog, gym, sport, lesson, dance. בחר את הקרוב ביותר (כדורסל/כדורגל = sport).
 - בחן תמיד קודם כל את החלק העליון ביותר של צילום המסך (שם קבוצת הוואטסאפ, שם השולח או כותרת השיחה) — הוא נותן את ההקשר לכל האירועים בצילום.
 - אסור להשתמש בכותרות גנריות כמו "פעילות", "אירוע", "פגישה" או "משימה". השתמש בשם הקבוצה/השיחה ובתוכן ההודעה כדי לתת כותרת משמעותית. אם הקבוצה עוסקת באימונים/משחקים (למשל "ילדות ב", "קט-סל", "נוער", "אימון", "משחקים") — כותרת האירוע "אימון כדורסל" (או "אימון" אם אין רמז לכדורסל), type="sport".
-- הקשר משפחתי (שמות נוכחיים): ${memberDisplayNames.join(", ")}. עדיין אין לקבוע child_name בלי אזכור מפורש — ההצעה לשיוך נעשית בצד השרת.
+- הקשר משפחתי (שמות נוכחיים): ${roster.memberDisplayNames.join(", ")}. עדיין אין לקבוע child_name בלי אזכור מפורש — ההצעה לשיוך נעשית בצד השרת.
 - title = כותרת קצרה לאירוע (למשל "אימון כדורסל"). keyword = מילה אחת/שתיים שמזהות את הפעילות או האדם (למשל "מאמן", "כדורסל", "קרל").
 
 דפוסים שנלמדו (לידיעתך בלבד): ${learned}
@@ -349,7 +340,7 @@ ${hist ? `היסטוריית שיחה:\n${hist}\n` : ""}קלט חדש מהמשת
 
 אם הקלט החדש הוא תיקון/השלמה (למשל "18:00" או "ביום חמישי") — עדכן את האירוע המתאים בטיוטה והחזר את הרשימה המלאה של האירועים (כולל אלה שלא השתנו).
 החזר JSON בלבד בפורמט:
-{"sender_or_group": string|null, "child_name": ${familyMemberKeys.map((k) => `"${k}"`).join("|")}|null, "events": [{"date": "YYYY-MM-DD"|null, "time": "HH:mm"|null, "title": string|null, "type": "dog|gym|sport|lesson|dance|other"|null, "keyword": string|null}]}`;
+{"sender_or_group": string|null, "child_name": ${roster.memberKeys.map((k) => `"${k}"`).join("|")}|null, "events": [{"date": "YYYY-MM-DD"|null, "time": "HH:mm"|null, "title": string|null, "type": "dog|gym|sport|lesson|dance|other"|null, "keyword": string|null}]}`;
 };
 
 const extractJsonObject = (t: string) => {
@@ -454,8 +445,8 @@ const isGeneralEvent = (e: DraftEvent, text: string, sender: string | null) =>
  */
 const ACK_WORDS = "(?:היי|הי|שלום|תודה רבה|תודה|בוקר טוב|ערב טוב|אחלה)";
 const ACK_AFTER = "(?:רשמתי|רשמנו|רשום|תודה|שלום|היי|הי|שמעת|בבקשה|ok|אוקי|אוקיי)";
-const isExplicitOwnerMention = (text: string, child: Child) => {
-  const name = CHILD_LABEL[child];
+const isExplicitOwnerMention = (text: string, child: Child, roster: FamilyRoster) => {
+  const name = childLabel(roster, child);
   if (!name) return text.toLowerCase().includes(child);
   const escaped = escapeRegExp(name);
   const cleaned = text
@@ -479,7 +470,7 @@ const enrichGenericTitles = (draft: Draft, text: string) => {
   );
 };
 
-const buildQuestion = (draft: Draft, missing: string[], suggestedChild: Child | null) => {
+const buildQuestion = (draft: Draft, missing: string[], suggestedChild: Child | null, roster: FamilyRoster) => {
   const complete = draft.events.filter((e) => e.date && e.time);
   if (missing.length === 1 && missing[0] === "child_name") {
     const previewLimit = draft.import_kind === "fixtures" ? 12 : complete.length;
@@ -501,11 +492,11 @@ const buildQuestion = (draft: Draft, missing: string[], suggestedChild: Child | 
           : `זיהיתי ${complete.length} אירועים:\n${preview}`;
     if (suggestedChild) {
       return complete.length === 1 && draft.import_kind !== "fixtures"
-        ? `${summary} לשבץ עבור ${CHILD_LABEL[suggestedChild]}?`
-        : `${summary}\nלשבץ את כולם עבור ${CHILD_LABEL[suggestedChild]}?`;
+        ? `${summary} לשבץ עבור ${childLabel(roster, suggestedChild)}?`
+        : `${summary}\nלשבץ את כולם עבור ${childLabel(roster, suggestedChild)}?`;
     }
     if (isGirlsGroup(draft.sender_or_group)) {
-      return `${summary}\nעבור ${childDisplayNames.join(" או ")}?`;
+      return `${summary}\nעבור ${roster.childDisplayNames.join(" או ")}?`;
     }
     return complete.length === 1 ? `${summary} עבור מי לשבץ?` : `${summary}\nעבור מי לשבץ את כולם?`;
   }
@@ -513,7 +504,7 @@ const buildQuestion = (draft: Draft, missing: string[], suggestedChild: Child | 
     events: "איזה אירוע/ים (יום ושעה)",
     date: "באיזה תאריך/יום",
     time: "באיזו שעה",
-    child_name: `עבור מי (${memberDisplayNames.join(" / ")})`,
+    child_name: `עבור מי (${roster.memberDisplayNames.join(" / ")})`,
   };
   return `חסר לי מידע: ${missing.map((m) => labels[m] ?? m).join(", ")}. אפשר להשלים?`;
 };
@@ -537,7 +528,8 @@ export async function POST(request: NextRequest) {
           .filter((h) => (h?.role === "user" || h?.role === "assistant") && typeof h.content === "string")
           .map((h) => ({ role: h.role as "user" | "assistant", content: String(h.content).slice(0, 800) }))
       : [];
-    const previousDraft = sanitizeDraft(body.draft);
+    const roster = await loadFamilyRoster();
+    const previousDraft = sanitizeDraft(body.draft, roster);
     const senderEndpoint = typeof body.senderSubscriptionEndpoint === "string" ? body.senderSubscriptionEndpoint : "";
 
     if (!text && !imageBase64 && !fileBase64) {
@@ -553,8 +545,8 @@ export async function POST(request: NextRequest) {
       imageBase64 || spreadsheetUploaded || text.length > 100
         ? []
         : /(^|\s)(כולם|כל המשפחה|כל בני המשפחה)(\s|$|[.,!])/.test(text)
-          ? [...CHILDREN]
-          : findMembersMentionedInText(text).map((member) => member.key);
+          ? [...roster.memberKeys]
+          : roster.findMembersMentionedInText(text).map((member) => member.key);
 
     const replyKids: Child[] | null = (() => {
       // Only while a draft is waiting for its owner, and only for a short free-text reply that does not
@@ -566,8 +558,8 @@ export async function POST(request: NextRequest) {
       if (mentionedKids.length >= 1) return mentionedKids;
       if (CONFIRM_YES_RE.test(text)) {
         const lastAssistant = [...history].reverse().find((h) => h.role === "assistant")?.content ?? "";
-        const m = lastAssistant.match(new RegExp(`לשבץ[^?]*עבור (${memberAliasPattern})\\?`));
-        const c = m ? normalizeChild(m[1]) : null;
+        const m = lastAssistant.match(new RegExp(`לשבץ[^?]*עבור (${roster.memberAliasPattern})\\?`));
+        const c = m ? normalizeChild(m[1], roster) : null;
         return c ? [c] : null;
       }
       return null;
@@ -638,15 +630,15 @@ export async function POST(request: NextRequest) {
     ) {
       draft = { ...previousDraft };
     } else {
-      const prompt = buildPrompt(text, previousDraft, history, patterns);
+      const prompt = buildPrompt(text, previousDraft, history, patterns, roster);
       const parsed = (await runModel(prompt, imageBase64 ? { data: imageBase64, mime: imageMime } : null)) as
         | Record<string, unknown>
         | null;
-      const fromModel = sanitizeDraft(parsed);
+      const fromModel = sanitizeDraft(parsed, roster);
       // Never infer an owner from a greeting/acknowledgement ("היי רועי", "רועי רשמתי", "תודה רועי").
       // For plain text we can verify it; for screenshots the prompt rule applies (plus the general-event rule below).
       const verifiedModelChild =
-        fromModel.child_name && !imageBase64 && !isExplicitOwnerMention(text, fromModel.child_name)
+        fromModel.child_name && !imageBase64 && !isExplicitOwnerMention(text, fromModel.child_name, roster)
           ? null
           : fromModel.child_name;
       draft = {
@@ -683,14 +675,14 @@ export async function POST(request: NextRequest) {
     if (!draft.child_name && !mustAsk) {
       const hay = [text, draft.league ?? null, ...draft.events.flatMap((e) => [e.keyword, e.title])];
       const matches = matchPatterns(patterns, draft.sender_or_group, hay);
-      const autoKids = [...new Set(matches.filter((p) => p.auto_assign).map((p) => normalizeChild(p.child_name)))].filter(
+      const autoKids = [...new Set(matches.filter((p) => p.auto_assign).map((p) => normalizeChild(p.child_name, roster)))].filter(
         (c): c is Child => c !== null,
       );
       if (autoKids.length === 1) {
         draft.child_name = autoKids[0];
         childFromMemory = true;
       } else if (matches.length > 0) {
-        suggestedChild = normalizeChild(matches[0].child_name); // highest confirmations
+        suggestedChild = normalizeChild(matches[0].child_name, roster); // highest confirmations
       }
     }
 
@@ -719,18 +711,18 @@ export async function POST(request: NextRequest) {
         ? []
         : confirmOnly && suggestedChild
           ? [
-              `כן, עבור ${CHILD_LABEL[suggestedChild]}`,
-              ...CHILDREN.filter((c) => c !== suggestedChild).map((c) => `עבור ${CHILD_LABEL[c]}`),
+              `כן, עבור ${childLabel(roster, suggestedChild)}`,
+              ...roster.memberKeys.filter((c) => c !== suggestedChild).map((c) => `עבור ${childLabel(roster, c)}`),
             ]
           : draft.import_kind === "fixtures"
-            ? [...childDisplayNames]
+            ? [...roster.childDisplayNames]
             : isGirlsGroup(draft.sender_or_group)
-            ? [...childDisplayNames, ...familyPairOptions.map((pair) => pair.label.replace(" (ביחד)", "")), ...memberDisplayNames]
-            : [...memberDisplayNames, "כולם"];
+            ? [...roster.childDisplayNames, ...roster.familyPairOptions.map((pair) => pair.label.replace(" (ביחד)", "")), ...roster.memberDisplayNames]
+            : [...roster.memberDisplayNames, "כולם"];
       return NextResponse.json({
         success: false,
         missing_fields: missing,
-        question: buildQuestion(draft, missing, suggestedChild),
+        question: buildQuestion(draft, missing, suggestedChild, roster),
         draft,
         quick_replies: quick,
       });
@@ -744,7 +736,7 @@ export async function POST(request: NextRequest) {
     for (const kid of kids) for (const e of draft.events) {
       const date = e.date as string;
       const time = e.time as string;
-      const type: EventType = e.type ?? (isParentMemberKey(kid) ? "other" : "sport");
+      const type: EventType = e.type ?? (roster.isParentMemberKey(kid) ? "other" : "sport");
       const title = e.title ?? e.keyword ?? TYPE_LABEL[type];
       const id = crypto.randomUUID();
       const metadata = buildMetadataFromIncoming({
@@ -801,7 +793,7 @@ export async function POST(request: NextRequest) {
     // Learning + push run after the response is sent, so they never delay (or time out) the save.
     const learnEvents = draft.events;
     const learnSender = draft.sender_or_group;
-    const kidsLabel = joinNames(kids.map((k) => CHILD_LABEL[k]));
+    const kidsLabel = joinNames(kids.map((k) => childLabel(roster, k)));
     after(async () => {
       // Learning only makes sense for a single, unambiguous owner.
       if (kids.length === 1) {

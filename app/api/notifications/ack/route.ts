@@ -2,11 +2,12 @@ import { NextRequest, NextResponse } from "next/server";
 import { sql } from "@/app/lib/db";
 import { ensureScheduleMetadataColumn, parseScheduleMetadata } from "@/app/lib/scheduleTable";
 import { sendPushToAll, sendPushToParents } from "@/app/lib/push";
-import { labelForMemberKey } from "@/app/lib/familyMembers";
+import { loadFamilyRoster } from "@/app/lib/familyRosterStore";
 
 export async function POST(request: NextRequest) {
   try {
     await ensureScheduleMetadataColumn();
+    const roster = await loadFamilyRoster();
 
     const body = await request.json().catch(() => ({}));
     const eventId = typeof body?.eventId === "string" ? body.eventId.trim() : "";
@@ -45,13 +46,13 @@ export async function POST(request: NextRequest) {
 
       const meta = parseScheduleMetadata(existingRow.metadata);
       const childFromDb = meta.child.trim();
-      const childName = childNameRaw || labelForMemberKey(childFromDb) || "הילד";
+      const childName = childNameRaw || roster.labelForMemberKey(childFromDb) || "הילד";
       return NextResponse.json({ ok: true, eventId, childName, completed: true, alreadyConfirmed: true });
     }
 
     const meta = parseScheduleMetadata(row.metadata);
     const childFromDb = meta.child.trim();
-    const childName = childNameRaw || labelForMemberKey(childFromDb) || "הילד";
+    const childName = childNameRaw || roster.labelForMemberKey(childFromDb) || "הילד";
 
     const parentPayload = {
       title: "אישור משימה",
@@ -59,7 +60,7 @@ export async function POST(request: NextRequest) {
       url: "/",
     };
 
-    const parentSendResult = await sendPushToParents(parentPayload, ["רועי", "סיוון"]);
+    const parentSendResult = await sendPushToParents(parentPayload, roster.pushParentNames);
 
     if ((parentSendResult.sent || 0) === 0) {
       await sendPushToAll(parentPayload);

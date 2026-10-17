@@ -7,13 +7,8 @@ import {
   parseScheduleMetadata,
 } from "@/app/lib/scheduleTable";
 import { sendPushToAll, sendPushToParents } from "@/app/lib/push";
-import {
-  defaultChildKey,
-  familyChildren,
-  isAllowedScheduleChild,
-  labelForMemberKey,
-  resolveMemberKey,
-} from "@/app/lib/familyMembers";
+import { fallbackRoster, type FamilyRoster } from "@/app/lib/familyMembers";
+import { loadFamilyRoster } from "@/app/lib/familyRosterStore";
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
@@ -42,12 +37,11 @@ const modelAliasMap: Record<string, SupportedModel> = {
   "gemini-1.5-flash-latest": "gemini-1.5-flash",
   "gemini-2.0-flash-exp": "gemini-2.0-flash",
 };
-const allowedChildren = familyChildren.map((member) => member.key);
 const allowedTypes = ["dog", "gym", "sport", "lesson", "dance"] as const;
 
-const getChildTargetLabel = (rawChild: unknown) => {
+const getChildTargetLabel = (rawChild: unknown, roster: FamilyRoster = fallbackRoster) => {
   const key = typeof rawChild === "string" ? rawChild.trim() : "";
-  return key ? labelForMemberKey(key) : "הילדים";
+  return key ? roster.labelForMemberKey(key) : "הילדים";
 };
 
 type ChildKey = string;
@@ -239,7 +233,7 @@ const tryParseJsonBody = async (request: NextRequest) => {
   }
 };
 
-const sanitizeDbEvent = (event: unknown) => {
+const sanitizeDbEvent = (event: unknown, roster: FamilyRoster = fallbackRoster) => {
   if (!event || typeof event !== "object") {
     return null;
   }
@@ -308,7 +302,7 @@ const sanitizeDbEvent = (event: unknown) => {
     dayIndexRaw > 6 ||
     !time ||
     !title ||
-    !isAllowedScheduleChild(child) ||
+    !roster.isAllowedScheduleChild(child) ||
     !type
   ) {
     return null;
@@ -334,7 +328,7 @@ const sanitizeDbEvent = (event: unknown) => {
   };
 };
 
-const createIncomingFromFlatBody = (body: Record<string, unknown>) => {
+const createIncomingFromFlatBody = (body: Record<string, unknown>, roster: FamilyRoster = fallbackRoster) => {
   const day = typeof body.day === "string" ? body.day.trim() : "";
   const time = typeof body.time === "string" ? body.time.trim() : "";
   const child = typeof body.child === "string" ? body.child.trim() : "";
@@ -353,7 +347,7 @@ const createIncomingFromFlatBody = (body: Record<string, unknown>) => {
     return null;
   }
 
-  if (!isAllowedScheduleChild(child)) {
+  if (!roster.isAllowedScheduleChild(child)) {
     return null;
   }
 
@@ -371,7 +365,7 @@ const createIncomingFromFlatBody = (body: Record<string, unknown>) => {
     sendNotification: true,
     requireConfirmation: false,
     needsAck: false,
-  });
+  }, roster);
 };
 
 const toDayIndex = (dayValue: string, fallback: number) => {
@@ -429,7 +423,7 @@ const defaultWeekStartIso = (): string => {
   return `${yy}-${mm}-${dd}`;
 };
 
-const parseBulkEventsFromText = (text: string, weekStartIso: string) => {
+const parseBulkEventsFromText = (text: string, weekStartIso: string, roster: FamilyRoster = fallbackRoster) => {
   const lines = text
     .split(/\r?\n/)
     .map((line) => line.trim())
@@ -498,7 +492,7 @@ const parseBulkEventsFromText = (text: string, weekStartIso: string) => {
         date: resolvedDate,
         dayIndex,
         time: normalizedTime,
-        child: defaultChildKey,
+        child: roster.defaultChildKey,
         title: "אימון",
         type: "gym",
       });
@@ -600,9 +594,10 @@ const upsertScheduleEvent = async (incoming: ReturnType<typeof sanitizeDbEvent>)
     const savedDate = toIsoDate(savedDateRaw) || savedDateRaw;
     const meta = parseScheduleMetadata(saved.metadata);
     const savedChildRaw = meta.child.trim().toLowerCase();
-    const savedChild = isAllowedScheduleChild(savedChildRaw)
-      ? resolveMemberKey(savedChildRaw) ?? savedChildRaw
-      : defaultChildKey;
+    const rosterForSaved = await loadFamilyRoster();
+    const savedChild = rosterForSaved.isAllowedScheduleChild(savedChildRaw)
+      ? rosterForSaved.resolveMemberKey(savedChildRaw) ?? savedChildRaw
+      : rosterForSaved.defaultChildKey;
 
     return {
       ok: true as const,
@@ -691,6 +686,7 @@ export async function GET() {
 async function handleGet() {
   try {
     debugScheduleLog('[API] GET /api/schedule');
+    const roster = await loadFamilyRoster();
     const tableStatus = await ensureScheduleTableReady();
     if (!tableStatus.ok) {
       if (tableStatus.code === "MISSING_POSTGRES_ENV") {
@@ -716,9 +712,9 @@ async function handleGet() {
       const normalizedDate = toIsoDate(rawDate) || rawDate;
       const meta = parseScheduleMetadata(r.metadata);
       const rawChild = meta.child.trim().toLowerCase();
-      const normalizedChild = isAllowedScheduleChild(rawChild)
-        ? resolveMemberKey(rawChild) ?? rawChild
-        : defaultChildKey;
+      const normalizedChild = roster.isAllowedScheduleChild(rawChild)
+        ? roster.resolveMemberKey(rawChild) ?? rawChild
+        : roster.defaultChildKey;
 
       return {
         id: r.id,
@@ -755,7 +751,8 @@ export async function PUT(request: NextRequest) {
     }
 
     const body = parsedBody.data;
-    const incoming = sanitizeDbEvent(body?.event);
+    const roster = await loadFamilyRoster();
+    const incoming = sanitizeDbEvent(body?.event, roster);
     if (!incoming) {
       return NextResponse.json({ error: "Invalid event payload" }, { status: 400 });
     }
@@ -899,7 +896,8 @@ export async function PATCH(request: NextRequest) {
     }
 
     const meta = parseScheduleMetadata(row.metadata);
-    const fallbackConfirmer = labelForMemberKey(meta.child.trim()) || "הילד";
+    const roster = await loadFamilyRoster();
+    const fallbackConfirmer = roster.labelForMemberKey(meta.child.trim()) || "הילד";
     const confirmer = confirmedByRaw || fallbackConfirmer;
     const taskTitle = String(row?.title || "משימה").trim() || "משימה";
 
@@ -917,11 +915,12 @@ export async function PATCH(request: NextRequest) {
   }
 }
 
-const sanitizeEvents = (events: unknown): AiEvent[] => {
+const sanitizeEvents = (events: unknown, roster: FamilyRoster = fallbackRoster): AiEvent[] => {
   if (!Array.isArray(events)) {
     return [];
   }
 
+  const allowedChildren = roster.children.map((member) => member.key);
   return events.reduce<AiEvent[]>((acc, item) => {
       if (!item || typeof item !== "object") {
         return acc;
@@ -930,7 +929,7 @@ const sanitizeEvents = (events: unknown): AiEvent[] => {
       const candidate = item as Record<string, unknown>;
       const dayIndex = Number(candidate.dayIndex);
       const time = typeof candidate.time === "string" ? candidate.time.trim() : "";
-      const child = typeof candidate.child === "string" ? resolveMemberKey(candidate.child) : null;
+      const child = typeof candidate.child === "string" ? roster.resolveMemberKey(candidate.child) : null;
       const title = typeof candidate.title === "string" ? candidate.title.trim() : "";
       const type = typeof candidate.type === "string" ? candidate.type : "";
       const recurringWeekly = typeof candidate.recurringWeekly === "boolean"
@@ -997,6 +996,7 @@ export async function POST(request: NextRequest) {
     }
 
     const body = parsedBody.data as Record<string, unknown>;
+    const roster = await loadFamilyRoster();
     const senderSubscriptionEndpoint = typeof body?.senderSubscriptionEndpoint === "string"
       ? body.senderSubscriptionEndpoint.trim()
       : "";
@@ -1009,7 +1009,7 @@ export async function POST(request: NextRequest) {
       let upsertResults: any[] = [];
       try {
         upsertResults = await Promise.all(bulkEventsPayload.map(async (bulkItem) => {
-          const incoming = sanitizeDbEvent(bulkItem);
+          const incoming = sanitizeDbEvent(bulkItem, roster);
           if (!incoming) {
             return { ok: false as const, error: "Invalid bulk event payload" };
           }
@@ -1050,7 +1050,7 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ ok: true, events: savedEvents });
     }
 
-    const flatIncoming = createIncomingFromFlatBody(body);
+    const flatIncoming = createIncomingFromFlatBody(body, roster);
     if (flatIncoming) {
       const upsertResult = await withDbTimeout(upsertScheduleEvent(flatIncoming), DB_WRITE_TIMEOUT_MS);
       if (!upsertResult.ok) {
@@ -1067,7 +1067,7 @@ export async function POST(request: NextRequest) {
           await sendPushToAll(
             {
               title: "משימה חדשה נוספה",
-              body: `נוספה משימה ל${getChildTargetLabel(flatIncoming.child)}: ${flatIncoming.title} - ${flatIncoming.time}`,
+              body: `נוספה משימה ל${getChildTargetLabel(flatIncoming.child, roster)}: ${flatIncoming.title} - ${flatIncoming.time}`,
               url: "/",
             },
             { excludeEndpoint: senderSubscriptionEndpoint }
@@ -1084,8 +1084,8 @@ export async function POST(request: NextRequest) {
     const nestedEvent = body?.event && typeof body.event === "object"
       ? (body.event as Record<string, unknown>)
       : null;
-    const nestedFlatIncoming = nestedEvent ? createIncomingFromFlatBody(nestedEvent) : null;
-    const incoming = sanitizeDbEvent(body?.event) ?? nestedFlatIncoming;
+    const nestedFlatIncoming = nestedEvent ? createIncomingFromFlatBody(nestedEvent, roster) : null;
+    const incoming = sanitizeDbEvent(body?.event, roster) ?? nestedFlatIncoming;
     if (incoming) {
       const upsertResult = await withDbTimeout(upsertScheduleEvent(incoming), DB_WRITE_TIMEOUT_MS);
       if (!upsertResult.ok) {
@@ -1101,7 +1101,7 @@ export async function POST(request: NextRequest) {
           await sendPushToAll(
             {
               title: "משימה חדשה נוספה",
-              body: `נוספה משימה ל${getChildTargetLabel(incoming.child)}: ${incoming.title} - ${incoming.time}`,
+              body: `נוספה משימה ל${getChildTargetLabel(incoming.child, roster)}: ${incoming.title} - ${incoming.time}`,
               url: "/",
             },
             { excludeEndpoint: senderSubscriptionEndpoint }
@@ -1130,7 +1130,7 @@ export async function POST(request: NextRequest) {
       : (typeof body?.imageMimeType === "string" ? body.imageMimeType.trim() : "image/png");
 
     const bulkWeekStart = weekStart || defaultWeekStartIso();
-    const bulkFromText = text ? parseBulkEventsFromText(text, bulkWeekStart) : [];
+    const bulkFromText = text ? parseBulkEventsFromText(text, bulkWeekStart, roster) : [];
     if (bulkFromText.length > 0) {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       let upsertResults: any[] = [];
@@ -1144,7 +1144,7 @@ export async function POST(request: NextRequest) {
             date: item.date,
             dayIndex: item.dayIndex,
             time: item.time,
-            child: defaultChildKey,
+            child: roster.defaultChildKey,
             title: item.title,
             type: item.type,
             isRecurring: false,
@@ -1152,7 +1152,7 @@ export async function POST(request: NextRequest) {
             sendNotification: true,
             requireConfirmation: false,
             needsAck: false,
-          });
+          }, roster);
           if (!incoming) {
             return { ok: false as const, error: "Invalid bulk text event payload" };
           }
@@ -1196,7 +1196,7 @@ export async function POST(request: NextRequest) {
         return NextResponse.json({ error: "No valid bulk events were found" }, { status: 400 });
       }
 
-      const bulkChildren = [...new Set(savedEvents.map((event) => getChildTargetLabel(event.child)))];
+      const bulkChildren = [...new Set(savedEvents.map((event) => getChildTargetLabel(event.child, roster)))];
       const bulkChildrenText = bulkChildren.length > 0 ? bulkChildren.join(", ") : "הילדים";
       await sendPushToAll(
         {
@@ -1224,11 +1224,11 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const childKeysPrompt = familyChildren.map((member) => member.key).join("|") || "child";
+    const childKeysPrompt = roster.children.map((member) => member.key).join("|") || "child";
     const basePrompt = `אתה עוזר לו"ז משפחתי. נתח את הטקסט והחזר רק JSON תקין של מערך אירועים.
 שבוע העבודה הוא:
 0=יום ראשון, 1=יום שני, 2=יום שלישי, 3=יום רביעי, 4=יום חמישי, 5=יום שישי, 6=שבת
-ילדים מותרים: ${familyChildren.map((member) => `${member.key} (${member.name})`).join(", ")}
+ילדים מותרים: ${roster.children.map((member) => `${member.key} (${member.name})`).join(", ")}
 סוגים מותרים: dog, gym, sport, lesson, dance
 פורמט לכל איבר (שדות חובה כמו למעלה; אופציונלי: recurringWeekly):
 { "dayIndex": number, "time": string, "child": "${childKeysPrompt}", "title": string, "type": "dog|gym|sport|lesson|dance", "recurringWeekly"?: boolean }
@@ -1322,7 +1322,7 @@ ${text}`;
     }
 
     const parsed = JSON.parse(rawJson);
-    const events = sanitizeEvents(parsed);
+    const events = sanitizeEvents(parsed, roster);
 
     return NextResponse.json({ events });
   } catch (error) {

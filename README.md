@@ -16,7 +16,8 @@ VAPID_SUBJECT=mailto:you@example.com
 # Protect /api/push/remind cron endpoint (recommended)
 CRON_SECRET=your_random_secret
 
-# Optional family roster (comma-separated). When unset, defaults to רביד, עמית, אלין + parents סיון, רועי.
+# Optional family roster fallback (comma-separated). The in-app family settings (gear) are preferred
+# and are stored in scheduler_state under key family_roster.
 # NEXT_PUBLIC_FAMILY_MEMBERS=דני,מאיה,נועם
 ```
 

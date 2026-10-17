@@ -1,9 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
 import { sql } from "@/app/lib/db";
 import { ensurePushTables } from "@/app/lib/push";
-import { pushUserNames, resolvePushName } from "@/app/lib/familyMembers";
+import { type FamilyRoster } from "@/app/lib/familyMembers";
+import { loadFamilyRoster } from "@/app/lib/familyRosterStore";
 
-const allowedUsers = pushUserNames;
 type AllowedUser = string;
 
 type PresenceRow = {
@@ -30,7 +30,7 @@ const ensurePresenceTable = async () => {
   presenceTableReady = true;
 };
 
-const normalizeAllowedUser = (value: unknown): AllowedUser | null => {
+const normalizeAllowedUser = (value: unknown, roster: FamilyRoster): AllowedUser | null => {
   if (typeof value !== "string") {
     return null;
   }
@@ -40,13 +40,13 @@ const normalizeAllowedUser = (value: unknown): AllowedUser | null => {
     return null;
   }
 
-  const direct = resolvePushName(trimmed);
+  const direct = roster.resolvePushName(trimmed);
   if (direct) {
     return direct;
   }
   try {
     const decoded = Buffer.from(trimmed, "latin1").toString("utf8").trim();
-    return resolvePushName(decoded);
+    return roster.resolvePushName(decoded);
   } catch {
     return null;
   }
@@ -56,6 +56,8 @@ export async function GET() {
   try {
     await ensurePushTables();
     await ensurePresenceTable();
+    const roster = await loadFamilyRoster();
+    const allowedUsers = roster.pushUserNames;
 
     const subscriptions = await sql<SubscriptionUserRow>`
       SELECT user_name, MAX(COALESCE(updated_at, created_at)) AS last_subscription_at
@@ -74,7 +76,7 @@ export async function GET() {
     const subscribedSet = new Set<AllowedUser>();
     const subscriptionLastSeenMap = new Map<AllowedUser, string>();
     subscriptions.rows.forEach((row) => {
-      const userName = normalizeAllowedUser(row.user_name);
+      const userName = normalizeAllowedUser(row.user_name, roster);
       if (!userName) {
         return;
       }
@@ -88,7 +90,7 @@ export async function GET() {
 
     const presenceMap = new Map<string, string>();
     presence.rows.forEach((row) => {
-      const userName = normalizeAllowedUser(row.user_name);
+      const userName = normalizeAllowedUser(row.user_name, roster);
       if (!userName) {
         return;
       }
@@ -122,9 +124,10 @@ export async function POST(request: NextRequest) {
   try {
     await ensurePushTables();
     await ensurePresenceTable();
+    const roster = await loadFamilyRoster();
 
     const body = await request.json().catch(() => ({}));
-    const userName = normalizeAllowedUser(body?.userName);
+    const userName = normalizeAllowedUser(body?.userName, roster);
     if (!userName) {
       return NextResponse.json({ error: "userName is required" }, { status: 400 });
     }
