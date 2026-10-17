@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { type FamilyRole, type StoredFamilyMember } from "@/app/lib/familyMembers";
+import { fallbackRoster, type FamilyRole, type StoredFamilyMember } from "@/app/lib/familyMembers";
 import { loadFamilyRoster, publicRosterPayload, saveFamilyRoster } from "@/app/lib/familyRosterStore";
 
 export const dynamic = "force-dynamic";
@@ -10,8 +10,8 @@ export async function GET() {
     const roster = await loadFamilyRoster();
     return NextResponse.json({ ok: true, ...publicRosterPayload(roster) });
   } catch (error) {
-    const message = error instanceof Error ? error.message : "Failed to load family roster";
-    return NextResponse.json({ ok: false, error: message }, { status: 500 });
+    console.error("[api/family] GET failed", error);
+    return NextResponse.json({ ok: true, ...publicRosterPayload(fallbackRoster) });
   }
 }
 

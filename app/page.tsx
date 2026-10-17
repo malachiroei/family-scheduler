@@ -1875,13 +1875,7 @@ export default function FamilyScheduler() {
     let cancelled = false;
     void (async () => {
       const markOnboarding = (configured: boolean) => {
-        let seen = false;
-        try {
-          seen = localStorage.getItem(FAMILY_ROSTER_ONBOARDING_KEY) === '1';
-        } catch {
-          seen = false;
-        }
-        if (!configured && !seen) {
+        if (!configured) {
           setShowFamilyOnboarding(true);
         }
       };
@@ -1929,21 +1923,13 @@ export default function FamilyScheduler() {
     }
     setShowFamilyOnboarding(false);
     setShowFamilyEditor(false);
+    setApiError('');
     setSuccessMessage('בני המשפחה נשמרו בהצלחה.');
     setParentWatchChildren((prev) => {
       const allowed = new Set(next.pushChildNames);
       const kept = prev.filter((name) => allowed.has(name));
       return kept.length ? kept : [...next.pushChildNames];
     });
-  };
-
-  const skipFamilyOnboarding = () => {
-    try {
-      localStorage.setItem(FAMILY_ROSTER_ONBOARDING_KEY, '1');
-    } catch {
-      // no-op
-    }
-    setShowFamilyOnboarding(false);
   };
 
   const formatPresenceLastSeen = (value: string | null, isOnline: boolean) => {
@@ -5605,10 +5591,10 @@ export default function FamilyScheduler() {
           subtitle="הזינו את שמות ההורים והילדים. אפשר לשנות את זה אחר כך מהגלגל שיניים."
           initialMembers={roster.members}
           saveLabel="שמירת בני המשפחה"
-          skipLabel="המשך עם ברירת המחדל"
           onSave={saveFamilyRosterFromUi}
-          onSkip={skipFamilyOnboarding}
           allowClose={false}
+          blankStart
+          requireParentAndChild
         />
       )}
 

@@ -3,7 +3,9 @@
 import React, { useMemo, useState } from "react";
 import { Plus, Trash2, X } from "lucide-react";
 import {
+  blankOnboardingMembers,
   COLOR_PALETTE,
+  ONBOARDING_PLACEHOLDERS,
   type FamilyMember,
   type FamilyRole,
   type StoredFamilyMember,
@@ -22,22 +24,23 @@ type FamilyRosterEditorProps = {
   subtitle?: string;
   initialMembers: FamilyMember[];
   saveLabel?: string;
-  skipLabel?: string;
   onSave: (members: StoredFamilyMember[]) => Promise<void> | void;
-  onSkip?: () => void;
   onClose?: () => void;
   allowClose?: boolean;
+  /** Empty generic rows (new tenant) instead of the current household names. */
+  blankStart?: boolean;
+  requireParentAndChild?: boolean;
 };
 
 const newId = () => `new-${Math.random().toString(36).slice(2, 9)}`;
 
 const toDraft = (members: FamilyMember[]): DraftRow[] =>
   members.map((member) => ({
-    id: member.key,
+    id: member.key || newId(),
     name: member.name,
     role: member.role,
     color: member.color,
-    key: member.key,
+    key: member.key || undefined,
   }));
 
 export default function FamilyRosterEditor({
@@ -45,13 +48,15 @@ export default function FamilyRosterEditor({
   subtitle,
   initialMembers,
   saveLabel = "שמירה",
-  skipLabel,
   onSave,
-  onSkip,
   onClose,
   allowClose = true,
+  blankStart = false,
+  requireParentAndChild = false,
 }: FamilyRosterEditorProps) {
-  const [rows, setRows] = useState<DraftRow[]>(() => toDraft(initialMembers));
+  const [rows, setRows] = useState<DraftRow[]>(() =>
+    toDraft(blankStart ? blankOnboardingMembers() : initialMembers),
+  );
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
 
@@ -79,9 +84,15 @@ export default function FamilyRosterEditor({
         color: row.color,
         key: row.key,
       }))
-      .filter((row) => row.name);
+      .filter((row) => row.name && !/^הורה\s*\d+$/.test(row.name) && !/^ילד\s*\d+$/.test(row.name));
+    const hasParent = members.some((row) => row.role === "parent");
+    const hasChild = members.some((row) => row.role === "child");
     if (!members.length) {
       setError("יש להזין לפחות שם אחד.");
+      return;
+    }
+    if (requireParentAndChild && (!hasParent || !hasChild)) {
+      setError("יש להזין לפחות הורה אחד וילד אחד.");
       return;
     }
     setBusy(true);
@@ -119,7 +130,7 @@ export default function FamilyRosterEditor({
                 <input
                   value={row.name}
                   onChange={(event) => updateRow(row.id, { name: event.target.value })}
-                  placeholder={role === "parent" ? "שם הורה" : "שם ילד/ה"}
+                  placeholder={role === "parent" ? ONBOARDING_PLACEHOLDERS.parent : ONBOARDING_PLACEHOLDERS.child}
                   className="flex-1 rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-sm outline-none focus:border-blue-400"
                 />
                 <button
@@ -188,16 +199,6 @@ export default function FamilyRosterEditor({
           >
             {busy ? "שומר..." : saveLabel}
           </button>
-          {onSkip ? (
-            <button
-              type="button"
-              onClick={onSkip}
-              disabled={busy}
-              className="flex-1 rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-sm font-semibold text-slate-600 hover:bg-slate-50 disabled:opacity-60"
-            >
-              {skipLabel || "המשך עם ברירת המחדל"}
-            </button>
-          ) : null}
         </div>
       </div>
     </div>

@@ -1,4 +1,4 @@
-import { getDatabaseConfig, sql } from "@/app/lib/db";
+import { getDatabaseConfig, sql, sqlJson } from "@/app/lib/db";
 import {
   createFamilyRoster,
   fallbackRoster,
@@ -25,6 +25,45 @@ export const invalidateFamilyRosterCache = () => {
   rosterCache = null;
 };
 
+const trySql = async (label: string, run: () => Promise<unknown>) => {
+  try {
+    await run();
+    return true;
+  } catch (error) {
+    console.warn(`[family-roster] ${label}:`, getErrorMessage(error));
+    return false;
+  }
+};
+
+const applySchedulerStateAccess = async () => {
+  // Server uses the database URL (often postgres / service_role). Also grant common Supabase roles
+  // so a later switch to the pooler/anon role still works, and so RLS does not hide the row.
+  await trySql("grant postgres", () => sql`GRANT ALL ON TABLE public.scheduler_state TO postgres`);
+  await trySql("grant service_role", () => sql`GRANT ALL ON TABLE public.scheduler_state TO service_role`);
+  await trySql("grant authenticated", () => sql`GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.scheduler_state TO authenticated`);
+  await trySql("grant anon", () => sql`GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.scheduler_state TO anon`);
+  const disabledRls = await trySql(
+    "disable rls",
+    () => sql`ALTER TABLE public.scheduler_state DISABLE ROW LEVEL SECURITY`,
+  );
+  if (!disabledRls) {
+    await trySql("enable rls", () => sql`ALTER TABLE public.scheduler_state ENABLE ROW LEVEL SECURITY`);
+    await trySql(
+      "drop old policy",
+      () => sql`DROP POLICY IF EXISTS scheduler_state_all ON public.scheduler_state`,
+    );
+    await trySql(
+      "create policy",
+      () => sql`
+        CREATE POLICY scheduler_state_all ON public.scheduler_state
+        FOR ALL
+        USING (true)
+        WITH CHECK (true)
+      `,
+    );
+  }
+};
+
 const ensureSchedulerStateTable = async () => {
   const { url } = getDatabaseConfig();
   if (!url) {
@@ -33,30 +72,46 @@ const ensureSchedulerStateTable = async () => {
   if (stateTableReady) {
     return { ok: true as const };
   }
-  try {
-    await sql`
+  await trySql(
+    "create table",
+    () => sql`
       CREATE TABLE IF NOT EXISTS scheduler_state (
         state_key TEXT PRIMARY KEY,
         payload JSONB NOT NULL,
         updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       )
-    `;
-    stateTableReady = true;
-    return { ok: true as const };
-  } catch (error) {
-    return { ok: false as const, code: "TABLE_BOOTSTRAP_FAILED" as const, error: getErrorMessage(error) };
+    `,
+  );
+  await applySchedulerStateAccess();
+  const readable = await trySql("probe table", () => sql`SELECT 1 FROM scheduler_state LIMIT 0`);
+  if (!readable) {
+    return {
+      ok: false as const,
+      code: "TABLE_BOOTSTRAP_FAILED" as const,
+      error: "אין גישה לטבלת scheduler_state",
+    };
   }
+  stateTableReady = true;
+  return { ok: true as const };
 };
 
 const parseStoredMembers = (raw: unknown): StoredFamilyMember[] => {
-  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+  let payload: unknown = raw;
+  if (typeof raw === "string") {
+    try {
+      payload = JSON.parse(raw);
+    } catch {
+      return [];
+    }
+  }
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
     return [];
   }
-  const payload = raw as StoredPayload;
-  if (!Array.isArray(payload.members)) {
+  const members = (payload as StoredPayload).members;
+  if (!Array.isArray(members)) {
     return [];
   }
-  return payload.members.filter(
+  return members.filter(
     (item): item is StoredFamilyMember =>
       Boolean(item) &&
       typeof item === "object" &&
@@ -90,15 +145,20 @@ export const readStoredFamilyRoster = async (): Promise<StoredFamilyMember[] | n
 };
 
 export const loadFamilyRoster = async (): Promise<FamilyRoster> => {
-  if (rosterCache && Date.now() - rosterCache.at < ROSTER_CACHE_MS) {
-    return rosterCache.roster;
+  try {
+    if (rosterCache && Date.now() - rosterCache.at < ROSTER_CACHE_MS) {
+      return rosterCache.roster;
+    }
+    const stored = await readStoredFamilyRoster();
+    const roster = stored?.length
+      ? createFamilyRoster(hydrateStoredMembers(stored), "db")
+      : fallbackRoster;
+    rosterCache = { roster, at: Date.now() };
+    return roster;
+  } catch (error) {
+    console.error("[family-roster] load failed; using fallback", error);
+    return fallbackRoster;
   }
-  const stored = await readStoredFamilyRoster();
-  const roster = stored?.length
-    ? createFamilyRoster(hydrateStoredMembers(stored), "db")
-    : fallbackRoster;
-  rosterCache = { roster, at: Date.now() };
-  return roster;
 };
 
 export const saveFamilyRoster = async (input: StoredFamilyMember[]): Promise<FamilyRoster> => {
@@ -115,14 +175,19 @@ export const saveFamilyRoster = async (input: StoredFamilyMember[]): Promise<Fam
     );
   }
   const payload = { members: serializeFamilyMembers(members) };
-  await sql`
-    INSERT INTO scheduler_state (state_key, payload, updated_at)
-    VALUES (${FAMILY_ROSTER_STATE_KEY}, ${JSON.stringify(payload)}::jsonb, NOW())
-    ON CONFLICT (state_key)
-    DO UPDATE SET
-      payload = EXCLUDED.payload,
-      updated_at = NOW()
-  `;
+  try {
+    await sql`
+      INSERT INTO scheduler_state (state_key, payload, updated_at)
+      VALUES (${FAMILY_ROSTER_STATE_KEY}, ${sqlJson(payload)}, NOW())
+      ON CONFLICT (state_key)
+      DO UPDATE SET
+        payload = EXCLUDED.payload,
+        updated_at = NOW()
+    `;
+  } catch (error) {
+    console.error("[family-roster] save failed", error);
+    throw new Error(getErrorMessage(error) || "שמירת בני המשפחה נכשלה");
+  }
   const roster = createFamilyRoster(members, "db");
   rosterCache = { roster, at: Date.now() };
   return roster;

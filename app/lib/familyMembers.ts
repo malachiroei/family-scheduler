@@ -27,6 +27,11 @@ export type StoredFamilyMember = {
 export const FAMILY_ROSTER_STATE_KEY = "family_roster";
 export const FAMILY_ROSTER_ONBOARDING_KEY = "family-scheduler-roster-onboarding-v1";
 
+export const ONBOARDING_PLACEHOLDERS = {
+  parent: "שם ההורה",
+  child: "שם הילד",
+} as const;
+
 export const COLOR_PALETTE = [
   { color: "bg-blue-500", iconColor: "text-blue-500" },
   { color: "bg-green-500", iconColor: "text-green-500" },
@@ -37,6 +42,14 @@ export const COLOR_PALETTE = [
   { color: "bg-amber-500", iconColor: "text-amber-500" },
   { color: "bg-rose-500", iconColor: "text-rose-500" },
 ] as const;
+
+/** Empty starter rows for a new tenant — never the current household names. */
+export const blankOnboardingMembers = (): FamilyMember[] => [
+  { key: "", name: "", pushName: "", role: "parent", color: COLOR_PALETTE[0].color, iconColor: COLOR_PALETTE[0].iconColor, aliases: [] },
+  { key: "", name: "", pushName: "", role: "parent", color: COLOR_PALETTE[1].color, iconColor: COLOR_PALETTE[1].iconColor, aliases: [] },
+  { key: "", name: "", pushName: "", role: "child", color: COLOR_PALETTE[2].color, iconColor: COLOR_PALETTE[2].iconColor, aliases: [] },
+  { key: "", name: "", pushName: "", role: "child", color: COLOR_PALETTE[3].color, iconColor: COLOR_PALETTE[3].iconColor, aliases: [] },
+];
 
 const DEFAULT_CHILDREN = ["רביד", "עמית", "אלין"] as const;
 const DEFAULT_PARENTS = ["סיון", "רועי"] as const;

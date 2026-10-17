@@ -686,7 +686,6 @@ export async function GET() {
 async function handleGet() {
   try {
     debugScheduleLog('[API] GET /api/schedule');
-    const roster = await loadFamilyRoster();
     const tableStatus = await ensureScheduleTableReady();
     if (!tableStatus.ok) {
       if (tableStatus.code === "MISSING_POSTGRES_ENV") {
@@ -705,6 +704,13 @@ async function handleGet() {
 
     const rows = result.rows;
     debugScheduleLog("Events found in DB:", rows);
+
+    let roster: FamilyRoster = fallbackRoster;
+    try {
+      roster = await loadFamilyRoster();
+    } catch (error) {
+      console.error("[API] GET /api/schedule roster fallback", error);
+    }
 
     const events = rows.map((row) => {
       const r = row as { id: string; title: string; date: string; metadata: unknown };
