@@ -15,6 +15,7 @@ import {
   escapeRegExp,
   fallbackRoster,
   isOriginalHouseholdEnabled,
+  type FamilyMember,
   type FamilyRoster,
   type StoredFamilyMember,
 } from '@/app/lib/familyMembers';
@@ -1824,6 +1825,7 @@ export default function FamilyScheduler() {
   const [presenceBusy, setPresenceBusy] = useState(false);
   const [presenceUsers, setPresenceUsers] = useState<PresenceUser[]>([]);
   const [pushRavidTestBusy, setPushRavidTestBusy] = useState(false);
+  const [directTestChildKey, setDirectTestChildKey] = useState<string | null>(null);
   const [confirmingEventId, setConfirmingEventId] = useState('');
   const [confirmingReminderSeen, setConfirmingReminderSeen] = useState(false);
   const [pendingReminderConfirmation, setPendingReminderConfirmation] = useState<{
@@ -2555,8 +2557,11 @@ export default function FamilyScheduler() {
         return;
       }
 
-      if (pushUserOptions().includes(savedUser as PushUserName)) {
-        const user = savedUser as PushUserName;
+      const resolved = uiRoster.getMemberByAnyName(savedUser)?.pushName || (
+        pushUserOptions().includes(savedUser as PushUserName) ? savedUser : ''
+      );
+      if (resolved) {
+        const user = resolved as PushUserName;
         setPushUserName(user);
         setHasConfirmedPushIdentitySelection(true);
         setShowPushIdentityPrompt(false);
@@ -2571,6 +2576,48 @@ export default function FamilyScheduler() {
       setHasLoadedPushUser(true);
     }
   }, []);
+
+  useEffect(() => {
+    if (!hasLoadedPushUser) {
+      return;
+    }
+    let saved = pushUserName;
+    if (!saved) {
+      try {
+        saved = localStorage.getItem(PUSH_USER_STORAGE_KEY) || '';
+      } catch {
+        saved = '';
+      }
+    }
+    if (!saved) {
+      return;
+    }
+    const member = roster.getMemberByAnyName(saved);
+    if (!member) {
+      return;
+    }
+    setParentWatchChildren((prev) => {
+      const mapped = prev
+        .map((name) => roster.getMemberByAnyName(name)?.pushName)
+        .filter((name): name is string => Boolean(name));
+      const unique = [...new Set(mapped)];
+      const next = unique.length ? unique : [...roster.pushChildNames];
+      if (next.length === prev.length && next.every((name, index) => name === prev[index])) {
+        return prev;
+      }
+      return next;
+    });
+    if (pushUserName === member.pushName) {
+      return;
+    }
+    setPushUserName(member.pushName);
+    setHasConfirmedPushIdentitySelection(true);
+    try {
+      localStorage.setItem(PUSH_USER_STORAGE_KEY, member.pushName);
+    } catch {
+      // no-op
+    }
+  }, [roster, hasLoadedPushUser, pushUserName]);
 
   useEffect(() => {
     if (!hasLoadedPushUser) {
@@ -2926,20 +2973,12 @@ export default function FamilyScheduler() {
     }
   };
 
-  const selectedChildForDirectTest = (!isParentPushUser(pushUserName) && pushUserName)
-    ? pushUserName
-    : '';
-
-  const sendDirectTestPushToSelectedChild = async () => {
+  const sendDirectTestPushToChild = async (child: FamilyMember) => {
     if (pushRavidTestBusy) {
       return;
     }
 
-    if (!selectedChildForDirectTest) {
-      setApiError(`בחרו קודם משתמש ילד (${childDisplayNamesList().join('/')}) כדי לשלוח בדיקה ישירה.`);
-      return;
-    }
-
+    setDirectTestChildKey(child.key);
     setPushRavidTestBusy(true);
     try {
       const ready = await ensurePushSubscriptionReady();
@@ -2947,20 +2986,21 @@ export default function FamilyScheduler() {
         return;
       }
 
-      const response = await fetch(toApiUrl(`/api/push/test-ravid?childName=${encodeURIComponent(selectedChildForDirectTest)}`), {
+      const response = await fetch(toApiUrl(`/api/push/test-ravid?childName=${encodeURIComponent(child.pushName)}`), {
         method: 'POST',
       });
       const payload = await readJsonSafe(response);
       if (!response.ok) {
-        throw new Error(payload?.error || `שליחת בדיקה ל${selectedChildForDirectTest} נכשלה`);
+        throw new Error(payload?.error || `שליחת בדיקה ל${child.name} נכשלה`);
       }
 
-      setSuccessMessage(`התראת בדיקה נשלחה ל${selectedChildForDirectTest}.`);
+      setSuccessMessage(`התראת בדיקה נשלחה ל${child.name}.`);
     } catch (error) {
-      const message = error instanceof Error ? error.message : `שליחת בדיקה ל${selectedChildForDirectTest} נכשלה`;
+      const message = error instanceof Error ? error.message : `שליחת בדיקה ל${child.name} נכשלה`;
       setApiError(message);
     } finally {
       setPushRavidTestBusy(false);
+      setDirectTestChildKey(null);
     }
   };
 
@@ -3102,7 +3142,12 @@ export default function FamilyScheduler() {
     };
   }, []);
 
-  const weekRangeLabel = `${toDisplayDate(weekStart)} - ${toDisplayDate(addDays(weekStart, 6))}`;
+  const weekRangeStartLabel = toDisplayDate(weekStart);
+  const weekRangeEndLabel = toDisplayDate(addDays(weekStart, 6));
+  const weekRangeLabel = `${weekRangeStartLabel} – ${weekRangeEndLabel}`;
+  const pushProfileLabel = pushUserName
+    ? (roster.getMemberByAnyName(pushUserName)?.name || pushUserName)
+    : '';
 
   const refetchEventsFromDatabase = async (targetWeekStart: Date) => {
     // Never hang: abort the request after 5s. The timer covers body parsing too.
@@ -4956,7 +5001,7 @@ export default function FamilyScheduler() {
               <ChevronRight size={20} />
             </button>
             <div className="px-3 sm:px-6 text-center text-slate-800 font-extrabold text-lg sm:text-xl tracking-tight whitespace-nowrap">
-              {weekRangeLabel}
+              <bdi dir="ltr">{weekRangeStartLabel} – {weekRangeEndLabel}</bdi>
             </div>
             <button
               type="button"
@@ -5452,7 +5497,7 @@ export default function FamilyScheduler() {
                 className="w-full flex items-center justify-center gap-2 bg-blue-50 text-blue-700 border border-blue-200 px-4 py-1.5 rounded-lg hover:bg-blue-100 transition disabled:opacity-60 disabled:cursor-not-allowed"
               >
                 {pushEnabled
-                  ? `משתמש במכשיר: ${pushUserName || 'לא נבחר'}`
+                  ? `משתמש במכשיר: ${pushProfileLabel || 'לא נבחר'}`
                   : (pushBusy ? 'מפעיל התראות...' : 'הפעל התראות')}
               </button>
               <button
@@ -5475,16 +5520,19 @@ export default function FamilyScheduler() {
                   {pushTestStatus.kind === 'success' ? '✅ ' : '⚠️ '}{pushTestStatus.text}
                 </div>
               )}
-              <button
-                type="button"
-                onClick={() => { void sendDirectTestPushToSelectedChild(); }}
-                disabled={pushRavidTestBusy || !selectedChildForDirectTest}
-                className="w-full flex items-center justify-center gap-2 bg-indigo-50 text-indigo-700 border border-indigo-200 px-4 py-1.5 rounded-lg hover:bg-indigo-100 transition disabled:opacity-60 disabled:cursor-not-allowed"
-              >
-                {pushRavidTestBusy
-                  ? `שולח ל${selectedChildForDirectTest || 'ילד'}...`
-                  : `שלח בדיקה ל${selectedChildForDirectTest || 'ילד נבחר'}`}
-              </button>
+              {roster.children.map((child) => (
+                <button
+                  key={`direct-test-${child.key}`}
+                  type="button"
+                  onClick={() => { void sendDirectTestPushToChild(child); }}
+                  disabled={pushRavidTestBusy}
+                  className="w-full flex items-center justify-center gap-2 bg-indigo-50 text-indigo-700 border border-indigo-200 px-4 py-1.5 rounded-lg hover:bg-indigo-100 transition disabled:opacity-60 disabled:cursor-not-allowed"
+                >
+                  {pushRavidTestBusy && directTestChildKey === child.key
+                    ? `שולח ל${child.name}...`
+                    : `שלח בדיקה ל${child.name}`}
+                </button>
+              ))}
               <button
                 type="button"
                 onClick={() => { void handleClearAll(); }}
@@ -5499,9 +5547,9 @@ export default function FamilyScheduler() {
               >
                 <Printer size={18} /> הדפסה
               </button>
-              {pushUserName && (
+              {pushProfileLabel && (
                 <div className="text-xs text-slate-600 bg-slate-100 border border-slate-200 rounded-lg px-2 py-2 text-center">
-                  פרופיל התראות: {pushUserName}
+                  פרופיל התראות: {pushProfileLabel}
                 </div>
               )}
             </div>
@@ -5528,7 +5576,9 @@ export default function FamilyScheduler() {
                     .filter((user) => user.registered)
                     .map((user) => (
                       <div key={`presence-${user.userName}`} className="flex items-center justify-between rounded-lg border border-slate-200 bg-white px-2.5 py-2">
-                        <div className="text-sm font-semibold text-slate-700">{user.userName}</div>
+                        <div className="text-sm font-semibold text-slate-700">
+                          {roster.getMemberByAnyName(user.userName)?.name || user.userName}
+                        </div>
                         <div className="flex flex-col items-end gap-0.5">
                           <div className={`text-[11px] font-bold ${user.hasSubscription ? 'text-indigo-600' : 'text-rose-600'}`}>
                             {user.hasSubscription ? 'פוש פעיל' : 'ללא פוש פעיל'}
@@ -5608,14 +5658,14 @@ export default function FamilyScheduler() {
             <p className="text-xs text-slate-500">יש לבחור שם משתמש למכשיר כדי שסטטוס הפעילות יעבוד בצורה מדויקת.</p>
 
             <div className="grid grid-cols-2 gap-2">
-              {pushUserOptions().map((option) => (
+              {roster.members.map((member) => (
                 <button
-                  key={`push-user-${option}`}
+                  key={`push-user-${member.key}`}
                   type="button"
-                  onClick={() => selectPushUser(option)}
-                  className={`rounded-xl border px-3 py-2 text-sm font-semibold transition ${pushUserName === option ? 'bg-blue-50 border-blue-400 text-blue-700' : 'bg-white border-slate-300 text-slate-700 hover:bg-slate-50'}`}
+                  onClick={() => selectPushUser(member.pushName)}
+                  className={`rounded-xl border px-3 py-2 text-sm font-semibold transition ${pushUserName === member.pushName ? 'bg-blue-50 border-blue-400 text-blue-700' : 'bg-white border-slate-300 text-slate-700 hover:bg-slate-50'}`}
                 >
-                  {option}
+                  {member.name}
                 </button>
               ))}
             </div>
@@ -5635,16 +5685,16 @@ export default function FamilyScheduler() {
                   <div>
                     <div className="text-xs text-slate-500 mb-2">בחר/י ילדים למעקב:</div>
                     <div className="flex flex-wrap gap-2">
-                      {pushChildOptions().map((child) => {
-                        const checked = parentWatchChildren.includes(child);
+                      {roster.children.map((child) => {
+                        const checked = parentWatchChildren.includes(child.pushName);
                         return (
                           <button
-                            key={`watch-${child}`}
+                            key={`watch-${child.key}`}
                             type="button"
-                            onClick={() => toggleParentTrackedChild(child)}
+                            onClick={() => toggleParentTrackedChild(child.pushName)}
                             className={`rounded-lg border px-3 py-1.5 text-xs font-semibold transition ${checked ? 'bg-indigo-50 border-indigo-400 text-indigo-700' : 'bg-white border-slate-300 text-slate-700 hover:bg-slate-50'}`}
                           >
-                            {child}
+                            {child.name}
                           </button>
                         );
                       })}

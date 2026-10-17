@@ -166,7 +166,19 @@ export const hydrateMember = (item: StoredFamilyMember, index: number, usedKeys?
   }
   const displayName = key === "sivan" ? "סיון" : name;
   const pushName = spec.pushName ?? displayName;
-  const aliases = Array.from(new Set([displayName, name, key, pushName, ...spec.aliases].filter(Boolean)));
+  const genericKeyAliases =
+    key === "child1"
+      ? ["ילד 1", "child1"]
+      : key === "child2"
+        ? ["ילד 2", "child2"]
+        : key === "parent1"
+          ? ["הורה 1", "parent1"]
+          : key === "parent2"
+            ? ["הורה 2", "parent2"]
+            : [];
+  const aliases = Array.from(
+    new Set([displayName, name, key, pushName, ...spec.aliases, ...genericKeyAliases].filter(Boolean)),
+  );
   return { key, name: displayName, pushName, role, color, iconColor, aliases };
 };
 

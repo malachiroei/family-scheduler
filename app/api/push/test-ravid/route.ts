@@ -26,15 +26,26 @@ export async function POST(request: NextRequest) {
     await ensurePushTables();
 
     const roster = await loadFamilyRoster();
-    const defaultTestChild = roster.pushChildNames[0] ?? roster.childDisplayNames[0] ?? "ילד 1";
     const targetChildRaw = await resolveTargetChild(request);
-    const resolvedChild = roster.resolvePushName(targetChildRaw);
-    const targetChild = resolvedChild && roster.isChildPushName(resolvedChild) ? resolvedChild : defaultTestChild;
+    const member =
+      roster.getMemberByAnyName(targetChildRaw) ??
+      roster.children[0] ??
+      null;
+    if (!member || member.role !== "child") {
+      return NextResponse.json(
+        { error: "לא נמצא ילד ברוסטר לשליחת בדיקה" },
+        { status: 400 },
+      );
+    }
+
+    const lookupNames = [...new Set(
+      [member.pushName, member.name, ...member.aliases].map((value) => value.trim()).filter(Boolean),
+    )];
 
     const result = await sql<EndpointRow>`
       SELECT endpoint
       FROM push_subscriptions
-      WHERE user_name = ${targetChild}
+      WHERE user_name = ANY(${lookupNames})
       ORDER BY updated_at DESC
       LIMIT 1
     `;
@@ -42,25 +53,25 @@ export async function POST(request: NextRequest) {
     const endpoint = result.rows[0]?.endpoint?.trim() || "";
     if (!endpoint) {
       return NextResponse.json(
-        { error: `לא נמצא endpoint פעיל עבור ${targetChild}. בדוק קודם את /api/debug/subscriptions` },
+        { error: `לא נמצא endpoint פעיל עבור ${member.name}. בדוק קודם את /api/debug/subscriptions` },
         { status: 404 }
       );
     }
 
     const sendResult = await sendPushToEndpoint(endpoint, {
-      title: `בדיקת Push ל${targetChild}`,
-      body: `נשלחה התראת בדיקה ישירות ל-endpoint של ${targetChild} ✅`,
+      title: `בדיקת Push ל${member.name}`,
+      body: `נשלחה התראת בדיקה ישירות ל-endpoint של ${member.name} ✅`,
       url: "/",
     });
 
     if (!sendResult.ok) {
       return NextResponse.json(
-        { error: `שליחת התראת בדיקה עבור ${targetChild} נכשלה`, reason: sendResult.reason || "send-failed" },
+        { error: `שליחת התראת בדיקה עבור ${member.name} נכשלה`, reason: sendResult.reason || "send-failed" },
         { status: 500 }
       );
     }
 
-    return NextResponse.json({ ok: true, sent: 1, target: targetChild });
+    return NextResponse.json({ ok: true, sent: 1, target: member.name });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Failed to send direct test push";
     return NextResponse.json({ error: message }, { status: 500 });
