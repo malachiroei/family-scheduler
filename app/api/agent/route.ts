@@ -2,6 +2,13 @@ import { NextRequest, NextResponse, after } from "next/server";
 import { sql, sqlJson } from "@/app/lib/db";
 import { buildMetadataFromIncoming } from "@/app/lib/scheduleTable";
 import { sendPushToAll } from "@/app/lib/push";
+import {
+  FIXTURE_TEAM_NAME,
+  fixtureSenderKey,
+  isSpreadsheetUpload,
+  normalizeLeagueKey,
+  parseFixtureWorkbook,
+} from "@/app/lib/parseFixtureWorkbook";
 
 export const revalidate = 0;
 export const maxDuration = 30;
@@ -39,11 +46,22 @@ type Draft = {
   events: DraftEvent[];
   child_name: Child | null; // one child for the whole batch
   sender_or_group: string | null; // WhatsApp group / chat title / contact name
+  /** Spreadsheet import: always confirm parsed games with the user before saving. */
+  needs_confirm?: boolean;
+  import_kind?: "fixtures" | null;
+  league?: string | null;
 };
 
 type ChatTurn = { role: "user" | "assistant"; content: string };
 
-const emptyDraft = (): Draft => ({ events: [], child_name: null, sender_or_group: null });
+const emptyDraft = (): Draft => ({
+  events: [],
+  child_name: null,
+  sender_or_group: null,
+  needs_confirm: false,
+  import_kind: null,
+  league: null,
+});
 
 /** ["סיון","עמית","אלין"] -> "סיון, עמית ואלין" */
 const joinNames = (names: string[]) =>
@@ -123,7 +141,7 @@ const sanitizeEvent = (raw: unknown): DraftEvent => {
   return {
     date: normalizeDate(o.date),
     time: normalizeTime(o.time),
-    title: str(o.title),
+    title: str(o.title, 280),
     type: normalizeType(o.type),
     keyword: str(o.keyword, 40),
   };
@@ -145,9 +163,12 @@ const sanitizeDraft = (raw: unknown): Draft => {
   const o = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
   const list = Array.isArray(o.events) ? o.events : [];
   return {
-    events: dedupeEvents(list.slice(0, 30).map(sanitizeEvent)),
+    events: dedupeEvents(list.slice(0, 80).map(sanitizeEvent)),
     child_name: normalizeChild(o.child_name ?? o.child),
     sender_or_group: str(o.sender_or_group, 80),
+    needs_confirm: o.needs_confirm === true,
+    import_kind: o.import_kind === "fixtures" ? "fixtures" : null,
+    league: str(o.league, 80),
   };
 };
 
@@ -247,6 +268,31 @@ const learnPattern = async (
     }
   } catch (e) {
     console.error("[agent] learnPattern failed", e);
+  }
+};
+
+/** League boards (נערים ב / ילדות ב) are a one-shot mapping: after the user answers once, auto-assign next time. */
+const learnFixtureAssignment = async (league: string | null, child: Child) => {
+  const senderKey = fixtureSenderKey(league);
+  const leagueKey = normalizeLeagueKey(league);
+  try {
+    await ensurePatternsTable();
+    const keywords = leagueKey ? [SOURCE_WILDCARD, leagueKey] : [SOURCE_WILDCARD];
+    for (const keyword of keywords) {
+      await sql`
+        INSERT INTO family_learned_patterns
+          (keyword, sender_or_group, child_name, event_type, hits, confirmations_count, auto_assign)
+        VALUES (${keyword}, ${senderKey}, ${child}, ${"sport"}, 1, 1, TRUE)
+        ON CONFLICT (keyword, sender_or_group, child_name) DO UPDATE SET
+          hits = family_learned_patterns.hits + 1,
+          confirmations_count = family_learned_patterns.confirmations_count + 1,
+          auto_assign = TRUE,
+          event_type = 'sport',
+          updated_at = NOW()
+      `;
+    }
+  } catch (e) {
+    console.error("[agent] learnFixtureAssignment failed", e);
   }
 };
 
@@ -376,8 +422,12 @@ const shortDate = (iso: string | null) => {
   return m ? `${m[2]}/${m[1]}` : iso ?? "";
 };
 
-const describeEvent = (e: DraftEvent) =>
-  `${e.title || (e.type ? TYPE_LABEL[e.type] : "אירוע")} ב-${shortDate(e.date)} ב-${e.time}`;
+const describeEvent = (e: DraftEvent) => {
+  const title = (e.title || (e.type ? TYPE_LABEL[e.type] : "אירוע")).split("\n")[0];
+  return `${title} ב-${shortDate(e.date)} ב-${e.time}`;
+};
+
+const CONFIRM_YES_RE = /^(כן|בטח|אישור|סבבה|אוקיי|אוקי|ok)[.!]?$/i;
 
 /** Dog (Johnny) and general family events must never be auto-assigned: always ask who it is for. */
 const GENERAL_EVENT_RE =
@@ -425,12 +475,18 @@ const enrichGenericTitles = (draft: Draft, text: string) => {
 const buildQuestion = (draft: Draft, missing: string[], suggestedChild: Child | null) => {
   const complete = draft.events.filter((e) => e.date && e.time);
   if (missing.length === 1 && missing[0] === "child_name") {
+    const previewLimit = draft.import_kind === "fixtures" ? 12 : complete.length;
+    const preview = complete.slice(0, previewLimit).map((e) => `• ${describeEvent(e)}`).join("\n");
+    const extra = complete.length > previewLimit ? `\n(+${complete.length - previewLimit} נוספים)` : "";
+    const leagueBit = draft.league ? ` בליגת ${draft.league}` : "";
     const summary =
-      complete.length === 1
-        ? `זיהיתי ${describeEvent(complete[0])}.`
-        : `זיהיתי ${complete.length} אירועים:\n${complete.map((e) => `• ${describeEvent(e)}`).join("\n")}`;
+      draft.import_kind === "fixtures"
+        ? `זיהיתי ${complete.length} משחקים של ${FIXTURE_TEAM_NAME}${leagueBit}:\n${preview}${extra}\n\nזה מה שזיהיתי מהקובץ.`
+        : complete.length === 1
+          ? `זיהיתי ${describeEvent(complete[0])}.`
+          : `זיהיתי ${complete.length} אירועים:\n${preview}`;
     if (suggestedChild) {
-      return complete.length === 1
+      return complete.length === 1 && draft.import_kind !== "fixtures"
         ? `${summary} לשבץ עבור ${CHILD_LABEL[suggestedChild]}?`
         : `${summary}\nלשבץ את כולם עבור ${CHILD_LABEL[suggestedChild]}?`;
     }
@@ -457,6 +513,10 @@ export async function POST(request: NextRequest) {
     const imageBase64 =
       typeof body.imageBase64 === "string" ? body.imageBase64.replace(/^data:[^;]+;base64,/, "").trim() : "";
     const imageMime = typeof body.imageMimeType === "string" && body.imageMimeType ? body.imageMimeType : "image/png";
+    const fileBase64 =
+      typeof body.fileBase64 === "string" ? body.fileBase64.replace(/^data:[^;]+;base64,/, "").trim() : "";
+    const fileName = typeof body.fileName === "string" ? body.fileName.trim() : "";
+    const fileMime = typeof body.fileMimeType === "string" ? body.fileMimeType.trim() : "";
     const history: ChatTurn[] = Array.isArray(body.history)
       ? (body.history as unknown[])
           .map((h) => h as Record<string, unknown>)
@@ -466,15 +526,17 @@ export async function POST(request: NextRequest) {
     const previousDraft = sanitizeDraft(body.draft);
     const senderEndpoint = typeof body.senderSubscriptionEndpoint === "string" ? body.senderSubscriptionEndpoint : "";
 
-    if (!text && !imageBase64) {
-      return NextResponse.json({ success: false, error: "Text or image is required" }, { status: 400 });
+    if (!text && !imageBase64 && !fileBase64) {
+      return NextResponse.json({ success: false, error: "Text, image or spreadsheet is required" }, { status: 400 });
     }
+
+    const spreadsheetUploaded = Boolean(fileBase64) && isSpreadsheetUpload(fileName, fileMime || imageMime);
 
     // Shortcut: a short reply ("עמית", "כן, עבור רביד", "עבור אלין", or a bare "כן" to the last
     // suggestion) answering the pending child question. No LLM needed; counts as a confirmation.
     // Names explicitly written by the user ("סיון, עמית ואלין", or "כולם" = the whole family).
     const mentionedKids: Child[] =
-      imageBase64 || text.length > 100
+      imageBase64 || spreadsheetUploaded || text.length > 100
         ? []
         : /(^|\s)(כולם|כל המשפחה|כל בני המשפחה)(\s|$|[.,!])/.test(text)
           ? [...CHILDREN]
@@ -483,12 +545,12 @@ export async function POST(request: NextRequest) {
     const replyKids: Child[] | null = (() => {
       // Only while a draft is waiting for its owner, and only for a short free-text reply that does not
       // itself carry a new time (so a new schedule pasted mid-conversation still goes to the model).
-      if (imageBase64 || previousDraft.events.length === 0 || text.length > 100) return null;
+      if (imageBase64 || spreadsheetUploaded || previousDraft.events.length === 0 || text.length > 100) return null;
       if (/\d{1,2}[:.]\d{2}/.test(text)) return null;
       // Free text like "זה תספורת לגוני תשבצי על רועי": the pending date/time stay as they are, and the
       // reply is NOT re-parsed for date/time. One or more mentioned names are enough.
       if (mentionedKids.length >= 1) return mentionedKids;
-      if (/^(כן|בטח|אישור|סבבה|אוקיי|אוקי|ok)[.!]?$/i.test(text)) {
+      if (CONFIRM_YES_RE.test(text)) {
         const lastAssistant = [...history].reverse().find((h) => h.role === "assistant")?.content ?? "";
         const m = lastAssistant.match(/לשבץ[^?]*עבור (רביד|עמית|אלין|רועי|סיון)\?/);
         const c = m ? normalizeChild(m[1]) : null;
@@ -505,8 +567,42 @@ export async function POST(request: NextRequest) {
     const patterns = replyChild ? [] : await loadPatterns();
 
     let draft: Draft;
-    if (replyChild) {
-      draft = { ...previousDraft, child_name: replyChild };
+    if (spreadsheetUploaded) {
+      let parsed;
+      try {
+        parsed = parseFixtureWorkbook(Buffer.from(fileBase64, "base64"), fileName);
+      } catch (e) {
+        console.error("[agent] spreadsheet parse failed", e);
+        return NextResponse.json(
+          { success: false, error: "לא הצלחתי לקרוא את קובץ האקסל. ודאו שזה xlsx/xls/csv תקין." },
+          { status: 400 },
+        );
+      }
+      if (!parsed.games.length) {
+        return NextResponse.json({
+          success: false,
+          missing_fields: ["events"],
+          question: `לא מצאתי משחקים של ${FIXTURE_TEAM_NAME} בקובץ. חפשו עמודות תאריך (D), מחזור (E), שעה (F), בית/חוץ או קבוצות (G/I) וכתובת (K).`,
+          draft: emptyDraft(),
+          quick_replies: [],
+        });
+      }
+      draft = {
+        events: parsed.games.map((g) => ({
+          date: g.date,
+          time: g.time,
+          title: g.title,
+          type: "sport" as EventType,
+          keyword: normalizeLeagueKey(g.league) || normalizeLeagueKey(parsed.league) || FIXTURE_TEAM_NAME,
+        })),
+        child_name: null,
+        sender_or_group: fixtureSenderKey(parsed.league),
+        needs_confirm: true,
+        import_kind: "fixtures",
+        league: parsed.league,
+      };
+    } else if (replyChild) {
+      draft = { ...previousDraft, child_name: replyChild, needs_confirm: false };
       // The user clarified it is for Johnny: make the saved title say so ("תספורת" -> "תספורת לג'וני").
       if (/ג['׳’]?וני/.test(text)) {
         draft.events = draft.events.map((e) => {
@@ -518,6 +614,14 @@ export async function POST(request: NextRequest) {
           };
         });
       }
+    } else if (
+      previousDraft.import_kind === "fixtures" &&
+      previousDraft.events.length > 0 &&
+      !imageBase64 &&
+      text.length < 100 &&
+      !/\d{1,2}[:.]\d{2}/.test(text)
+    ) {
+      draft = { ...previousDraft };
     } else {
       const prompt = buildPrompt(text, previousDraft, history, patterns);
       const parsed = (await runModel(prompt, imageBase64 ? { data: imageBase64, mime: imageMime } : null)) as
@@ -535,17 +639,21 @@ export async function POST(request: NextRequest) {
         events: fromModel.events.length > 0 ? fromModel.events : previousDraft.events,
         child_name: verifiedModelChild ?? previousDraft.child_name,
         sender_or_group: fromModel.sender_or_group ?? previousDraft.sender_or_group,
+        needs_confirm: previousDraft.needs_confirm === true,
+        import_kind: previousDraft.import_kind,
+        league: previousDraft.league,
       };
     }
 
     if (multiKids) draft.child_name = multiKids[0];
-    enrichGenericTitles(draft, text);
+    if (draft.import_kind !== "fixtures") enrichGenericTitles(draft, text);
 
     // Dog / general family events on first sight: never trust a guessed owner (e.g. from "היי רועי"),
     // never use memory. Always ask. Once the user answers (next turn) the answer is trusted.
     const mustAsk =
       !replyChild &&
       !multiKids &&
+      draft.import_kind !== "fixtures" &&
       previousDraft.events.length === 0 &&
       draft.events.some((e) => isGeneralEvent(e, text, draft.sender_or_group));
     if (mustAsk) {
@@ -558,7 +666,7 @@ export async function POST(request: NextRequest) {
     let suggestedChild: Child | null = null;
     let childFromMemory = false;
     if (!draft.child_name && !mustAsk) {
-      const hay = [text, ...draft.events.flatMap((e) => [e.keyword, e.title])];
+      const hay = [text, draft.league ?? null, ...draft.events.flatMap((e) => [e.keyword, e.title])];
       const matches = matchPatterns(patterns, draft.sender_or_group, hay);
       const autoKids = [...new Set(matches.filter((p) => p.auto_assign).map((p) => normalizeChild(p.child_name)))].filter(
         (c): c is Child => c !== null,
@@ -571,11 +679,24 @@ export async function POST(request: NextRequest) {
       }
     }
 
+    if (draft.import_kind === "fixtures" && draft.needs_confirm) {
+      const confirming =
+        Boolean(replyChild) ||
+        Boolean(multiKids) ||
+        (CONFIRM_YES_RE.test(text) && Boolean(draft.child_name || suggestedChild));
+      if (confirming) {
+        if (!draft.child_name && suggestedChild) draft.child_name = suggestedChild;
+        draft.needs_confirm = false;
+      } else if (draft.child_name) {
+        suggestedChild = draft.child_name;
+      }
+    }
+
     const missing: string[] = [];
     if (draft.events.length === 0) missing.push("events");
     if (draft.events.some((e) => !e.date)) missing.push("date");
     if (draft.events.some((e) => !e.time)) missing.push("time");
-    if (!draft.child_name) missing.push("child_name");
+    if (!draft.child_name || draft.needs_confirm) missing.push("child_name");
 
     if (missing.length > 0) {
       const confirmOnly = missing.length === 1 && missing[0] === "child_name" && suggestedChild;
@@ -586,7 +707,9 @@ export async function POST(request: NextRequest) {
               `כן, עבור ${CHILD_LABEL[suggestedChild]}`,
               ...CHILDREN.filter((c) => c !== suggestedChild).map((c) => `עבור ${CHILD_LABEL[c]}`),
             ]
-          : isGirlsGroup(draft.sender_or_group)
+          : draft.import_kind === "fixtures"
+            ? ["רביד", "עמית", "אלין"]
+            : isGirlsGroup(draft.sender_or_group)
             ? ["עמית", "אלין", "עמית ואלין", "רביד", "רועי", "סיון"]
             : [...CHILDREN.map((c) => CHILD_LABEL[c]), "כולם"];
       return NextResponse.json({
@@ -641,7 +764,10 @@ export async function POST(request: NextRequest) {
       await Promise.race([
         insertAll,
         new Promise<never>((_, reject) => {
-          insertTimer = setTimeout(() => reject(new Error("DB insert timed out after 6s")), 6000);
+          insertTimer = setTimeout(
+            () => reject(new Error("DB insert timed out after 6s")),
+            rowsToInsert.length > 8 ? 12000 : 6000,
+          );
         }),
       ]);
     } catch (dbError) {
@@ -663,12 +789,16 @@ export async function POST(request: NextRequest) {
     after(async () => {
       // Learning only makes sense for a single, unambiguous owner.
       if (kids.length === 1) {
-        await learnPattern(
-          learnEvents.flatMap((e) => [e.keyword, e.title]),
-          learnSender,
-          child,
-          learnEvents.find((e) => e.type)?.type ?? null,
-        );
+        if (draft.import_kind === "fixtures") {
+          await learnFixtureAssignment(draft.league ?? null, child);
+        } else {
+          await learnPattern(
+            learnEvents.flatMap((e) => [e.keyword, e.title]),
+            learnSender,
+            child,
+            learnEvents.find((e) => e.type)?.type ?? null,
+          );
+        }
       }
       try {
         await sendPushToAll(

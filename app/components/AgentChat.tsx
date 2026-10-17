@@ -1,8 +1,13 @@
 "use client";
 import React, { useEffect, useRef, useState } from "react";
-import { Bot, ImagePlus, Send, Sparkles, X } from "lucide-react";
+import { Bot, FileSpreadsheet, ImagePlus, Send, Sparkles, X } from "lucide-react";
 
-type Msg = { role: "user" | "assistant"; content: string; image?: string };
+type Msg = { role: "user" | "assistant"; content: string; image?: string; fileName?: string };
+type SpreadsheetAttach = { dataUrl: string; name: string; mime: string };
+
+const SPREADSHEET_RE = /\.(xlsx|xls|csv)$/i;
+const isSpreadsheetFile = (file: File) =>
+  SPREADSHEET_RE.test(file.name) || /spreadsheet|excel|csv/i.test(file.type);
 type Draft = Record<string, unknown> | null;
 
 const CHILD_BUTTONS = ["רביד", "עמית", "אלין"];
@@ -40,11 +45,13 @@ export default function AgentChat({ onSaved }: { onSaved?: (events: AgentSavedEv
   const [messages, setMessages] = useState<Msg[]>([
     {
       role: "assistant",
-      content: "היי! כתבו או העלו צילום מסך של אירוע, ואני אשבץ אותו בלו״ז. למשל: ״אימון כדורסל מחר ב-18:00״.",
+      content:
+        "היי! כתבו, העלו צילום מסך, או קובץ אקסל של משחקים (למשל לוח בני יהודה) ואני אשבץ בלו״ז אחרי שתאשרו מה שזיהיתי.",
     },
   ]);
   const [input, setInput] = useState("");
   const [image, setImage] = useState<string | null>(null); // data URL
+  const [spreadsheet, setSpreadsheet] = useState<SpreadsheetAttach | null>(null);
   const [draft, setDraft] = useState<Draft>(null);
   const [quickReplies, setQuickReplies] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
@@ -66,18 +73,40 @@ export default function AgentChat({ onSaved }: { onSaved?: (events: AgentSavedEv
   }, [open]);
 
   const attach = async (file: File | undefined | null) => {
-    if (!file || !file.type.startsWith("image/")) return;
-    setImage(await fileToBase64(file));
+    if (!file) return;
+    if (file.type.startsWith("image/")) {
+      setSpreadsheet(null);
+      setImage(await fileToBase64(file));
+      return;
+    }
+    if (isSpreadsheetFile(file)) {
+      setImage(null);
+      setSpreadsheet({
+        dataUrl: await fileToBase64(file),
+        name: file.name,
+        mime: file.type || "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      });
+    }
   };
 
   const send = async (override?: string) => {
     const text = (override ?? input).trim();
-    if ((!text && !image) || busy) return;
+    if ((!text && !image && !spreadsheet) || busy) return;
     const sentImage = image;
+    const sentFile = spreadsheet;
     const history = messages.slice(-8).map((m) => ({ role: m.role, content: m.content }));
-    setMessages((prev) => [...prev, { role: "user", content: text || "(צילום מסך)", image: sentImage ?? undefined }]);
+    setMessages((prev) => [
+      ...prev,
+      {
+        role: "user",
+        content: text || (sentFile ? `קובץ: ${sentFile.name}` : "(צילום מסך)"),
+        image: sentImage ?? undefined,
+        fileName: sentFile?.name,
+      },
+    ]);
     setInput("");
     setImage(null);
+    setSpreadsheet(null);
     // Quick replies stay visible until the server answers (and come back if the request fails),
     // so the question never loses its buttons.
     setBusy(true);
@@ -91,6 +120,9 @@ export default function AgentChat({ onSaved }: { onSaved?: (events: AgentSavedEv
           draft,
           imageBase64: sentImage ?? undefined,
           imageMimeType: sentImage?.match(/^data:([^;]+);/)?.[1],
+          fileBase64: sentFile?.dataUrl,
+          fileName: sentFile?.name,
+          fileMimeType: sentFile?.mime,
         }),
       });
       const raw = await res.text();
@@ -170,6 +202,11 @@ export default function AgentChat({ onSaved }: { onSaved?: (events: AgentSavedEv
                     // eslint-disable-next-line @next/next/no-img-element
                     <img src={m.image} alt="צילום מסך" className="mb-1 max-h-32 rounded-lg" />
                   )}
+                  {m.fileName && (
+                    <div className="mb-1 flex items-center gap-1 text-xs opacity-90">
+                      <FileSpreadsheet size={14} /> {m.fileName}
+                    </div>
+                  )}
                   {m.content}
                 </div>
               </div>
@@ -210,12 +247,21 @@ export default function AgentChat({ onSaved }: { onSaved?: (events: AgentSavedEv
                 </button>
               </div>
             )}
+            {spreadsheet && (
+              <div className="mb-2 flex items-center gap-2 rounded-lg border border-indigo-100 bg-indigo-50 px-2 py-1">
+                <FileSpreadsheet size={16} className="text-indigo-600" />
+                <span className="min-w-0 flex-1 truncate text-xs font-semibold text-indigo-800">{spreadsheet.name}</span>
+                <button type="button" onClick={() => setSpreadsheet(null)} className="text-xs text-slate-500 underline">
+                  הסר קובץ
+                </button>
+              </div>
+            )}
             <div className="flex items-center gap-2">
               <label className="cursor-pointer rounded-xl border border-slate-200 p-2 text-slate-600 hover:bg-slate-50">
                 <ImagePlus size={18} />
                 <input
                   type="file"
-                  accept="image/*"
+                  accept="image/*,.xlsx,.xls,.csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel,text/csv"
                   className="hidden"
                   onChange={(e) => {
                     void attach(e.target.files?.[0]);
@@ -236,13 +282,13 @@ export default function AgentChat({ onSaved }: { onSaved?: (events: AgentSavedEv
                     void attach(f);
                   }
                 }}
-                placeholder={quickReplies.length ? `${CHILD_BUTTONS.join(" / ")} או הקלידו תשובה...` : "הקלידו או גררו תמונה..."}
+                placeholder={quickReplies.length ? `${CHILD_BUTTONS.join(" / ")} או הקלידו תשובה...` : "הקלידו, גררו תמונה או קובץ אקסל..."}
                 className="min-w-0 flex-1 rounded-xl border border-slate-200 px-3 py-2 text-sm outline-none focus:border-indigo-400"
               />
               <button
                 type="button"
                 onClick={() => void send()}
-                disabled={busy || (!input.trim() && !image)}
+                disabled={busy || (!input.trim() && !image && !spreadsheet)}
                 className="rounded-xl bg-indigo-600 p-2 text-white transition hover:bg-indigo-700 disabled:opacity-50"
                 aria-label="שלח"
               >
