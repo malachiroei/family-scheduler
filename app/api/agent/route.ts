@@ -9,6 +9,7 @@ import {
   normalizeLeagueKey,
   parseFixtureWorkbook,
 } from "@/app/lib/parseFixtureWorkbook";
+import { classifyFixtureLeague } from "@/app/lib/fixtureLeague";
 
 export const revalidate = 0;
 export const maxDuration = 30;
@@ -40,6 +41,7 @@ type DraftEvent = {
   title: string | null;
   type: EventType | null;
   keyword: string | null;
+  league?: string | null;
 };
 
 type Draft = {
@@ -144,6 +146,7 @@ const sanitizeEvent = (raw: unknown): DraftEvent => {
     title: str(o.title, 280),
     type: normalizeType(o.type),
     keyword: str(o.keyword, 40),
+    league: str(o.league, 80),
   };
 };
 
@@ -478,7 +481,14 @@ const buildQuestion = (draft: Draft, missing: string[], suggestedChild: Child | 
     const previewLimit = draft.import_kind === "fixtures" ? 12 : complete.length;
     const preview = complete.slice(0, previewLimit).map((e) => `• ${describeEvent(e)}`).join("\n");
     const extra = complete.length > previewLimit ? `\n(+${complete.length - previewLimit} נוספים)` : "";
-    const leagueBit = draft.league ? ` בליגת ${draft.league}` : "";
+    const kind = classifyFixtureLeague(draft.league);
+    const kindHint =
+      kind === "katsal"
+        ? " — שנתון צעיר, תגבור (לא הליגה הראשית)"
+        : kind === "girls"
+          ? " — הליגה הראשית של הבנות"
+          : "";
+    const leagueBit = draft.league ? ` בליגת ${draft.league}${kindHint}` : kindHint;
     const summary =
       draft.import_kind === "fixtures"
         ? `זיהיתי ${complete.length} משחקים של ${FIXTURE_TEAM_NAME}${leagueBit}:\n${preview}${extra}\n\nזה מה שזיהיתי מהקובץ.`
@@ -594,6 +604,7 @@ export async function POST(request: NextRequest) {
           title: g.title,
           type: "sport" as EventType,
           keyword: normalizeLeagueKey(g.league) || normalizeLeagueKey(parsed.league) || FIXTURE_TEAM_NAME,
+          league: g.league,
         })),
         child_name: null,
         sender_or_group: fixtureSenderKey(parsed.league),
@@ -745,6 +756,7 @@ export async function POST(request: NextRequest) {
         reminderLeadMinutes: null,
         userId: "agent",
         notified: false,
+        league: e.league ?? draft.league ?? null,
       });
       rowsToInsert.push({ id, title, date, metadata });
       saved.push({ id, title, date, time, child: kid, type });

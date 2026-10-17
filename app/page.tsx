@@ -5,6 +5,7 @@ import { Dog, Dumbbell, Music, GraduationCap, Trophy, Printer, MessageCircle, Ch
 import html2canvas from 'html2canvas';
 import AgentChat from '@/app/components/AgentChat';
 import { normalizeMetadataTime, parseMetadataBoolean } from '@/app/lib/scheduleTime';
+import { fixtureLeagueBadge } from '@/app/lib/fixtureLeague';
 
 const baseChildrenConfig = {
   ravid: { name: 'רביד', color: 'bg-blue-500', iconColor: 'text-blue-500' },
@@ -33,6 +34,7 @@ type SchedulerEvent = {
   sendNotification?: boolean;
   requireConfirmation?: boolean;
   reminderLeadMinutes?: ReminderLeadMinutes;
+  league?: string;
 };
 
 type DaySchedule = {
@@ -184,6 +186,7 @@ type ScheduleApiEvent = {
   sendNotification?: boolean;
   requireConfirmation?: boolean;
   reminderLeadMinutes?: ReminderLeadMinutes;
+  league?: string;
 };
 
 type BeforeInstallPromptEvent = Event & {
@@ -3094,6 +3097,7 @@ export default function FamilyScheduler() {
           sendNotification: event.sendNotification ?? true,
           requireConfirmation: Boolean(event.requireConfirmation),
           reminderLeadMinutes: sanitizeReminderLead(event.reminderLeadMinutes),
+          league: event.league,
         };
         const dayEvents = weekDays[dayIndex].events;
         const existingIdx = dayEvents.findIndex((e) => e.id === mapped.id);
@@ -4949,6 +4953,7 @@ export default function FamilyScheduler() {
               {visibleEvents.map((event) => {
                 const mainIconColor = baseChildrenConfig[getChildKeys(event.child)[0]].iconColor;
                 const eventLink = typeof event.zoomLink === 'string' ? event.zoomLink.trim() : '';
+                const leagueBadge = fixtureLeagueBadge(`${event.league || ''} ${event.title || ''}`);
                 return (
                   <div
                     key={event.id}
@@ -4972,7 +4977,9 @@ export default function FamilyScheduler() {
                         originalChild: normalizeChildForSave(String(event.child)),
                       });
                     }}
-                    className="w-full text-right flex items-center justify-between p-3 rounded-2xl bg-slate-50 border border-transparent hover:border-slate-200 transition print:pointer-events-none print-event-item"
+                    className={`w-full text-right flex items-center justify-between p-3 rounded-2xl border transition print:pointer-events-none print-event-item ${
+                      leagueBadge ? `${leagueBadge.wrapClass} hover:brightness-[0.98]` : 'bg-slate-50 border-transparent hover:border-slate-200'
+                    }`}
                   >
                     <span className="text-slate-500 font-medium text-sm w-14">{event.time}</span>
                     <div className="flex-1 min-w-0 flex items-start gap-3">
@@ -4981,6 +4988,9 @@ export default function FamilyScheduler() {
                         <div className="flex items-center gap-2 flex-wrap min-w-0">
                           {event.completed && (
                             <span className={`${statusPillClassName} text-emerald-700 bg-emerald-50 border-emerald-200`}>בוצע</span>
+                          )}
+                          {leagueBadge && (
+                            <span className={`${statusPillClassName} ${leagueBadge.pillClass}`}>{leagueBadge.text}</span>
                           )}
                           <span className="text-slate-700 font-semibold text-sm break-words whitespace-pre-wrap max-w-full">{event.title}</span>
                           {event.sendNotification !== false && (
@@ -5152,6 +5162,7 @@ export default function FamilyScheduler() {
                     const childName = childKey ? baseChildrenConfig[childKey].name : String(ev.child);
                     const now = new Date();
                     const past = isEventStartInPast(ev, now);
+                    const leagueBadge = fixtureLeagueBadge(`${ev.league || ''} ${ev.title || ''}`);
                     return (
                       <li
                         key={ev.id}
@@ -5175,6 +5186,9 @@ export default function FamilyScheduler() {
                         </button>
                         <div className="flex-1 min-w-0">
                           <div className="flex flex-wrap items-center gap-2 justify-end">
+                            {leagueBadge && (
+                              <span className={`${statusPillClassName} ${leagueBadge.pillClass}`}>{leagueBadge.text}</span>
+                            )}
                             <span className="text-sm font-extrabold text-slate-900 break-words">{ev.title}</span>
                             {ev.completed && (
                               <span className="text-[10px] font-bold px-2 py-0.5 rounded-full border border-emerald-200 bg-emerald-50 text-emerald-800">בוצע</span>

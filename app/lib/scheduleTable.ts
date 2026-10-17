@@ -17,6 +17,8 @@ export type ScheduleEventMetadata = {
   userId: string;
   /** Set by reminder sweep after a push was sent */
   notified?: boolean;
+  /** Basketball fixture league, e.g. "ילדות ב תל אביב" or "קט סל א בנות" */
+  league?: string | null;
 };
 
 const defaultMetadata = (): ScheduleEventMetadata => ({
@@ -34,6 +36,7 @@ const defaultMetadata = (): ScheduleEventMetadata => ({
   reminderLeadMinutes: null,
   userId: "system",
   notified: false,
+  league: null,
 });
 
 export const parseScheduleMetadata = (raw: unknown): ScheduleEventMetadata => {
@@ -88,6 +91,7 @@ export const parseScheduleMetadata = (raw: unknown): ScheduleEventMetadata => {
           : null,
     userId: typeof o.userId === "string" && o.userId.trim() ? o.userId.trim() : typeof o.user_id === "string" && o.user_id.trim() ? o.user_id.trim() : base.userId,
     notified: parseMetadataBoolean(o.notified),
+    league: typeof o.league === "string" && o.league.trim() ? o.league.trim() : null,
   };
 };
 
@@ -106,6 +110,7 @@ export const buildMetadataFromIncoming = (incoming: {
   reminderLeadMinutes: number | null;
   userId: string;
   notified?: boolean;
+  league?: string | null;
 }): ScheduleEventMetadata => {
   const recurring = parseMetadataBoolean(incoming.isRecurring);
   return {
@@ -123,6 +128,7 @@ export const buildMetadataFromIncoming = (incoming: {
     reminderLeadMinutes: incoming.reminderLeadMinutes,
     userId: incoming.userId,
     notified: incoming.notified ?? false,
+    league: incoming.league ?? null,
   };
 };
 

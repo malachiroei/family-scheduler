@@ -643,6 +643,7 @@ const upsertScheduleEvent = async (incoming: ReturnType<typeof sanitizeDbEvent>)
         sendNotification: meta.sendNotification,
         requireConfirmation: meta.needsAck ?? meta.requireConfirmation,
         reminderLeadMinutes: parseReminderLeadMinutes(meta.reminderLeadMinutes),
+        league: meta.league ?? undefined,
       },
     };
   } catch (error) {
@@ -755,6 +756,7 @@ async function handleGet() {
         sendNotification: meta.sendNotification,
         requireConfirmation: meta.needsAck ?? meta.requireConfirmation,
         reminderLeadMinutes: parseReminderLeadMinutes(meta.reminderLeadMinutes),
+        league: meta.league ?? undefined,
       };
     });
 

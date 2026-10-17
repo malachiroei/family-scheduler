@@ -1,4 +1,5 @@
 import { inflateRawSync } from "zlib";
+import { classifyFixtureLeague, compactLeagueLabel } from "./fixtureLeague";
 
 /** Family team this importer is built around. */
 export const FIXTURE_TEAM_NAME = "בני יהודה";
@@ -183,7 +184,15 @@ const headerRowIndex = (rows: unknown[][], cols: ColMap) => {
 
 const buildTitle = (game: Omit<FixtureGame, "title">): string => {
   const roundBit = game.round ? ` (מחזור ${game.round})` : "";
-  const head = `משחק ${game.homeAway} מול ${game.opponent}${roundBit}`;
+  const where = `${game.homeAway} מול ${game.opponent}${roundBit}`;
+  const label = compactLeagueLabel(game.league);
+  const kind = classifyFixtureLeague(game.league);
+  const head =
+    kind === "katsal"
+      ? `${label || "קט-סל"} · תגבור · ${where}`
+      : label
+        ? `${label} · ${where}`
+        : `משחק ${where}`;
   return game.venue ? `${head}\n${game.venue}` : head;
 };
 
