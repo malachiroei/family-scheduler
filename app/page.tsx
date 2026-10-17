@@ -1,5 +1,5 @@
 "use client";
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import Image from 'next/image';
 import { Dog, Dumbbell, Music, GraduationCap, Trophy, Printer, MessageCircle, ChevronRight, ChevronLeft, X, Plus, CalendarDays, Settings, RefreshCw, Video, ClipboardList, Trash2, Share2 } from 'lucide-react';
 import html2canvas from 'html2canvas';
@@ -1894,7 +1894,7 @@ export default function FamilyScheduler() {
   const autoRefetchInFlightRef = useRef(false);
   const autoRefetchWeekKeyRef = useRef<string>('');
   const dayCardRefs = useRef<Array<HTMLDivElement | null>>([]);
-  const hasAutoScrolledToTodayRef = useRef(false);
+  const scheduleShellRef = useRef<HTMLDivElement | null>(null);
   const autoSyncPushProfileInFlightRef = useRef(false);
   const canViewPresencePanel = isParentPushUser(pushUserName);
 
@@ -3888,7 +3888,7 @@ export default function FamilyScheduler() {
       });
   }, [weekKey, isHydrated]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!isHydrated || days.length === 0 || showScheduleLoading) {
       return;
     }
@@ -3902,7 +3902,6 @@ export default function FamilyScheduler() {
     const todayIndex = days.findIndex((day) => day.isoDate === todayIso);
     const index = todayIndex >= 0 ? todayIndex : today.getDay();
     let cancelled = false;
-    hasAutoScrolledToTodayRef.current = false;
 
     const scrollToToday = () => {
       if (cancelled) {
@@ -3912,25 +3911,22 @@ export default function FamilyScheduler() {
       if (!targetDayCard) {
         return false;
       }
-      targetDayCard.scrollIntoView({ behavior: 'smooth', block: 'start', inline: 'nearest' });
-      const top = targetDayCard.getBoundingClientRect().top + window.scrollY - 16;
-      window.scrollTo({ top: Math.max(0, top), behavior: 'smooth' });
-      hasAutoScrolledToTodayRef.current = true;
+      const scroller = scheduleShellRef.current
+        ?? targetDayCard.closest('.print-scheduler-shell')
+        ?? (document.scrollingElement as HTMLElement | null);
+      if (scroller) {
+        const scrollerRect = scroller.getBoundingClientRect();
+        const targetRect = targetDayCard.getBoundingClientRect();
+        const top = scroller.scrollTop + (targetRect.top - scrollerRect.top) - 12;
+        scroller.scrollTo({ top: Math.max(0, top), behavior: 'auto' });
+      } else {
+        targetDayCard.scrollIntoView({ behavior: 'auto', block: 'start', inline: 'nearest' });
+      }
       return true;
     };
 
-    const timers = [0, 80, 250, 600, 1200].map((delay) =>
-      window.setTimeout(() => {
-        requestAnimationFrame(() => {
-          requestAnimationFrame(() => {
-            if (!cancelled) {
-              scrollToToday();
-            }
-          });
-        });
-      }, delay),
-    );
-
+    scrollToToday();
+    const timers = [50, 200, 500, 1000, 2000].map((delay) => window.setTimeout(scrollToToday, delay));
     return () => {
       cancelled = true;
       timers.forEach((timer) => window.clearTimeout(timer));
@@ -5014,7 +5010,12 @@ export default function FamilyScheduler() {
   };
 
   return (
-    <div className="print-scheduler-shell h-dvh overscroll-y-none overflow-y-auto bg-[#f8fafc] px-3 pt-12 pb-20 md:px-4 md:pt-14 md:pb-24 dir-rtl" dir="rtl">
+    <div
+      ref={scheduleShellRef}
+      id="app-scroll-root"
+      className="print-scheduler-shell h-dvh overscroll-y-none overflow-y-auto bg-[#f8fafc] px-3 pt-12 pb-20 md:px-4 md:pt-14 md:pb-24 dir-rtl"
+      dir="rtl"
+    >
       <button
         type="button"
         onClick={() => { void handleManualRefresh(); }}
