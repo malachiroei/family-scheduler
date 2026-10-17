@@ -1,6 +1,7 @@
 /**
  * Configurable family roster.
- * Priority: DB (`scheduler_state` / family_roster) → NEXT_PUBLIC_FAMILY_MEMBERS → generic placeholders.
+ * Priority: DB (`scheduler_state` / family_roster) → NEXT_PUBLIC_FAMILY_MEMBERS →
+ * original household (when NEXT_PUBLIC_ENABLE_BUILTIN_JOHNNY is on) → generic placeholders.
  */
 
 export type FamilyRole = "child" | "parent";
@@ -42,8 +43,27 @@ export const COLOR_PALETTE = [
   { color: "bg-rose-500", iconColor: "text-rose-500" },
 ] as const;
 
-const DEFAULT_CHILDREN = ["ילד 1", "ילד 2"] as const;
-const DEFAULT_PARENTS = ["הורה 1", "הורה 2"] as const;
+export const isOriginalHouseholdEnabled = () => {
+  const raw = String(process.env.NEXT_PUBLIC_ENABLE_BUILTIN_JOHNNY ?? "").trim().toLowerCase();
+  if (raw === "1" || raw === "true" || raw === "yes") {
+    return true;
+  }
+  const host = [
+    process.env.NEXT_PUBLIC_VERCEL_PROJECT_PRODUCTION_URL,
+    process.env.NEXT_PUBLIC_VERCEL_URL,
+  ]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase();
+  return /family-scheduler-topaz/.test(host);
+};
+
+const ORIGINAL_CHILDREN = ["רביד", "עמית", "אלין"] as const;
+const ORIGINAL_PARENTS = ["סיון", "רועי"] as const;
+const GENERIC_CHILDREN = ["ילד 1", "ילד 2"] as const;
+const GENERIC_PARENTS = ["הורה 1", "הורה 2"] as const;
+const DEFAULT_CHILDREN = isOriginalHouseholdEnabled() ? ORIGINAL_CHILDREN : GENERIC_CHILDREN;
+const DEFAULT_PARENTS = isOriginalHouseholdEnabled() ? ORIGINAL_PARENTS : GENERIC_PARENTS;
 
 type KnownSpec = { key: string; role: FamilyRole; aliases: string[]; pushName?: string };
 

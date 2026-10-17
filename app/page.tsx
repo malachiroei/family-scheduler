@@ -11,6 +11,7 @@ import {
   createFamilyRoster,
   escapeRegExp,
   fallbackRoster,
+  isOriginalHouseholdEnabled,
   type FamilyRoster,
   type StoredFamilyMember,
 } from '@/app/lib/familyMembers';
@@ -1643,10 +1644,7 @@ type CreateWeekDaysOptions = {
   johnnySuppressedIds?: Set<string>;
 };
 
-const isBuiltinJohnnyEnabled = () => {
-  const raw = String(process.env.NEXT_PUBLIC_ENABLE_BUILTIN_JOHNNY ?? "").trim().toLowerCase();
-  return raw === "1" || raw === "true" || raw === "yes";
-};
+const isBuiltinJohnnyEnabled = () => isOriginalHouseholdEnabled();
 
 const createWeekDays = (
   weekStart: Date,
@@ -1750,7 +1748,7 @@ export default function FamilyScheduler() {
   const [weekStart, setWeekStart] = useState(initialWeekStart);
   const [recurringTemplates, setRecurringTemplates] = useState<RecurringTemplate[]>([]);
   const [weeksData, setWeeksData] = useState<Record<string, DaySchedule[]>>(() => ({
-    [initialWeekKey]: createEmptyWeekDays(initialWeekStart),
+    [initialWeekKey]: createWeekDays(initialWeekStart, false, [], { skipDefaultRecurringTemplates: true }),
   }));
   const [scheduleLoadedWeekKey, setScheduleLoadedWeekKey] = useState<string | null>(null);
   const [scheduleLoadError, setScheduleLoadError] = useState<string | null>(null);
@@ -2171,7 +2169,7 @@ export default function FamilyScheduler() {
         setWeekStart(initialWeekStart);
         setRecurringTemplates([]);
         setWeeksData({
-          [toIsoDate(initialWeekStart)]: createEmptyWeekDays(initialWeekStart),
+          [toIsoDate(initialWeekStart)]: createWeekDays(initialWeekStart, false, [], { skipDefaultRecurringTemplates: true }),
         });
       }
     };
@@ -3172,6 +3170,7 @@ export default function FamilyScheduler() {
       setRecurringTemplates(templates);
       setWeeksData((prev) => ({ ...prev, [targetWeekKey]: weekDays }));
       setScheduleLoadError(null);
+      return true;
     } catch (error) {
       console.error('[API] GET /api/schedule client failed', error);
       const aborted = controller.signal.aborted || (error instanceof Error && error.name === 'AbortError');
@@ -3181,7 +3180,7 @@ export default function FamilyScheduler() {
           ? error.message
           : 'טעינת הלו״ז נכשלה.';
       setScheduleLoadError(friendly);
-      throw aborted ? new Error(friendly) : error;
+      return false;
     } finally {
       clearTimeout(timeoutId);
       // Always leave the loading state, on success, error and timeout alike.
@@ -3222,14 +3221,13 @@ export default function FamilyScheduler() {
 
     setIsRefreshing(true);
     try {
-      await refetchEventsFromDatabase(weekStart);
-      setSuccessMessage('הלוח עודכן.');
-      if (apiError) {
-        setApiError('');
+      const ok = await refetchEventsFromDatabase(weekStart);
+      if (ok) {
+        setSuccessMessage('הלוח עודכן.');
+        if (apiError) {
+          setApiError('');
+        }
       }
-    } catch (error) {
-      const message = error instanceof Error ? error.message : 'רענון הלו״ז נכשל';
-      setApiError(message);
     } finally {
       setIsRefreshing(false);
     }
@@ -3746,10 +3744,6 @@ export default function FamilyScheduler() {
 
     const targetWeekStart = new Date(`${weekKey}T00:00:00`);
     void refetchEventsFromDatabase(targetWeekStart)
-      .catch((error) => {
-        const message = error instanceof Error ? error.message : 'Failed to refetch events';
-        setApiError(message);
-      })
       .finally(() => {
         autoRefetchInFlightRef.current = false;
       });
@@ -4930,37 +4924,22 @@ export default function FamilyScheduler() {
           מסנכרן…
         </div>
       )}
-      {scheduleLoadError && !boardIsEmpty && (
-        <div className="max-w-6xl mx-auto mb-3 flex items-center justify-between gap-3 rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700 print:hidden">
-          <span>הסנכרון עם השרת נכשל: {scheduleLoadError}</span>
+      {scheduleLoadError ? (
+        <div className="max-w-6xl mx-auto mb-3 flex items-center justify-between gap-3 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900 print:hidden">
+          <span>הסנכרון עם השרת נכשל זמנית: {scheduleLoadError}</span>
           <button
             type="button"
-            onClick={() => { void refetchEventsFromDatabase(weekStart).catch(() => {}); }}
-            className="shrink-0 rounded-lg bg-red-600 px-3 py-1 text-xs font-bold text-white hover:bg-red-700 transition"
+            onClick={() => { void refetchEventsFromDatabase(weekStart); }}
+            className="shrink-0 rounded-lg bg-amber-700 px-3 py-1 text-xs font-bold text-white hover:bg-amber-800 transition"
           >
             נסה שוב
           </button>
         </div>
-      )}
+      ) : null}
       {showScheduleLoading ? (
         <div className="max-w-6xl mx-auto py-16 flex flex-col items-center justify-center gap-2 text-slate-600 print:hidden">
           <RefreshCw size={22} className="animate-spin text-indigo-600" aria-hidden />
           <span className="text-sm font-semibold">טוען לו״ז מהשרת…</span>
-        </div>
-      ) : scheduleLoadError && boardIsEmpty ? (
-        <div className="max-w-6xl mx-auto py-16 flex flex-col items-center justify-center gap-3 text-center print:hidden">
-          <span className="text-base font-bold text-red-600">לא הצלחנו לטעון את הלו״ז</span>
-          <span className="text-sm text-slate-600">{scheduleLoadError}</span>
-          <button
-            type="button"
-            onClick={() => {
-              setScheduleLoadedWeekKey(null);
-              void refetchEventsFromDatabase(weekStart).catch(() => {});
-            }}
-            className="rounded-xl bg-indigo-600 px-5 py-2 text-sm font-bold text-white shadow hover:bg-indigo-700 transition"
-          >
-            נסה שוב
-          </button>
         </div>
       ) : (
       <div id="schedule-table" className="printable-schedule max-w-6xl mx-auto grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
