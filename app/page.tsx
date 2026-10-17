@@ -7,6 +7,7 @@ import AgentChat from '@/app/components/AgentChat';
 import FamilyRosterEditor from '@/app/components/FamilyRosterEditor';
 import AppBrandingEditor, { AppIconView } from '@/app/components/AppBrandingEditor';
 import { applyDocumentFavicon, appIconSrc, defaultAppBranding, mergeAppBranding, resolveShareImagePath, type AppBranding } from '@/app/lib/appBranding';
+import { clearPwaInstallPrompt, getPwaInstallPrompt, subscribePwaInstallPrompt } from '@/app/lib/pwaInstall';
 import { normalizeMetadataTime, parseMetadataBoolean } from '@/app/lib/scheduleTime';
 import { parseFlexibleDate } from '@/app/lib/scheduleDate';
 import { fixtureLeagueBadge } from '@/app/lib/fixtureLeague';
@@ -194,11 +195,6 @@ type ScheduleApiEvent = {
   requireConfirmation?: boolean;
   reminderLeadMinutes?: ReminderLeadMinutes;
   league?: string;
-};
-
-type BeforeInstallPromptEvent = Event & {
-  prompt: () => Promise<void>;
-  userChoice: Promise<{ outcome: 'accepted' | 'dismissed'; platform: string }>;
 };
 
 type PushUserName = string;
@@ -1883,8 +1879,9 @@ export default function FamilyScheduler() {
   const [parentWatchChildren, setParentWatchChildren] = useState<PushChildName[]>([...pushChildOptions()]);
   const [reminderLeadMinutes, setReminderLeadMinutes] = useState<ReminderLeadMinutes>(defaultPushLeadMinutes);
   const [pushSound, setPushSound] = useState<PushSoundPreset>(defaultPushSound);
-  const [installPromptEvent, setInstallPromptEvent] = useState<BeforeInstallPromptEvent | null>(null);
-  const [isInstallReady, setIsInstallReady] = useState(false);
+  const [installHint, setInstallHint] = useState('');
+  const [installBusy, setInstallBusy] = useState(false);
+  const [canPromptInstall, setCanPromptInstall] = useState(false);
   const [, setSubscriptionEndpoint] = useState("");
   const persistDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const requestInFlightRef = useRef(false);
@@ -2525,52 +2522,63 @@ export default function FamilyScheduler() {
   useEffect(() => {
     const standalone = window.matchMedia('(display-mode: standalone)').matches || Boolean((window.navigator as Navigator & { standalone?: boolean }).standalone);
     setIsStandaloneApp(standalone);
-    if (standalone) {
-      setIsInstallReady(false);
-      return;
-    }
 
-    const handleBeforeInstallPrompt = (event: Event) => {
-      event.preventDefault();
-      setInstallPromptEvent(event as BeforeInstallPromptEvent);
-      setIsInstallReady(true);
+    const syncPromptAvailability = () => {
+      setCanPromptInstall(Boolean(getPwaInstallPrompt()) && !standalone);
     };
+    syncPromptAvailability();
 
     const handleInstalled = () => {
-      setInstallPromptEvent(null);
-      setIsInstallReady(false);
-      setSuccessMessage('האפליקציה הותקנה בהצלחה.');
+      setIsStandaloneApp(true);
+      setCanPromptInstall(false);
+      setInstallHint('האפליקציה הותקנה בהצלחה.');
     };
 
-    window.addEventListener('beforeinstallprompt', handleBeforeInstallPrompt);
     window.addEventListener('appinstalled', handleInstalled);
+    const unsubscribe = subscribePwaInstallPrompt(syncPromptAvailability);
 
     return () => {
-      window.removeEventListener('beforeinstallprompt', handleBeforeInstallPrompt);
       window.removeEventListener('appinstalled', handleInstalled);
+      unsubscribe();
     };
   }, []);
 
   const installApp = async () => {
-    if (isStandaloneApp) {
-      setSuccessMessage('האפליקציה כבר מותקנת במסך הבית.');
-      return;
-    }
-    if (!installPromptEvent) {
-      setSuccessMessage("באייפון: כפתור השיתוף ← 'הוסף למסך הבית'. באנדרואיד: תפריט ⋮ ← 'התקן אפליקציה'.");
+    const promptEvent = getPwaInstallPrompt();
+    if (promptEvent) {
+      setInstallBusy(true);
+      setInstallHint('');
+      try {
+        await promptEvent.prompt();
+        const result = await promptEvent.userChoice;
+        clearPwaInstallPrompt();
+        setCanPromptInstall(false);
+        if (result.outcome === 'accepted') {
+          setInstallHint('מעולה! האפליקציה מתווספת למסך הבית.');
+        } else {
+          setInstallHint('ההתקנה בוטלה. אפשר לנסות שוב מתפריט ⋮ ב-Chrome.');
+        }
+      } catch {
+        setInstallHint('לא ניתן לפתוח את חלון ההתקנה כרגע. נסי דרך תפריט ⋮ ← התקן אפליקציה.');
+      } finally {
+        setInstallBusy(false);
+      }
       return;
     }
 
-    try {
-      await installPromptEvent.prompt();
-      const result = await installPromptEvent.userChoice;
-      if (result.outcome === 'accepted') {
-        setSuccessMessage('ההתקנה הופעלה בהצלחה.');
-      }
-    } finally {
-      setInstallPromptEvent(null);
-      setIsInstallReady(false);
+    if (isStandaloneApp) {
+      setInstallHint('האפליקציה כבר רצה ממסך הבית.');
+      return;
     }
+
+    const isiOS =
+      /iPad|iPhone|iPod/.test(navigator.userAgent)
+      || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+    setInstallHint(
+      isiOS
+        ? 'באייפון אין חלון התקנה אוטומטי. לחצי על כפתור השיתוף (ריבוע עם חץ) ואז על «הוסף למסך הבית».'
+        : 'Chrome לא הציע חלון התקנה. אם האייקון כבר במסך הבית — האפליקציה מותקנת. אחרת: תפריט ⋮ ← «התקן אפליקציה».',
+    );
   };
 
   const toggleParentTrackedChild = (child: PushChildName) => {
@@ -5533,13 +5541,29 @@ export default function FamilyScheduler() {
               עריכת בני המשפחה
             </button>
 
-            <button
-              type="button"
-              onClick={() => { void installApp(); }}
-              className="w-full flex items-center justify-center gap-2 bg-amber-50 text-amber-800 border border-amber-200 px-4 py-2 rounded-lg hover:bg-amber-100 transition font-bold"
-            >
-              התקן אפליקציה
-            </button>
+            <div className="space-y-1.5">
+              <button
+                type="button"
+                onClick={() => { void installApp(); }}
+                disabled={installBusy}
+                className="w-full flex items-center justify-center gap-2 bg-amber-50 text-amber-800 border border-amber-200 px-4 py-2 rounded-lg hover:bg-amber-100 transition font-bold disabled:opacity-60"
+              >
+                {installBusy ? 'פותח התקנה...' : 'התקן אפליקציה'}
+              </button>
+              {installHint ? (
+                <p className="text-sm text-amber-950 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 leading-relaxed">
+                  {installHint}
+                </p>
+              ) : (
+                <p className="text-xs text-slate-500 leading-relaxed">
+                  {canPromptInstall
+                    ? 'לחיצה תפתח את חלון ההתקנה של Chrome.'
+                    : isStandaloneApp
+                      ? 'האפליקציה כבר מותקנת במסך הבית.'
+                      : 'לחיצה אמורה לפתוח את חלון ההתקנה. אם לא — ב-Chrome תפריט ⋮ ← התקן אפליקציה. באייפון: שיתוף ← הוסף למסך הבית.'}
+                </p>
+              )}
+            </div>
 
             <div className="space-y-1.5">
               <button

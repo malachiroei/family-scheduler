@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import { headers } from "next/headers";
+import Script from "next/script";
 import {
   defaultAppBranding,
   defaultFaviconHref,
@@ -135,6 +136,9 @@ export default async function RootLayout({
       <body
         className={`${geistSans.variable} ${geistMono.variable} antialiased min-h-screen`}
       >
+        <Script id="pwa-install-capture" strategy="beforeInteractive">
+          {`window.addEventListener("beforeinstallprompt",function(e){e.preventDefault();window.__pwaInstallPrompt=e;});`}
+        </Script>
         {children}
       </body>
     </html>
