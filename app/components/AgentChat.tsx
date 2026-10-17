@@ -1,6 +1,6 @@
 "use client";
 import React, { useEffect, useRef, useState } from "react";
-import { Bot, FileSpreadsheet, ImagePlus, Send, Sparkles, X } from "lucide-react";
+import { Bot, FileSpreadsheet, ImagePlus, Send, Sparkles, Trash2, X } from "lucide-react";
 import { childDisplayNames as fallbackChildDisplayNames } from "@/app/lib/familyMembers";
 
 type Msg = { role: "user" | "assistant"; content: string; image?: string; fileName?: string };
@@ -43,9 +43,11 @@ export type AgentSavedEvent = {
 export default function AgentChat({
   onSaved,
   childNames,
+  onClearImported,
 }: {
   onSaved?: (events: AgentSavedEvent[]) => void;
   childNames?: string[];
+  onClearImported?: (childName: string) => Promise<{ deleted: number } | null>;
 }) {
   const CHILD_BUTTONS = childNames?.length ? childNames : fallbackChildDisplayNames;
   const [open, setOpen] = useState(false);
@@ -63,6 +65,7 @@ export default function AgentChat({
   const [quickReplies, setQuickReplies] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
   const [dragging, setDragging] = useState(false);
+  const [clearPick, setClearPick] = useState(false);
   const endRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -185,14 +188,27 @@ export default function AgentChat({
             <span className="flex items-center gap-2 text-sm font-semibold">
               <Sparkles size={16} /> סוכן הלו״ז
             </span>
-            <button
-              type="button"
-              onClick={() => setOpen(false)}
-              className="rounded-md bg-white/15 p-1 transition hover:bg-white/25"
-              aria-label="סגור"
-            >
-              <X size={16} />
-            </button>
+            <div className="flex items-center gap-1">
+              {onClearImported ? (
+                <button
+                  type="button"
+                  onClick={() => setClearPick((openPicker) => !openPicker)}
+                  className="rounded-md bg-white/15 p-1 transition hover:bg-white/25"
+                  aria-label="מחק משחקים מיובאים"
+                  title="מחק משחקים מיובאים"
+                >
+                  <Trash2 size={16} />
+                </button>
+              ) : null}
+              <button
+                type="button"
+                onClick={() => setOpen(false)}
+                className="rounded-md bg-white/15 p-1 transition hover:bg-white/25"
+                aria-label="סגור"
+              >
+                <X size={16} />
+              </button>
+            </div>
           </div>
 
           <div className="flex-1 space-y-2 overflow-y-auto overscroll-contain bg-slate-50 p-3">
@@ -228,6 +244,34 @@ export default function AgentChat({
             <div ref={endRef} />
           </div>
 
+          {clearPick && onClearImported && (
+            <div className="flex flex-wrap gap-2 border-t border-amber-200 bg-amber-50 px-3 py-2">
+              <span className="w-full text-[11px] font-semibold text-amber-950">למי למחוק משחקים מיובאים?</span>
+              {CHILD_BUTTONS.map((name) => (
+                <button
+                  key={`clear-${name}`}
+                  type="button"
+                  disabled={busy}
+                  onClick={() => {
+                    setClearPick(false);
+                    void onClearImported(name).then((result) => {
+                      if (!result) return;
+                      setMessages((prev) => [
+                        ...prev,
+                        {
+                          role: "assistant",
+                          content: `נמחקו ${result.deleted} משחקים מיובאים של ${name}. אפשר להעלות את קובץ האקסל מחדש.`,
+                        },
+                      ]);
+                    });
+                  }}
+                  className="rounded-full border border-amber-300 bg-white px-3 py-1 text-sm font-semibold text-amber-900 hover:bg-amber-100 disabled:opacity-60"
+                >
+                  {name}
+                </button>
+              ))}
+            </div>
+          )}
           {quickReplies.length > 0 && (
             <div className="flex flex-wrap gap-2 border-t border-slate-200 bg-white px-3 pt-2">
               {quickReplies.map((q) => (

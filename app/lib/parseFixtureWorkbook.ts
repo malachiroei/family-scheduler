@@ -1,5 +1,6 @@
 import { inflateRawSync } from "zlib";
 import { classifyFixtureLeague, compactLeagueLabel } from "./fixtureLeague";
+import { parseFlexibleDate } from "./scheduleDate";
 
 export type FixtureGame = {
   date: string; // YYYY-MM-DD
@@ -87,26 +88,7 @@ export const fixtureSenderKey = (team: string | null | undefined, league?: strin
   return `fixtures:${teamKey}|${leagueKey}`;
 };
 
-const excelSerialToIso = (serial: number): string | null => {
-  if (!Number.isFinite(serial) || serial < 20000 || serial > 80000) return null;
-  const utc = Date.UTC(1899, 11, 30) + Math.round(serial) * 86400000;
-  const d = new Date(utc);
-  const y = d.getUTCFullYear();
-  if (y < 2000 || y > 2100) return null;
-  return `${y}-${String(d.getUTCMonth() + 1).padStart(2, "0")}-${String(d.getUTCDate()).padStart(2, "0")}`;
-};
-
-const parseDateCell = (value: unknown): string | null => {
-  if (typeof value === "number") return excelSerialToIso(value);
-  const text = cellText(value);
-  const iso = text.match(/^(\d{4})-(\d{2})-(\d{2})/);
-  if (iso) return `${iso[1]}-${iso[2]}-${iso[3]}`;
-  const dmy = text.match(/^(\d{1,2})[./-](\d{1,2})[./-](\d{4})$/);
-  if (dmy) {
-    return `${dmy[3]}-${dmy[2].padStart(2, "0")}-${dmy[1].padStart(2, "0")}`;
-  }
-  return null;
-};
+const parseDateCell = (value: unknown): string | null => parseFlexibleDate(value);
 
 const parseTimeCell = (value: unknown): string | null => {
   if (typeof value === "number" && Number.isFinite(value)) {
@@ -190,6 +172,7 @@ const detectColumns = (rows: unknown[][]): ColMap => {
       const header = normalizeHeader(row[c]);
       if (!header) continue;
       if (/\bcode\b|קוד/.test(header)) continue;
+      if (/week\s*day|יום\s*בשבוע/.test(header)) continue;
       (Object.keys(HEADER_ALIASES) as Array<keyof ColMap>).forEach((key) => {
         const hit = scoreHeader(header, HEADER_ALIASES[key]);
         if (hit > (bestHit[key] ?? 0)) {

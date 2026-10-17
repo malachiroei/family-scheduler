@@ -9,6 +9,7 @@ import {
 import { sendPushToAll, sendPushToParents } from "@/app/lib/push";
 import { fallbackRoster, type FamilyRoster } from "@/app/lib/familyMembers";
 import { loadFamilyRoster } from "@/app/lib/familyRosterStore";
+import { parseFlexibleDate, weekdayIndexUtc } from "@/app/lib/scheduleDate";
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
@@ -166,30 +167,7 @@ const createId = () => (typeof crypto !== "undefined" && typeof crypto.randomUUI
   ? crypto.randomUUID()
   : `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`);
 
-const toIsoDate = (value: string) => {
-  const trimmed = value.trim();
-  // Postgres / JS may serialize dates as full ISO strings (e.g. 2026-04-20T00:00:00.000Z).
-  const yyyyMmDd = trimmed.match(/^(\d{4})-(\d{2})-(\d{2})/);
-  if (yyyyMmDd) {
-    return `${yyyyMmDd[1]}-${yyyyMmDd[2]}-${yyyyMmDd[3]}`;
-  }
-
-  const ddMmYyyy = trimmed.match(/^(\d{2})-(\d{2})-(\d{4})$/);
-  if (ddMmYyyy) {
-    return `${ddMmYyyy[3]}-${ddMmYyyy[2]}-${ddMmYyyy[1]}`;
-  }
-
-  return "";
-};
-
-const normalizeDateStrict = (rawDate: string, _dayIndex: number) => {
-  const isoDate = toIsoDate(rawDate);
-  if (isoDate) {
-    return isoDate;
-  }
-
-  return "";
-};
+const toIsoDate = (value: unknown) => parseFlexibleDate(value) || "";
 
 const normalizeClock = (value: string) => {
   const trimmed = value.trim();
@@ -243,19 +221,16 @@ const sanitizeDbEvent = (event: unknown, roster: FamilyRoster = fallbackRoster) 
     ? candidate.id.trim()
     : (typeof candidate.eventId === "string" && candidate.eventId.trim() ? candidate.eventId.trim() : createId());
 
-  const dateRaw = typeof candidate.date === "string"
-    ? candidate.date.trim()
-    : (typeof candidate.day === "string"
-      ? candidate.day.trim()
-      : (typeof candidate.event_date === "string"
-        ? candidate.event_date.trim()
-        : (typeof candidate.eventDate === "string" ? candidate.eventDate.trim() : "")));
+  const date =
+    parseFlexibleDate(candidate.date) ||
+    parseFlexibleDate(candidate.day) ||
+    parseFlexibleDate(candidate.event_date) ||
+    parseFlexibleDate(candidate.eventDate) ||
+    "";
 
-  const dayIndexRaw = Number(
-    candidate.dayIndex ?? candidate.day_index ?? (typeof dateRaw === "string" && dateRaw ? toDayIndex(dateRaw, 0) : Number.NaN)
-  );
-
-  const date = normalizeDateStrict(dateRaw || "", dayIndexRaw);
+  const dayIndexRaw = date
+    ? weekdayIndexUtc(date)
+    : Number(candidate.dayIndex ?? candidate.day_index);
 
   const timeRaw = typeof candidate.time === "string"
     ? candidate.time.trim()
@@ -325,6 +300,8 @@ const sanitizeDbEvent = (event: unknown, roster: FamilyRoster = fallbackRoster) 
     needsAck,
     reminderLeadMinutes,
     userId,
+    eventDate: date,
+    source: typeof candidate.source === "string" && candidate.source.trim() ? candidate.source.trim() : null,
   };
 };
 
@@ -368,29 +345,17 @@ const createIncomingFromFlatBody = (body: Record<string, unknown>, roster: Famil
   }, roster);
 };
 
-const toDayIndex = (dayValue: string, fallback: number) => {
-  const trimmed = dayValue.trim();
+const toDayIndex = (dayValue: unknown, fallback: number) => {
+  const iso = parseFlexibleDate(dayValue);
+  if (iso) return weekdayIndexUtc(iso);
+  if (typeof dayValue === "number" && Number.isInteger(dayValue) && dayValue >= 0 && dayValue <= 6) {
+    return dayValue;
+  }
+  const trimmed = String(dayValue ?? "").trim();
   const numericDay = Number(trimmed);
   if (Number.isInteger(numericDay) && numericDay >= 0 && numericDay <= 6) {
     return numericDay;
   }
-
-  const ddMmYyyy = trimmed.match(/^(\d{2})-(\d{2})-(\d{4})$/);
-  if (ddMmYyyy) {
-    const parsed = new Date(`${ddMmYyyy[3]}-${ddMmYyyy[2]}-${ddMmYyyy[1]}T00:00:00`);
-    if (!Number.isNaN(parsed.getTime())) {
-      return parsed.getDay();
-    }
-  }
-
-  const yyyyMmDd = trimmed.match(/^(\d{4})-(\d{2})-(\d{2})$/);
-  if (yyyyMmDd) {
-    const parsed = new Date(`${yyyyMmDd[1]}-${yyyyMmDd[2]}-${yyyyMmDd[3]}T00:00:00`);
-    if (!Number.isNaN(parsed.getTime())) {
-      return parsed.getDay();
-    }
-  }
-
   return fallback;
 };
 
@@ -517,6 +482,8 @@ const upsertScheduleEvent = async (incoming: ReturnType<typeof sanitizeDbEvent>)
     const metadataPayload = buildMetadataFromIncoming({
       ...incoming,
       notified: false,
+      eventDate: incoming.date,
+      source: incoming.source ?? null,
     });
 
     debugScheduleLog("Data to save:", { id: incoming.eventId, title: incoming.title, date: incoming.date, metadataPayload });
@@ -590,9 +557,8 @@ const upsertScheduleEvent = async (incoming: ReturnType<typeof sanitizeDbEvent>)
 
     debugScheduleLog("Saved successfully:", saved);
 
-    const savedDateRaw = String(saved.date ?? "").trim();
-    const savedDate = toIsoDate(savedDateRaw) || savedDateRaw;
     const meta = parseScheduleMetadata(saved.metadata);
+    const savedDate = parseFlexibleDate(saved.date) || parseFlexibleDate(meta.eventDate) || incoming.date;
     const savedChildRaw = meta.child.trim().toLowerCase();
     const rosterForSaved = await loadFamilyRoster();
     const savedChild = rosterForSaved.isAllowedScheduleChild(savedChildRaw)
@@ -713,10 +679,9 @@ async function handleGet() {
     }
 
     const events = rows.map((row) => {
-      const r = row as { id: string; title: string; date: string; metadata: unknown };
-      const rawDate = String(r.date ?? "").trim();
-      const normalizedDate = toIsoDate(rawDate) || rawDate;
+      const r = row as { id: string; title: string; date: unknown; metadata: unknown };
       const meta = parseScheduleMetadata(r.metadata);
+      const normalizedDate = parseFlexibleDate(r.date) || parseFlexibleDate(meta.eventDate) || "";
       const rawChild = meta.child.trim().toLowerCase();
       const normalizedChild = roster.isAllowedScheduleChild(rawChild)
         ? roster.resolveMemberKey(rawChild) ?? rawChild
@@ -725,7 +690,7 @@ async function handleGet() {
       return {
         id: r.id,
         date: normalizedDate,
-        dayIndex: toDayIndex(normalizedDate, meta.dayIndex),
+        dayIndex: normalizedDate ? weekdayIndexUtc(normalizedDate) : toDayIndex(r.date, meta.dayIndex),
         time: meta.time,
         child: normalizedChild,
         title: r.title,
@@ -798,19 +763,24 @@ export async function DELETE(request: NextRequest) {
     const queryRecurringTemplateId = url.searchParams.get("recurringTemplateId")?.trim() || "";
     const queryClearAllRaw = url.searchParams.get("clearAll")?.trim().toLowerCase() || "";
     const queryClearAll = queryClearAllRaw === "1" || queryClearAllRaw === "true";
+    const queryClearFixturesRaw = url.searchParams.get("clearFixtures")?.trim().toLowerCase() || "";
+    const queryClearFixtures = queryClearFixturesRaw === "1" || queryClearFixturesRaw === "true";
+    const queryChild = url.searchParams.get("child")?.trim() || "";
     const queryPassword = url.searchParams.get("password")?.trim() || "";
     const headerPassword = request.headers.get("x-delete-password")?.trim() || "";
 
     const parsedBody = await tryParseJsonBody(request);
-    if (!parsedBody.ok && !queryId && !queryRecurringTemplateId && !queryClearAll) {
+    if (!parsedBody.ok && !queryId && !queryRecurringTemplateId && !queryClearAll && !queryClearFixtures) {
       return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
     }
 
     const body = parsedBody.ok ? parsedBody.data : {};
     const bodyClearAll = Boolean(body?.clearAll);
+    const bodyClearFixtures = Boolean(body?.clearFixtures);
     const bodyEventId = typeof body?.eventId === "string" ? body.eventId.trim() : "";
     const bodyRecurringTemplateId = typeof body?.recurringTemplateId === "string" ? body.recurringTemplateId.trim() : "";
     const bodyPassword = typeof body?.password === "string" ? body.password.trim() : "";
+    const bodyChild = typeof body?.child === "string" ? body.child.trim() : "";
 
     const providedDeletePassword = headerPassword || queryPassword || bodyPassword;
     const expectedDeletePassword = process.env.DELETE_PASSWORD?.trim() || "2101";
@@ -819,16 +789,43 @@ export async function DELETE(request: NextRequest) {
     }
 
     const clearAll = queryClearAll || bodyClearAll;
+    const clearFixtures = queryClearFixtures || bodyClearFixtures;
     const eventId = queryId || bodyEventId;
     const recurringTemplateId = queryRecurringTemplateId || bodyRecurringTemplateId;
+    const childParam = queryChild || bodyChild;
 
-    if (!clearAll && !eventId && !recurringTemplateId) {
+    if (!clearAll && !clearFixtures && !eventId && !recurringTemplateId) {
       return NextResponse.json({ error: "id (or eventId) or recurringTemplateId is required" }, { status: 400 });
     }
 
     if (clearAll) {
       await sql`DELETE FROM schedule`;
       return NextResponse.json({ ok: true });
+    }
+
+    if (clearFixtures) {
+      const roster = await loadFamilyRoster();
+      const member = roster.getMemberByAnyName(childParam);
+      if (!member) {
+        return NextResponse.json({ error: "יש לבחור ילד/ה למחיקת המשחקים המיובאים" }, { status: 400 });
+      }
+      const childKeys = [...new Set(
+        [member.key, member.name, member.pushName, ...(member.aliases ?? [])]
+          .map((value) => String(value || "").trim().toLowerCase())
+          .filter(Boolean),
+      )];
+      const removed = await sql`
+        DELETE FROM schedule
+        WHERE lower(trim(COALESCE(metadata->>'child', ''))) = ANY(${childKeys})
+          AND (
+            COALESCE(metadata->>'source', '') = 'fixtures'
+            OR COALESCE(metadata->>'league', '') <> ''
+            OR title ILIKE ${"%מחזור%"}
+            OR title ILIKE ${"%מול %"}
+          )
+        RETURNING id
+      `;
+      return NextResponse.json({ ok: true, deleted: removed.rowCount ?? removed.rows.length });
     }
 
     if (recurringTemplateId) {

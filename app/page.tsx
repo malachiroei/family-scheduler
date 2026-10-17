@@ -8,6 +8,7 @@ import FamilyRosterEditor from '@/app/components/FamilyRosterEditor';
 import AppBrandingEditor, { AppIconView } from '@/app/components/AppBrandingEditor';
 import { applyDocumentFavicon, defaultAppBranding, mergeAppBranding, type AppBranding } from '@/app/lib/appBranding';
 import { normalizeMetadataTime, parseMetadataBoolean } from '@/app/lib/scheduleTime';
+import { parseFlexibleDate } from '@/app/lib/scheduleDate';
 import { fixtureLeagueBadge } from '@/app/lib/fixtureLeague';
 import {
   createFamilyRoster,
@@ -349,28 +350,11 @@ const toEventDateKey = (date: Date) => {
 };
 
 const parseEventDateKey = (value: string) => {
-  const trimmed = value.trim();
-
-  const ddMmYyyy = trimmed.match(/^(\d{2})-(\d{2})-(\d{4})$/);
-  if (ddMmYyyy) {
-    const d = Number(ddMmYyyy[1]);
-    const m = Number(ddMmYyyy[2]);
-    const y = Number(ddMmYyyy[3]);
-    const parsed = new Date(y, m - 1, d);
-    return Number.isNaN(parsed.getTime()) ? null : parsed;
-  }
-
-  // Match YYYY-MM-DD at start so ISO datetimes from the API/DB (…T00:00:00.000Z) parse correctly.
-  const yyyyMmDd = trimmed.match(/^(\d{4})-(\d{2})-(\d{2})/);
-  if (yyyyMmDd) {
-    const y = Number(yyyyMmDd[1]);
-    const m = Number(yyyyMmDd[2]);
-    const d = Number(yyyyMmDd[3]);
-    const parsed = new Date(y, m - 1, d);
-    return Number.isNaN(parsed.getTime()) ? null : parsed;
-  }
-
-  return null;
+  const iso = parseFlexibleDate(value);
+  if (!iso) return null;
+  const [y, m, d] = iso.split('-').map(Number);
+  const parsed = new Date(y, m - 1, d);
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
 };
 
 const normalizeEventDateKey = (value: string | undefined, fallbackDate: Date) => {
@@ -3151,12 +3135,7 @@ export default function FamilyScheduler() {
       allEvents
       .filter((event) => !parseMetadataBoolean(event.isRecurring))
       .forEach((event) => {
-        let eventDate = parseEventDateKey(event.date);
-        const apiDay =
-          Number.isInteger(event.dayIndex) && event.dayIndex >= 0 && event.dayIndex <= 6 ? event.dayIndex : null;
-        if (!eventDate && apiDay !== null) {
-          eventDate = addDays(targetWeekStart, apiDay);
-        }
+        const eventDate = parseEventDateKey(event.date);
         if (!eventDate) {
           return;
         }
@@ -4188,6 +4167,49 @@ export default function FamilyScheduler() {
     setSuccessMessage('הנתונים נוקו. ניתן להתחיל הזנה מחדש ללא הכפילויות הישנות.');
     if (apiError) {
       setApiError('');
+    }
+  };
+
+  const handleClearImportedFixtures = async (childName: string): Promise<{ deleted: number } | null> => {
+    const confirmed = window.confirm(`למחוק את המשחקים המיובאים של ${childName} מהלו״ז? אפשר לייבא את הקובץ מחדש אחר כך.`);
+    if (!confirmed) {
+      return null;
+    }
+    const deletePassword = await requestDeletePassword();
+    if (!deletePassword) {
+      return null;
+    }
+    try {
+      setDbSyncStatus({ state: 'saving', message: 'מוחק משחקים מיובאים...' });
+      const query = new URLSearchParams({ clearFixtures: '1', child: childName });
+      const response = await fetch(toApiUrl(`/api/schedule?${query.toString()}`), {
+        method: 'DELETE',
+        headers: {
+          'x-delete-password': deletePassword,
+        },
+      });
+      const payload = await readJsonSafe(response);
+      if (!response.ok) {
+        throw new Error(payload?.error || 'Failed to clear imported fixtures');
+      }
+      const deleted = Number(payload?.deleted) || 0;
+      await refetchEventsFromDatabase(weekStart);
+      setDbSyncStatus({ state: 'saved', message: 'נמחק' });
+      setSuccessMessage(`נמחקו ${deleted} משחקים מיובאים של ${childName}. אפשר לייבא מחדש.`);
+      if (apiError) {
+        setApiError('');
+      }
+      return { deleted };
+    } catch (error) {
+      console.error('[API] DELETE imported fixtures failed', error);
+      setDbSyncStatus({ state: 'error', message: 'Failed' });
+      const msg = error instanceof Error ? error.message : '';
+      if (msg.includes('Invalid delete password')) {
+        setApiError('סיסמת המחיקה שגויה.');
+      } else {
+        setApiError(formatSchedulePersistenceError(error));
+      }
+      return null;
     }
   };
 
@@ -5332,6 +5354,28 @@ export default function FamilyScheduler() {
               עריכת בני המשפחה
             </button>
 
+            <div className="rounded-xl border border-amber-200 bg-amber-50 p-3 space-y-2">
+              <div className="text-sm font-bold text-amber-950">מחק משחקים מיובאים</div>
+              <p className="text-xs text-amber-900">
+                מוחק מהלו״ז רק משחקי אקסל ששובצו לילד/ה (לא משימות רגילות). אחרי זה אפשר לייבא מחדש עם התאריכים הנכונים.
+              </p>
+              <div className="flex flex-wrap gap-1.5">
+                {roster.childDisplayNames.map((name) => (
+                  <button
+                    key={`clear-fixtures-${name}`}
+                    type="button"
+                    onClick={() => {
+                      setShowSettingsModal(false);
+                      void handleClearImportedFixtures(name);
+                    }}
+                    className="rounded-lg border border-amber-300 bg-white px-3 py-1.5 text-xs font-bold text-amber-900 hover:bg-amber-100"
+                  >
+                    {name}
+                  </button>
+                ))}
+              </div>
+            </div>
+
             <div className="space-y-1.5">
               {isInstallReady && (
                 <button
@@ -5584,7 +5628,11 @@ export default function FamilyScheduler() {
         </div>
       )}
 
-      <AgentChat onSaved={handleAgentSaved} childNames={roster.childDisplayNames} />
+      <AgentChat
+        onSaved={handleAgentSaved}
+        childNames={roster.childDisplayNames}
+        onClearImported={handleClearImportedFixtures}
+      />
 
       {showFamilyEditor && (
         <FamilyRosterEditor

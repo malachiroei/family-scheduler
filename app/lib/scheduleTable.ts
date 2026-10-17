@@ -1,5 +1,6 @@
 import { sql } from "@/app/lib/db";
 import { defaultChildKey } from "@/app/lib/familyMembers";
+import { parseFlexibleDate } from "@/app/lib/scheduleDate";
 import { normalizeMetadataTime, parseMetadataBoolean } from "@/app/lib/scheduleTime";
 
 export type ScheduleEventMetadata = {
@@ -20,6 +21,10 @@ export type ScheduleEventMetadata = {
   notified?: boolean;
   /** Basketball fixture league, e.g. "ילדות ב תל אביב" or "קט סל א בנות" */
   league?: string | null;
+  /** Canonical YYYY-MM-DD, stored so a Postgres DATE column cannot lose the match day. */
+  eventDate?: string | null;
+  /** "fixtures" for spreadsheet imports. */
+  source?: string | null;
 };
 
 const defaultMetadata = (): ScheduleEventMetadata => ({
@@ -38,14 +43,24 @@ const defaultMetadata = (): ScheduleEventMetadata => ({
   userId: "system",
   notified: false,
   league: null,
+  eventDate: null,
+  source: null,
 });
 
 export const parseScheduleMetadata = (raw: unknown): ScheduleEventMetadata => {
   const base = defaultMetadata();
-  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+  let payload: unknown = raw;
+  if (typeof payload === "string") {
+    try {
+      payload = JSON.parse(payload);
+    } catch {
+      return base;
+    }
+  }
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
     return base;
   }
-  const o = raw as Record<string, unknown>;
+  const o = payload as Record<string, unknown>;
   const dayIndex = Number(o.dayIndex ?? o.day_index);
   const reminderRaw = o.reminderLeadMinutes ?? o.reminder_lead_minutes;
   const reminderNum = Number(reminderRaw);
@@ -93,6 +108,8 @@ export const parseScheduleMetadata = (raw: unknown): ScheduleEventMetadata => {
     userId: typeof o.userId === "string" && o.userId.trim() ? o.userId.trim() : typeof o.user_id === "string" && o.user_id.trim() ? o.user_id.trim() : base.userId,
     notified: parseMetadataBoolean(o.notified),
     league: typeof o.league === "string" && o.league.trim() ? o.league.trim() : null,
+    eventDate: parseFlexibleDate(o.eventDate ?? o.event_date),
+    source: typeof o.source === "string" && o.source.trim() ? o.source.trim() : null,
   };
 };
 
@@ -112,6 +129,8 @@ export const buildMetadataFromIncoming = (incoming: {
   userId: string;
   notified?: boolean;
   league?: string | null;
+  eventDate?: string | null;
+  source?: string | null;
 }): ScheduleEventMetadata => {
   const recurring = parseMetadataBoolean(incoming.isRecurring);
   return {
@@ -130,6 +149,8 @@ export const buildMetadataFromIncoming = (incoming: {
     userId: incoming.userId,
     notified: incoming.notified ?? false,
     league: incoming.league ?? null,
+    eventDate: incoming.eventDate ?? null,
+    source: incoming.source ?? null,
   };
 };
 

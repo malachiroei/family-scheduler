@@ -14,6 +14,7 @@ import {
   type FamilyRoster,
 } from "@/app/lib/familyMembers";
 import { loadFamilyRoster } from "@/app/lib/familyRosterStore";
+import { parseFlexibleDate, weekdayIndexUtc } from "@/app/lib/scheduleDate";
 
 export const revalidate = 0;
 export const maxDuration = 30;
@@ -95,18 +96,9 @@ const israelNow = () => {
   return { iso: `${get("year")}-${get("month")}-${get("day")}`, weekday: get("weekday") };
 };
 
-const dayIndexOf = (iso: string) => {
-  const [y, m, d] = iso.split("-").map(Number);
-  return new Date(Date.UTC(y, m - 1, d)).getUTCDay();
-};
+const dayIndexOf = (iso: string) => weekdayIndexUtc(iso);
 
-const normalizeDate = (v: unknown): string | null => {
-  if (typeof v !== "string") return null;
-  const m = v.trim().match(/^(\d{4})-(\d{2})-(\d{2})/);
-  if (!m) return null;
-  const dt = new Date(Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3])));
-  return Number.isNaN(dt.getTime()) ? null : `${m[1]}-${m[2]}-${m[3]}`;
-};
+const normalizeDate = (v: unknown): string | null => parseFlexibleDate(v);
 
 const normalizeTime = (v: unknown): string | null => {
   if (typeof v !== "string") return null;
@@ -766,6 +758,8 @@ export async function POST(request: NextRequest) {
         userId: "agent",
         notified: false,
         league: e.league ?? draft.league ?? null,
+        eventDate: date,
+        source: draft.import_kind === "fixtures" ? "fixtures" : "agent",
       });
       rowsToInsert.push({ id, title, date, metadata });
       saved.push({ id, title, date, time, child: kid, type });
