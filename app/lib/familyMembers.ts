@@ -4,6 +4,10 @@
  * original household (when NEXT_PUBLIC_ENABLE_BUILTIN_JOHNNY is on) → generic placeholders.
  */
 
+import { isOriginalHouseholdEnabled } from "./deployment";
+
+export { isOriginalHouseholdEnabled };
+
 export type FamilyRole = "child" | "parent";
 export type FamilyRosterSource = "db" | "env" | "default";
 
@@ -42,21 +46,6 @@ export const COLOR_PALETTE = [
   { color: "bg-amber-500", iconColor: "text-amber-500" },
   { color: "bg-rose-500", iconColor: "text-rose-500" },
 ] as const;
-
-export const isOriginalHouseholdEnabled = () => {
-  const raw = String(process.env.NEXT_PUBLIC_ENABLE_BUILTIN_JOHNNY ?? "").trim().toLowerCase();
-  if (raw === "1" || raw === "true" || raw === "yes") {
-    return true;
-  }
-  const host = [
-    process.env.NEXT_PUBLIC_VERCEL_PROJECT_PRODUCTION_URL,
-    process.env.NEXT_PUBLIC_VERCEL_URL,
-  ]
-    .filter(Boolean)
-    .join(" ")
-    .toLowerCase();
-  return /family-scheduler-topaz/.test(host);
-};
 
 const ORIGINAL_CHILDREN = ["רביד", "עמית", "אלין"] as const;
 const ORIGINAL_PARENTS = ["סיון", "רועי"] as const;

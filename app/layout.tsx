@@ -1,7 +1,7 @@
 import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import { defaultAppBranding, defaultFaviconHref } from "@/app/lib/appBranding";
-import { isOriginalHouseholdEnabled } from "@/app/lib/familyMembers";
+import { appMetadataBase, isOriginalHouseholdEnabled } from "@/app/lib/deployment";
 import "./globals.css";
 
 const geistSans = Geist({
@@ -19,10 +19,10 @@ const originalHousehold = isOriginalHouseholdEnabled();
 const defaultIconHref = defaultFaviconHref();
 
 export const metadata: Metadata = {
-  metadataBase: new URL("https://family-scheduler-topaz.vercel.app"),
+  metadataBase: appMetadataBase(),
   title: defaultBranding.app_title,
   description: "לוח זמנים משפחתי חכם עם סנכרון בזמן אמת",
-  manifest: "/manifest.json?v=6",
+  manifest: "/manifest.json?v=7",
   applicationName: defaultBranding.app_title,
   appleWebApp: {
     capable: true,
@@ -41,7 +41,10 @@ export const metadata: Metadata = {
         apple: "/apple-touch-icon.png",
       }
     : {
-        icon: [{ url: defaultIconHref, type: "image/png" }],
+        icon: [
+          { url: "/favicon.ico", sizes: "any" },
+          { url: defaultIconHref, type: "image/png" },
+        ],
         shortcut: defaultIconHref,
         apple: defaultIconHref,
       },

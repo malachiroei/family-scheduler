@@ -1,7 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { GENERIC_APP_ICON } from "@/app/lib/appBranding";
-import { isOriginalHouseholdEnabled } from "@/app/lib/familyMembers";
+import { isOriginalHouseholdEnabled } from "@/app/lib/deployment";
 
 export const size = { width: 180, height: 180 };
 export const contentType = "image/png";

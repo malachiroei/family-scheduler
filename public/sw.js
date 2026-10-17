@@ -1,10 +1,12 @@
-const CACHE_NAME = 'family-scheduler-v21';
+const CACHE_NAME = 'family-scheduler-v22';
 /** Same origin as the registered app (localhost or production) — avoids CORS when SW calls the API. */
 const apiUrl = (path) => {
   const normalized = path.startsWith('/') ? path : `/${path}`;
   return new URL(normalized, self.location.origin).href;
 };
-const APP_SHELL_FILES = ['/manifest.json?v=6', '/icon-512.png', '/favicon.ico'];
+const isOriginalHost = () => /family-scheduler-topaz/i.test(self.location.hostname);
+const appIcon = () => (isOriginalHost() ? '/icon-512.png' : '/generic-family-icon.png');
+const APP_SHELL_FILES = ['/manifest.json?v=7', appIcon(), '/favicon.ico'];
 const reminderLeadOptions = [5, 10, 15, 30, 60, 120, 1440];
 const pushSoundOptions = ['/sounds/standard.mp3', '/sounds/bell.mp3', '/sounds/modern.mp3'];
 const defaultPushPreferences = {
@@ -130,8 +132,8 @@ self.addEventListener('push', (event) => {
   const options = {
     // The server already writes the exact time left into the body.
     body: payload.body,
-    icon: '/icon-512.png',
-    badge: '/icon-512.png',
+    icon: appIcon(),
+    badge: appIcon(),
     vibrate: [200, 100, 200],
     actions: Array.isArray(payload.actions)
       ? payload.actions

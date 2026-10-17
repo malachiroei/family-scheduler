@@ -1,4 +1,4 @@
-import { isOriginalHouseholdEnabled } from "@/app/lib/familyMembers";
+import { isOriginalHouseholdEnabled } from "@/app/lib/deployment";
 
 export const APP_BRANDING_STATE_KEY = "app_branding";
 
