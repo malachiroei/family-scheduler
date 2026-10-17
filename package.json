@@ -4,7 +4,8 @@
   "private": true,
   "scripts": {
     "dev": "next dev",
-    "build": "next build",
+    "prebuild": "node scripts/apply-deployment-icons.mjs",
+    "build": "node scripts/apply-deployment-icons.mjs && next build",
     "start": "next start",
     "lint": "eslint"
   },

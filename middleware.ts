@@ -20,6 +20,7 @@ const noStore = (response: NextResponse) => {
 
 export function middleware(request: NextRequest) {
   const { pathname } = request.nextUrl;
+  const host = request.headers.get("host") ?? "";
 
   if (pathname === "/manifest.json") {
     const url = request.nextUrl.clone();
@@ -28,7 +29,7 @@ export function middleware(request: NextRequest) {
     return noStore(NextResponse.rewrite(url));
   }
 
-  if (isOriginalHouseholdEnabled()) {
+  if (isOriginalHouseholdEnabled(host)) {
     return NextResponse.next();
   }
 

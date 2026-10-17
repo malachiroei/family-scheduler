@@ -15,10 +15,11 @@ export const deploymentIdentity = () =>
     .join(" ")
     .toLowerCase();
 
-export const isFriendDeployment = () => /family-scheduler-friend/.test(deploymentIdentity());
+export const isFriendDeployment = (host = "") =>
+  /family-scheduler-friend/.test(`${deploymentIdentity()} ${host}`.toLowerCase());
 
-export const isOriginalHouseholdEnabled = () => {
-  if (isFriendDeployment()) {
+export const isOriginalHouseholdEnabled = (host = "") => {
+  if (isFriendDeployment(host)) {
     return false;
   }
   if (truthy(process.env.NEXT_PUBLIC_ENABLE_BUILTIN_JOHNNY)) {

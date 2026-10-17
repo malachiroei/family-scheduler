@@ -22,7 +22,7 @@ export const metadata: Metadata = {
   metadataBase: appMetadataBase(),
   title: defaultBranding.app_title,
   description: "לוח זמנים משפחתי חכם עם סנכרון בזמן אמת",
-  manifest: "/manifest.json?v=7",
+  manifest: "/manifest.json?v=8",
   applicationName: defaultBranding.app_title,
   appleWebApp: {
     capable: true,
@@ -42,11 +42,11 @@ export const metadata: Metadata = {
       }
     : {
         icon: [
-          { url: "/favicon.ico", sizes: "any" },
-          { url: defaultIconHref, type: "image/png" },
+          { url: "/favicon.ico?v=8", sizes: "any" },
+          { url: `${defaultIconHref}?v=8`, type: "image/png" },
         ],
-        shortcut: defaultIconHref,
-        apple: defaultIconHref,
+        shortcut: `${defaultIconHref}?v=8`,
+        apple: `${defaultIconHref}?v=8`,
       },
   openGraph: {
     title: defaultBranding.app_title,
@@ -72,8 +72,9 @@ export default function RootLayout({
           </>
         ) : (
           <>
-            <link rel="icon" type="image/png" href={defaultIconHref} />
-            <link rel="apple-touch-icon" href={defaultIconHref} />
+            <link rel="icon" href="/favicon.ico?v=8" sizes="any" />
+            <link rel="icon" type="image/png" href={`${defaultIconHref}?v=8`} />
+            <link rel="apple-touch-icon" href={`${defaultIconHref}?v=8`} />
           </>
         )}
       </head>
