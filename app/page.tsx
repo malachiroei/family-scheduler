@@ -6,7 +6,7 @@ import html2canvas from 'html2canvas';
 import AgentChat from '@/app/components/AgentChat';
 import FamilyRosterEditor from '@/app/components/FamilyRosterEditor';
 import AppBrandingEditor, { AppIconView } from '@/app/components/AppBrandingEditor';
-import { applyDocumentFavicon, defaultAppBranding, mergeAppBranding, type AppBranding } from '@/app/lib/appBranding';
+import { applyDocumentFavicon, appIconSrc, defaultAppBranding, mergeAppBranding, resolveShareImagePath, type AppBranding } from '@/app/lib/appBranding';
 import { normalizeMetadataTime, parseMetadataBoolean } from '@/app/lib/scheduleTime';
 import { parseFlexibleDate } from '@/app/lib/scheduleDate';
 import { fixtureLeagueBadge } from '@/app/lib/fixtureLeague';
@@ -272,6 +272,50 @@ const sanitizePushSound = (value: unknown): PushSoundPreset => {
 
 const isParentPushUser = (value: PushUserName | ''): boolean => Boolean(value) && isParentMemberKey(value);
 const isParentUserOption = (value: PushUserName): boolean => isParentMemberKey(value);
+
+const fileFromBrandingIcon = async (icon: string): Promise<File | null> => {
+  const origin = window.location.origin;
+  const candidates: string[] = [];
+  const src = appIconSrc(icon || '');
+  if (src.startsWith('data:image/')) {
+    candidates.push(src);
+  } else if (/^https?:\/\//i.test(src)) {
+    candidates.push(src);
+  } else if (src.startsWith('/')) {
+    candidates.push(`${origin}${src}`);
+  }
+  const resolved = resolveShareImagePath(icon);
+  if (resolved.startsWith('/')) {
+    candidates.push(`${origin}${resolved}`);
+  } else if (/^https?:\/\//i.test(resolved)) {
+    candidates.push(resolved);
+  }
+  candidates.push(`${origin}/generic-family-icon.png`);
+
+  const seen = new Set<string>();
+  for (const href of candidates) {
+    if (!href || seen.has(href)) {
+      continue;
+    }
+    seen.add(href);
+    try {
+      const response = await fetch(href);
+      if (!response.ok) {
+        continue;
+      }
+      const blob = await response.blob();
+      const rawType = blob.type || '';
+      if (rawType && !rawType.startsWith('image/') && rawType !== 'application/octet-stream') {
+        continue;
+      }
+      const type = rawType.startsWith('image/') ? rawType : 'image/png';
+      return new File([blob], 'family-scheduler.png', { type });
+    } catch {
+      // try the next candidate
+    }
+  }
+  return null;
+};
 
 const normalizeWeekEventsWithDate = (weeksData: Record<string, DaySchedule[]> | undefined) => {
   if (!weeksData || typeof weeksData !== 'object') {
@@ -3296,28 +3340,48 @@ export default function FamilyScheduler() {
 
   const shareInstallLinkOnWhatsApp = async () => {
     const url = window.location.origin;
-    const message = [
+    const title = branding.app_title || 'הלו״ז המשפחתי שלנו';
+    const text = [
       'היי! הנה הקישור ללוח הזמנים המשפחתי שלנו:',
-      url,
       '',
       'כדי להתקין כאפליקציה בנייד:',
       "באייפון: לוחצים על כפתור השיתוף (ריבוע עם חץ) ⭢ 'הוסף למסך הבית'",
       "באנדרואיד: לוחצים על 3 הנקודות בדפדפן ⭢ 'התקן אפליקציה' / 'הוסף למסך הבית'",
     ].join('\n');
 
-    const isMobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
-    if (isMobile && typeof navigator.share === 'function') {
+    const shareFile = await fileFromBrandingIcon(branding.app_icon);
+    const shareData: ShareData = { title, text, url };
+    if (
+      shareFile
+      && typeof navigator.canShare === 'function'
+      && navigator.canShare({ files: [shareFile] })
+    ) {
+      shareData.files = [shareFile];
+    }
+
+    if (typeof navigator.share === 'function') {
       try {
-        await navigator.share({ text: message });
+        await navigator.share(shareData);
         return;
       } catch (error) {
         if (error instanceof DOMException && error.name === 'AbortError') {
-          return; // user closed the share sheet
+          return;
         }
-        // otherwise fall through to the direct WhatsApp link
+        if (shareData.files) {
+          try {
+            await navigator.share({ title, text, url });
+            return;
+          } catch (retryError) {
+            if (retryError instanceof DOMException && retryError.name === 'AbortError') {
+              return;
+            }
+          }
+        }
       }
     }
-    window.open(`https://wa.me/?text=${encodeURIComponent(message)}`, '_blank', 'noopener,noreferrer');
+
+    const whatsappText = `${text}\n\n${url}`;
+    window.open(`https://wa.me/?text=${encodeURIComponent(whatsappText)}`, '_blank', 'noopener,noreferrer');
   };
 
   const handleManualRefresh = async () => {
