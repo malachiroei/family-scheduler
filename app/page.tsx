@@ -7,7 +7,7 @@ import AgentChat from '@/app/components/AgentChat';
 import FamilyRosterEditor from '@/app/components/FamilyRosterEditor';
 import AppBrandingEditor, { AppIconView } from '@/app/components/AppBrandingEditor';
 import { applyDocumentFavicon, appIconSrc, defaultAppBranding, mergeAppBranding, resolveShareImagePath, type AppBranding } from '@/app/lib/appBranding';
-import { clearPwaInstallPrompt, getPwaInstallPrompt, subscribePwaInstallPrompt } from '@/app/lib/pwaInstall';
+import { clearPwaInstallPrompt, getPwaInstallPrompt } from '@/app/lib/pwaInstall';
 import { normalizeMetadataTime, parseMetadataBoolean } from '@/app/lib/scheduleTime';
 import { parseFlexibleDate } from '@/app/lib/scheduleDate';
 import { fixtureLeagueBadge } from '@/app/lib/fixtureLeague';
@@ -1879,9 +1879,9 @@ export default function FamilyScheduler() {
   const [parentWatchChildren, setParentWatchChildren] = useState<PushChildName[]>([...pushChildOptions()]);
   const [reminderLeadMinutes, setReminderLeadMinutes] = useState<ReminderLeadMinutes>(defaultPushLeadMinutes);
   const [pushSound, setPushSound] = useState<PushSoundPreset>(defaultPushSound);
-  const [installHint, setInstallHint] = useState('');
+  const [installToast, setInstallToast] = useState('');
   const [installBusy, setInstallBusy] = useState(false);
-  const [canPromptInstall, setCanPromptInstall] = useState(false);
+  const installToastTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [, setSubscriptionEndpoint] = useState("");
   const persistDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const requestInFlightRef = useRef(false);
@@ -2519,66 +2519,72 @@ export default function FamilyScheduler() {
     };
   }, [ensureServiceWorkerRegistration]);
 
-  useEffect(() => {
-    const standalone = window.matchMedia('(display-mode: standalone)').matches || Boolean((window.navigator as Navigator & { standalone?: boolean }).standalone);
-    setIsStandaloneApp(standalone);
+  useLayoutEffect(() => {
+    const media = window.matchMedia('(display-mode: standalone)');
+    const readStandalone = () =>
+      media.matches || Boolean((window.navigator as Navigator & { standalone?: boolean }).standalone);
 
-    const syncPromptAvailability = () => {
-      setCanPromptInstall(Boolean(getPwaInstallPrompt()) && !standalone);
-    };
-    syncPromptAvailability();
+    setIsStandaloneApp(readStandalone());
 
-    const handleInstalled = () => {
-      setIsStandaloneApp(true);
-      setCanPromptInstall(false);
-      setInstallHint('האפליקציה הותקנה בהצלחה.');
-    };
+    const handleDisplayMode = () => setIsStandaloneApp(readStandalone());
+    const handleInstalled = () => setIsStandaloneApp(true);
 
+    media.addEventListener('change', handleDisplayMode);
     window.addEventListener('appinstalled', handleInstalled);
-    const unsubscribe = subscribePwaInstallPrompt(syncPromptAvailability);
 
     return () => {
+      media.removeEventListener('change', handleDisplayMode);
       window.removeEventListener('appinstalled', handleInstalled);
-      unsubscribe();
+      if (installToastTimeoutRef.current) {
+        clearTimeout(installToastTimeoutRef.current);
+      }
     };
   }, []);
 
+  const showInstallToast = (message: string) => {
+    setInstallToast(message);
+    if (installToastTimeoutRef.current) {
+      clearTimeout(installToastTimeoutRef.current);
+    }
+    installToastTimeoutRef.current = setTimeout(() => {
+      setInstallToast('');
+      installToastTimeoutRef.current = null;
+    }, 4500);
+  };
+
+  const installFallbackMessage = () => {
+    const isiOS =
+      /iPad|iPhone|iPod/.test(navigator.userAgent)
+      || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+    return isiOS
+      ? "להתקנה: לחצו על כפתור השיתוף ובחרו 'הוסף למסך הבית'"
+      : "להתקנה: לחצו על תפריט הדפדפן (⋮) ובחרו 'התקן אפליקציה'";
+  };
+
   const installApp = async () => {
+    if (isStandaloneApp) {
+      return;
+    }
+
     const promptEvent = getPwaInstallPrompt();
     if (promptEvent) {
       setInstallBusy(true);
-      setInstallHint('');
       try {
         await promptEvent.prompt();
         const result = await promptEvent.userChoice;
         clearPwaInstallPrompt();
-        setCanPromptInstall(false);
         if (result.outcome === 'accepted') {
-          setInstallHint('מעולה! האפליקציה מתווספת למסך הבית.');
-        } else {
-          setInstallHint('ההתקנה בוטלה. אפשר לנסות שוב מתפריט ⋮ ב-Chrome.');
+          setIsStandaloneApp(true);
         }
       } catch {
-        setInstallHint('לא ניתן לפתוח את חלון ההתקנה כרגע. נסי דרך תפריט ⋮ ← התקן אפליקציה.');
+        showInstallToast(installFallbackMessage());
       } finally {
         setInstallBusy(false);
       }
       return;
     }
 
-    if (isStandaloneApp) {
-      setInstallHint('האפליקציה כבר רצה ממסך הבית.');
-      return;
-    }
-
-    const isiOS =
-      /iPad|iPhone|iPod/.test(navigator.userAgent)
-      || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
-    setInstallHint(
-      isiOS
-        ? 'באייפון אין חלון התקנה אוטומטי. לחצי על כפתור השיתוף (ריבוע עם חץ) ואז על «הוסף למסך הבית».'
-        : 'Chrome לא הציע חלון התקנה. אם האייקון כבר במסך הבית — האפליקציה מותקנת. אחרת: תפריט ⋮ ← «התקן אפליקציה».',
-    );
+    showInstallToast(installFallbackMessage());
   };
 
   const toggleParentTrackedChild = (child: PushChildName) => {
@@ -5541,29 +5547,18 @@ export default function FamilyScheduler() {
               עריכת בני המשפחה
             </button>
 
-            <div className="space-y-1.5">
-              <button
-                type="button"
-                onClick={() => { void installApp(); }}
-                disabled={installBusy}
-                className="w-full flex items-center justify-center gap-2 bg-amber-50 text-amber-800 border border-amber-200 px-4 py-2 rounded-lg hover:bg-amber-100 transition font-bold disabled:opacity-60"
-              >
-                {installBusy ? 'פותח התקנה...' : 'התקן אפליקציה'}
-              </button>
-              {installHint ? (
-                <p className="text-sm text-amber-950 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 leading-relaxed">
-                  {installHint}
-                </p>
-              ) : (
-                <p className="text-xs text-slate-500 leading-relaxed">
-                  {canPromptInstall
-                    ? 'לחיצה תפתח את חלון ההתקנה של Chrome.'
-                    : isStandaloneApp
-                      ? 'האפליקציה כבר מותקנת במסך הבית.'
-                      : 'לחיצה אמורה לפתוח את חלון ההתקנה. אם לא — ב-Chrome תפריט ⋮ ← התקן אפליקציה. באייפון: שיתוף ← הוסף למסך הבית.'}
-                </p>
-              )}
-            </div>
+            <button
+              type="button"
+              onClick={() => { void installApp(); }}
+              disabled={installBusy || isStandaloneApp}
+              className={`w-full flex items-center justify-center gap-2 px-4 py-2 rounded-lg font-bold transition ${
+                isStandaloneApp
+                  ? 'bg-slate-100 text-slate-500 border border-slate-200 cursor-default'
+                  : 'bg-amber-50 text-amber-800 border border-amber-200 hover:bg-amber-100 disabled:opacity-60'
+              }`}
+            >
+              {isStandaloneApp ? 'האפליקציה כבר מותקנת ✓' : installBusy ? 'פותח התקנה...' : 'התקן אפליקציה'}
+            </button>
 
             <div className="space-y-1.5">
               <button
@@ -6305,6 +6300,17 @@ export default function FamilyScheduler() {
           </div>
         </div>
       )}
+
+      {installToast ? (
+        <div className="fixed bottom-6 inset-x-0 z-[70] flex justify-center px-4 pointer-events-none print:hidden">
+          <p
+            role="status"
+            className="max-w-sm rounded-2xl bg-slate-800 text-white text-sm px-4 py-3 shadow-xl text-center leading-relaxed"
+          >
+            {installToast}
+          </p>
+        </div>
+      ) : null}
     </div>
   );
 }
