@@ -17,7 +17,82 @@ const normalizeConnectionString = (raw: string | undefined): string => {
   if (s.length >= 2 && ((s.startsWith('"') && s.endsWith('"')) || (s.startsWith("'") && s.endsWith("'")))) {
     s = s.slice(1, -1);
   }
-  return s.trim();
+  s = s.replace(/^psql\s+/i, "").trim();
+  return s;
+};
+
+const projectRefFromHostname = (hostname: string): string | null => {
+  const host = hostname.toLowerCase();
+  const direct = host.match(/^db\.([a-z0-9]+)\.supabase\.co$/);
+  if (direct) return direct[1];
+  const api = host.match(/^([a-z0-9]+)\.supabase\.co$/);
+  if (api && api[1] !== "www") return api[1];
+  return null;
+};
+
+const projectRefFromUsername = (username: string): string | null => {
+  const match = decodeURIComponent(username || "").match(/^postgres\.([a-z0-9]+)$/i);
+  return match ? match[1] : null;
+};
+
+/** Supabase project ref, from any configured URL / user. Needed so the pooler accepts the login. */
+const extractSupabaseProjectRef = (): string | null => {
+  const explicit = (process.env.SUPABASE_PROJECT_REF || process.env.NEXT_PUBLIC_SUPABASE_PROJECT_REF || "").trim();
+  if (/^[a-z0-9]+$/i.test(explicit)) {
+    return explicit.toLowerCase();
+  }
+  const userEnv = process.env.POSTGRES_USER || process.env.POSTGRES_USER_NAME || "";
+  const fromUserEnv = projectRefFromUsername(userEnv);
+  if (fromUserEnv) {
+    return fromUserEnv;
+  }
+  const rawCandidates = [
+    process.env.NEXT_PUBLIC_SUPABASE_URL,
+    process.env.SUPABASE_URL,
+    process.env.POSTGRES_URL_NON_POOLING,
+    process.env.SUPABASE_POSTGRES_URL,
+    process.env.SUPABASE_DATABASE_URL,
+    process.env.POSTGRES_URL,
+    process.env.POSTGRES_PRISMA_URL,
+    process.env.DATABASE_URL,
+  ];
+  for (const raw of rawCandidates) {
+    const url = normalizeConnectionString(raw);
+    if (!url) continue;
+    try {
+      const parsed = new URL(url.includes("://") ? url : `https://${url}`);
+      const fromHost = projectRefFromHostname(parsed.hostname);
+      if (fromHost) return fromHost;
+      const fromUser = projectRefFromUsername(parsed.username);
+      if (fromUser) return fromUser;
+    } catch {
+      // ignore unparseable env values
+    }
+  }
+  return null;
+};
+
+/** Pooler rejects user `postgres`; it needs `postgres.<project-ref>`. */
+const rewritePoolerUsername = (url: string): string => {
+  if (classifyDatabaseUrl(url) !== "pooled") {
+    return url;
+  }
+  const parsed = parseDbUrl(url);
+  if (!parsed) {
+    return url;
+  }
+  const username = decodeURIComponent(parsed.username || "");
+  if (!/^postgres$/i.test(username)) {
+    return url;
+  }
+  const ref = extractSupabaseProjectRef();
+  if (!ref) {
+    console.warn("[db] pooler URL user is 'postgres'; expected postgres.PROJECT_REF and no project ref was found in env");
+    return url;
+  }
+  parsed.username = `postgres.${ref}`;
+  console.log(`[db] pooler username rewritten to postgres.${ref}`);
+  return parsed.toString();
 };
 
 type UrlKind = "pooled" | "direct" | "other";
@@ -87,7 +162,7 @@ const resolveDatabaseUrl = (): { url: string; source: DatabaseUrlSource } => {
   if (!chosen) {
     return { url: "", source: "MISSING" };
   }
-  return { url: chosen.url, source: chosen.source };
+  return { url: rewritePoolerUsername(chosen.url), source: chosen.source };
 };
 
 export const getDatabaseConfig = () => resolveDatabaseUrl();
@@ -114,19 +189,16 @@ function getPostgres() {
     return null;
   }
   if (!pg) {
-    let connectionUrl = url;
-    let needsSsl = true;
-    try {
-      const u = new URL(url);
-      needsSsl = !/^(localhost|127\.0\.0\.1)$/i.test(u.hostname);
-      console.log(`[db] env=${source}`);
-      console.log('[db] Attempting connection to host:', u.host, 'port:', u.port || "5432");
-      // Make sure the URL itself asks for SSL, so the handshake never waits on a plaintext fallback.
-      if (needsSsl && !u.searchParams.has("sslmode")) {
-        u.searchParams.set("sslmode", "require");
-        connectionUrl = u.toString();
-      }
-    } catch {
+    const parsed = parseDbUrl(url);
+    const needsSsl = parsed ? !/^(localhost|127\.0\.0\.1)$/i.test(parsed.hostname) : true;
+    const username = parsed ? decodeURIComponent(parsed.username || "") : "";
+    const database = parsed
+      ? decodeURIComponent((parsed.pathname || "/postgres").replace(/^\//, "") || "postgres")
+      : "postgres";
+    console.log(`[db] env=${source}`);
+    if (parsed) {
+      console.log("[db] Attempting connection to host:", parsed.host, "port:", parsed.port || "5432", "user:", username);
+    } else {
       console.log(`[db] env=${source} (unparseable URL)`);
     }
     if (classifyDatabaseUrl(url) === "direct") {
@@ -134,15 +206,27 @@ function getPostgres() {
         "[db] Direct Supabase host (db.*.supabase.co) is not reachable from Vercel. Set DATABASE_URL / POSTGRES_URL to the Transaction pooler URI (*.pooler.supabase.com:6543).",
       );
     }
-    pg = postgres(connectionUrl, {
-      max: 5, // short-lived connections; background calls (presence/state) must not starve a save
-      idle_timeout: 2, // seconds; release the pooler slot right after the query finishes
-      connect_timeout: 10, // seconds
-      // Required behind a Transaction-mode pooler (Supabase :6543 / PgBouncer), which breaks on prepared statements.
-      prepare: false,
-      // Encrypted without certificate verification: Supabase's pooler cert chain is not in every runtime's CA store.
-      ...(needsSsl ? { ssl: { rejectUnauthorized: false } } : {}),
-    });
+    // Pass host/user/password as fields so special characters in the password are not lost to URL encoding.
+    pg = parsed
+      ? postgres({
+          host: parsed.hostname,
+          port: Number(parsed.port || "5432"),
+          database,
+          username,
+          password: parsed.password,
+          max: 5,
+          idle_timeout: 2,
+          connect_timeout: 10,
+          prepare: false,
+          ...(needsSsl ? { ssl: { rejectUnauthorized: false } } : {}),
+        })
+      : postgres(url, {
+          max: 5,
+          idle_timeout: 2,
+          connect_timeout: 10,
+          prepare: false,
+          ...(needsSsl ? { ssl: { rejectUnauthorized: false } } : {}),
+        });
     globalForPg.__familySchedulerPg = pg;
   }
   return pg;
@@ -222,8 +306,14 @@ export function formatPublicDbError(error: unknown): string {
   if (code === "ENETUNREACH" || code === "EHOSTUNREACH" || /ENETUNREACH|EHOSTUNREACH/i.test(message)) {
     return "אין נתיב לשרת המסד (לרוב Direct/IPv6). השתמשי ב-Transaction pooler של Supabase.";
   }
-  if (code === "28P01" || code === "28000" || /password authentication|Tenant or user not found/i.test(message)) {
-    return "סיסמת מסד הנתונים שגויה, או ששם המשתמש ב-pooler צריך להיות postgres.<project-ref>.";
+  if (/Tenant or user not found/i.test(message)) {
+    const user = decodeURIComponent(parsed?.username || "") || "postgres";
+    const ref = extractSupabaseProjectRef();
+    const expected = ref ? `postgres.${ref}` : "postgres ומזהה הפרויקט (כמו postgres.abcdefghijklmnop)";
+    return `ה-pooler לא מזהה את המשתמש "${user}". ב-URI שם המשתמש חייב להיות ${expected}, לא postgres בלבד.`;
+  }
+  if (code === "28P01" || code === "28000" || /password authentication/i.test(message)) {
+    return "אימות למסד נכשל. בדקי את הסיסמה ב-URI ב-Vercel; תווים מיוחדים בסיסמה צריכים קידוד (למשל ! הופך ל-%21).";
   }
   return message || "שגיאת מסד נתונים";
 }
