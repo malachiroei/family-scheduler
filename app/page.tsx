@@ -1233,11 +1233,39 @@ const createEvent = (payload: Omit<SchedulerEvent, 'id'>): SchedulerEvent => ({
   ...payload,
 });
 
-/** Stable id per week + day + time so DB upserts replace the same slot; avoids duplicates after refetch. */
+type JohnnySlot = 'morning' | 'afternoon' | 'evening';
+
+const johnnySlotFromTime = (time: string): JohnnySlot => {
+  const normalized = normalizeTimeForPicker(time);
+  if (normalized < '12:00') return 'morning';
+  if (normalized < '17:00') return 'afternoon';
+  return 'evening';
+};
+
+/** Stable id per week + day + slot so re-renders never stack chores. */
 const johnnyStableEventId = (weekStart: Date, dayIndex: number, time: string): string => {
   const weekKey = toIsoDate(weekStart);
+  const slot = johnnySlotFromTime(time);
+  return `johnny-${weekKey}-${dayIndex}-${slot}`;
+};
+
+/** Current id plus legacy `johnny-{week}-{day}-{HHMM}` rows already in the DB. */
+const johnnyIdAliases = (weekStart: Date, dayIndex: number, time: string): string[] => {
+  const weekKey = toIsoDate(weekStart);
+  const slot = johnnySlotFromTime(time);
   const t = normalizeTimeForPicker(time).replace(':', '');
-  return `johnny-${weekKey}-${dayIndex}-${t}`;
+  return [
+    `johnny-${weekKey}-${dayIndex}-${slot}`,
+    `johnny-${weekKey}-${dayIndex}-${slot}-${t}`,
+    `johnny-${weekKey}-${dayIndex}-${t}`,
+  ];
+};
+
+const isJohnnyStableId = (id: string | undefined) => typeof id === 'string' && id.startsWith('johnny-');
+
+const clampDayIndex = (value: unknown): number | null => {
+  const dayIndex = Number(value);
+  return Number.isInteger(dayIndex) && dayIndex >= 0 && dayIndex <= 6 ? dayIndex : null;
 };
 
 /** Persisted row title so refetch hides built-in Johnny slots after delete (see upsertJohnnyTombstone). */
@@ -1290,6 +1318,31 @@ const isJohnnyScheduleTitle = (title: string) => /ג׳וני|ג'וני/i.test(`$
 
 const isJohnnyEventLike = (event: { type?: string; title?: string }) =>
   String(event.type || '').toLowerCase() === 'dog' || isJohnnyScheduleTitle(String(event.title || ''));
+
+/** Keep at most one Johnny walk per slot (morning / afternoon / evening) on a day. */
+const dedupeJohnnyEventsForDay = (events: SchedulerEvent[]): SchedulerEvent[] => {
+  const keptSlot = new Map<JohnnySlot, number>();
+  const out: SchedulerEvent[] = [];
+  for (const event of events) {
+    if (!isJohnnyScheduleTitle(String(event.title || ''))) {
+      out.push(event);
+      continue;
+    }
+    const slot = johnnySlotFromTime(event.time);
+    const existingIndex = keptSlot.get(slot);
+    if (existingIndex == null) {
+      keptSlot.set(slot, out.length);
+      out.push(event);
+      continue;
+    }
+    const existing = out[existingIndex];
+    const preferNew = isJohnnyStableId(event.id) && !isJohnnyStableId(existing.id);
+    if (preferNew) {
+      out[existingIndex] = event;
+    }
+  }
+  return out;
+};
 
 const isSwapChild = (value: string): boolean => isChildMemberKey(value);
 
@@ -1540,71 +1593,56 @@ const getSaturdayJohnnyAssignment = (weekStart: Date): { morning: BaseChildKey; 
   return SATURDAY_JOHNNY_CYCLE[index];
 };
 
+const JOHNNY_WEEKDAY_PLAN: Array<{ dayIndex: number; morning: BaseChildKey; afternoon: BaseChildKey }> = [
+  { dayIndex: 0, morning: 'amit', afternoon: 'amit' },
+  { dayIndex: 1, morning: 'alin', afternoon: 'ravid' },
+  { dayIndex: 2, morning: 'amit', afternoon: 'alin' },
+  { dayIndex: 3, morning: 'alin', afternoon: 'ravid' },
+  { dayIndex: 4, morning: 'amit', afternoon: 'ravid' },
+  { dayIndex: 5, morning: 'alin', afternoon: 'ravid' },
+];
+
 const buildJohnnyEvents = (
   weekStart: Date,
   suppressedIds?: Set<string>,
 ): Array<{ dayIndex: number; event: SchedulerEvent }> => {
   const saturdayAssignment = getSaturdayJohnnyAssignment(weekStart);
   const dateForDay = (dayIndex: number) => toEventDateKey(addDays(weekStart, dayIndex));
-  const slots: Array<{ dayIndex: number; event: SchedulerEvent }> = [
-    {
-      dayIndex: 0,
-      event: createJohnnyEvent(weekStart, 0, { date: dateForDay(0), time: '08:00', child: 'amit', title: 'התור של ג׳וני (בוקר)', type: 'dog', isRecurring: true }),
-    },
-    {
-      dayIndex: 0,
-      event: createJohnnyEvent(weekStart, 0, { date: dateForDay(0), time: '13:00', child: 'amit', title: 'התור של ג׳וני (צהריים)', type: 'dog', isRecurring: true }),
-    },
-    {
-      dayIndex: 1,
-      event: createJohnnyEvent(weekStart, 1, { date: dateForDay(1), time: '08:00', child: 'alin', title: 'התור של ג׳וני (בוקר)', type: 'dog', isRecurring: true }),
-    },
-    {
-      dayIndex: 1,
-      event: createJohnnyEvent(weekStart, 1, { date: dateForDay(1), time: '13:00', child: 'ravid', title: 'התור של ג׳וני (צהריים)', type: 'dog', isRecurring: true }),
-    },
-    {
-      dayIndex: 2,
-      event: createJohnnyEvent(weekStart, 2, { date: dateForDay(2), time: '08:00', child: 'amit', title: 'התור של ג׳וני (בוקר)', type: 'dog', isRecurring: true }),
-    },
-    {
-      dayIndex: 2,
-      event: createJohnnyEvent(weekStart, 2, { date: dateForDay(2), time: '13:00', child: 'alin', title: 'התור של ג׳וני (צהריים)', type: 'dog', isRecurring: true }),
-    },
-    {
-      dayIndex: 3,
-      event: createJohnnyEvent(weekStart, 3, { date: dateForDay(3), time: '08:00', child: 'alin', title: 'התור של ג׳וני (בוקר)', type: 'dog', isRecurring: true }),
-    },
-    {
-      dayIndex: 3,
-      event: createJohnnyEvent(weekStart, 3, { date: dateForDay(3), time: '13:00', child: 'ravid', title: 'התור של ג׳וני (צהריים)', type: 'dog', isRecurring: true }),
-    },
-    {
-      dayIndex: 4,
-      event: createJohnnyEvent(weekStart, 4, { date: dateForDay(4), time: '08:00', child: 'amit', title: 'התור של ג׳וני (בוקר)', type: 'dog', isRecurring: true }),
-    },
-    {
-      dayIndex: 4,
-      event: createJohnnyEvent(weekStart, 4, { date: dateForDay(4), time: '13:00', child: 'ravid', title: 'התור של ג׳וני (צהריים)', type: 'dog', isRecurring: true }),
-    },
-    {
-      dayIndex: 5,
-      event: createJohnnyEvent(weekStart, 5, { date: dateForDay(5), time: '08:00', child: 'alin', title: 'התור של ג׳וני (בוקר)', type: 'dog', isRecurring: true }),
-    },
-    {
-      dayIndex: 5,
-      event: createJohnnyEvent(weekStart, 5, { date: dateForDay(5), time: '13:00', child: 'ravid', title: 'התור של ג׳וני (צהריים)', type: 'dog', isRecurring: true }),
-    },
-    {
-      dayIndex: 6,
-      event: createJohnnyEvent(weekStart, 6, { date: dateForDay(6), time: '08:00', child: saturdayAssignment.morning, title: 'הורדת ג׳וני (בוקר)', type: 'dog', isRecurring: true }),
-    },
-    {
-      dayIndex: 6,
-      event: createJohnnyEvent(weekStart, 6, { date: dateForDay(6), time: '13:00', child: saturdayAssignment.afternoon, title: 'הורדת ג׳וני (צהריים)', type: 'dog', isRecurring: true }),
-    },
-  ];
-  return slots.filter((item) => !suppressedIds?.has(item.event.id));
+  const makeSlot = (
+    dayIndex: number,
+    time: string,
+    child: BaseChildKey,
+    title: string,
+  ): { dayIndex: number; event: SchedulerEvent } => ({
+    dayIndex,
+    event: createJohnnyEvent(weekStart, dayIndex, {
+      date: dateForDay(dayIndex),
+      time,
+      child,
+      title,
+      type: 'dog',
+      isRecurring: true,
+    }),
+  });
+
+  const byId = new Map<string, { dayIndex: number; event: SchedulerEvent }>();
+  const addUnique = (item: { dayIndex: number; event: SchedulerEvent }) => {
+    const dayIndex = clampDayIndex(item.dayIndex);
+    if (dayIndex == null) return;
+    const aliases = johnnyIdAliases(weekStart, dayIndex, item.event.time);
+    if (aliases.some((id) => suppressedIds?.has(id))) return;
+    if (byId.has(item.event.id)) return;
+    byId.set(item.event.id, { ...item, dayIndex });
+  };
+
+  JOHNNY_WEEKDAY_PLAN.forEach((plan) => {
+    addUnique(makeSlot(plan.dayIndex, '08:00', plan.morning, 'התור של ג׳וני (בוקר)'));
+    addUnique(makeSlot(plan.dayIndex, '13:00', plan.afternoon, 'התור של ג׳וני (צהריים)'));
+  });
+  addUnique(makeSlot(6, '08:00', saturdayAssignment.morning, 'הורדת ג׳וני (בוקר)'));
+  addUnique(makeSlot(6, '13:00', saturdayAssignment.afternoon, 'הורדת ג׳וני (צהריים)'));
+
+  return [...byId.values()];
 };
 
 const sortEvents = (events: SchedulerEvent[]) => {
@@ -1650,8 +1688,10 @@ const createWeekDays = (
   });
 
   const addEvent = (dayIndex: number, event: SchedulerEvent) => {
-    const fallbackDate = new Date(`${days[dayIndex].isoDate}T00:00:00`);
-    days[dayIndex].events.push({
+    const safeDay = clampDayIndex(dayIndex);
+    if (safeDay == null) return;
+    const fallbackDate = new Date(`${days[safeDay].isoDate}T00:00:00`);
+    days[safeDay].events.push({
       ...event,
       date: normalizeEventDateKey(event.date, fallbackDate),
       isRecurring: parseMetadataBoolean(event.isRecurring),
@@ -1667,6 +1707,9 @@ const createWeekDays = (
   }
 
   mergedRecurringTemplates.forEach((template) => {
+    if (isBuiltinJohnnyEnabled() && isJohnnyScheduleTitle(String(template.title || ''))) {
+      return;
+    }
     addEvent(template.dayIndex, {
       id: template.persistedRowId ?? `${template.templateId}-${toIsoDate(weekStart)}`,
       date: toEventDateKey(addDays(weekStart, template.dayIndex)),
@@ -1692,7 +1735,7 @@ const createWeekDays = (
   }
 
   days.forEach((day) => {
-    day.events = sortEvents(day.events);
+    day.events = sortEvents(dedupeJohnnyEventsForDay(day.events));
   });
 
   return days;
@@ -3096,7 +3139,11 @@ export default function FamilyScheduler() {
           .map((e) => e.id),
       );
       const allEvents = allEventsRaw.filter((e) => e.title !== JOHNNY_SUPPRESSED_TITLE);
-      const recurringRows = allEvents.filter((event) => parseMetadataBoolean(event.isRecurring));
+      const recurringRows = allEvents.filter((event) => {
+        if (!parseMetadataBoolean(event.isRecurring)) return false;
+        if (isBuiltinJohnnyEnabled() && isJohnnyScheduleTitle(String(event.title || ''))) return false;
+        return true;
+      });
 
     const templatesMap = new Map<string, RecurringTemplate>();
     recurringRows.forEach((event) => {
@@ -3143,6 +3190,18 @@ export default function FamilyScheduler() {
           return;
         }
         const dayIndex = eventDate.getDay();
+        if (isBuiltinJohnnyEnabled() && isJohnnyScheduleTitle(String(event.title || ''))) {
+          const aliases = johnnyIdAliases(targetWeekStart, dayIndex, event.time);
+          const isThisWeekSlot = aliases.includes(String(event.id));
+          const alreadyHasSlot = weekDays[dayIndex].events.some(
+            (existing) =>
+              isJohnnyScheduleTitle(String(existing.title || '')) &&
+              johnnySlotFromTime(existing.time) === johnnySlotFromTime(event.time),
+          );
+          if (!isThisWeekSlot && alreadyHasSlot) {
+            return;
+          }
+        }
         const mapped: SchedulerEvent = {
           id: event.id,
           date: toEventDateKey(eventDate),
@@ -3166,7 +3225,7 @@ export default function FamilyScheduler() {
         } else {
           dayEvents.push(mapped);
         }
-        weekDays[dayIndex].events = sortEvents(dayEvents);
+        weekDays[dayIndex].events = sortEvents(dedupeJohnnyEventsForDay(dayEvents));
       });
 
       setRecurringTemplates(templates);
@@ -3559,13 +3618,13 @@ export default function FamilyScheduler() {
 
       const src = payload.sourceEvent;
       const srcDay = payload.sourceDayIndex;
-      let johnnySlotId: string | null = null;
+      let johnnySlotIds: string[] = [];
       if (src && isJohnnyScheduleTitle(src.title)) {
         const dayIdx =
           typeof srcDay === 'number' && srcDay >= 0 && srcDay <= 6
             ? srcDay
             : (parseEventDateKey(src.date)?.getDay() ?? 0);
-        johnnySlotId = johnnyStableEventId(targetWeekStart, dayIdx, src.time);
+        johnnySlotIds = johnnyIdAliases(targetWeekStart, dayIdx, src.time);
         await upsertJohnnyTombstone(src, targetWeekStart, dayIdx);
       }
 
@@ -3574,7 +3633,7 @@ export default function FamilyScheduler() {
       const targetWeekKey = toIsoDate(targetWeekStart);
       setWeeksData((prev) => {
         const tombstoneIds =
-          johnnySlotId ? new Set<string>([johnnySlotId]) : undefined;
+          johnnySlotIds.length ? new Set<string>(johnnySlotIds) : undefined;
         const weekDays = prev[targetWeekKey]
           ? prev[targetWeekKey].map((day) => ({ ...day, events: [...day.events] }))
           : createWeekDays(targetWeekStart, false, recurringTemplates, {
@@ -3588,7 +3647,7 @@ export default function FamilyScheduler() {
             if (trimmedTemplateId) {
               return event.recurringTemplateId !== trimmedTemplateId && event.id !== trimmedEventId;
             }
-            if (johnnySlotId && (event.id === johnnySlotId || event.id === trimmedEventId)) {
+            if (johnnySlotIds.length && (johnnySlotIds.includes(event.id) || event.id === trimmedEventId)) {
               return false;
             }
             return event.id !== trimmedEventId;
