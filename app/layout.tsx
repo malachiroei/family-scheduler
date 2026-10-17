@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
+import { defaultAppBranding } from "@/app/lib/appBranding";
 import "./globals.css";
 
 const geistSans = Geist({
@@ -12,16 +13,18 @@ const geistMono = Geist_Mono({
   subsets: ["latin"],
 });
 
+const defaultBranding = defaultAppBranding();
+
 export const metadata: Metadata = {
   metadataBase: new URL("https://family-scheduler-topaz.vercel.app"),
-  title: "Malachi Family Time Planner",
+  title: defaultBranding.app_title,
   description: "לוח זמנים משפחתי חכם עם סנכרון בזמן אמת",
   manifest: "/manifest.json?v=6",
-  applicationName: "Family Scheduler",
+  applicationName: defaultBranding.app_title,
   appleWebApp: {
     capable: true,
     statusBarStyle: "default",
-    title: "Family Scheduler",
+    title: defaultBranding.app_title,
   },
   icons: {
     icon: [
@@ -34,7 +37,7 @@ export const metadata: Metadata = {
     apple: "/apple-touch-icon.png",
   },
   openGraph: {
-    title: "Malachi Family Time Planner",
+    title: defaultBranding.app_title,
     description: "לוח זמנים משפחתי חכם עם סנכרון בזמן אמת",
     images: [{ url: "/icon-512.png", width: 512, height: 512 }],
   },

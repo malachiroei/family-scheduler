@@ -5,6 +5,8 @@ import { Dog, Dumbbell, Music, GraduationCap, Trophy, Printer, MessageCircle, Ch
 import html2canvas from 'html2canvas';
 import AgentChat from '@/app/components/AgentChat';
 import FamilyRosterEditor from '@/app/components/FamilyRosterEditor';
+import AppBrandingEditor, { AppIconView } from '@/app/components/AppBrandingEditor';
+import { defaultAppBranding, mergeAppBranding, type AppBranding } from '@/app/lib/appBranding';
 import { normalizeMetadataTime, parseMetadataBoolean } from '@/app/lib/scheduleTime';
 import { fixtureLeagueBadge } from '@/app/lib/fixtureLeague';
 import {
@@ -1772,6 +1774,7 @@ export default function FamilyScheduler() {
   const [johnnySwapBusy, setJohnnySwapBusy] = useState(false);
   const [creatingEvent, setCreatingEvent] = useState<NewEventDraft | null>(null);
   const [roster, setRoster] = useState<FamilyRoster>(fallbackRoster);
+  const [branding, setBranding] = useState<AppBranding>(() => defaultAppBranding());
   const [showFamilyEditor, setShowFamilyEditor] = useState(false);
   // Background polling (presence / state sync / reminder check) pauses while an edit dialog is open,
   // so it never competes with the user's save for database connections.
@@ -1883,6 +1886,9 @@ export default function FamilyScheduler() {
         if (cancelled) {
           return;
         }
+        if (payload?.branding) {
+          setBranding(mergeAppBranding(payload.branding));
+        }
         if (response.ok && Array.isArray(payload?.members) && payload.members.length) {
           const source = payload.source === 'db' || payload.source === 'env' ? payload.source : 'default';
           applyRoster(createFamilyRoster(payload.members, source));
@@ -1895,6 +1901,25 @@ export default function FamilyScheduler() {
       cancelled = true;
     };
   }, [applyRoster]);
+
+  useEffect(() => {
+    document.title = branding.app_title;
+  }, [branding.app_title]);
+
+  const saveAppBrandingFromUi = async (next: AppBranding) => {
+    const response = await fetch(toApiUrl('/api/branding'), {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(next),
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok || payload?.ok === false) {
+      throw new Error(String(payload?.error || 'שמירת עיצוב הלוח נכשלה'));
+    }
+    const saved = mergeAppBranding(payload?.branding || next);
+    setBranding(saved);
+    setSuccessMessage('שם הלוח והאייקון נשמרו.');
+  };
 
   const saveFamilyRosterFromUi = async (members: StoredFamilyMember[]) => {
     const response = await fetch(toApiUrl('/api/family'), {
@@ -4830,7 +4855,13 @@ export default function FamilyScheduler() {
             </button>
           </div>
         )}
-        <div className="flex justify-center">
+        <div className="flex flex-col items-center gap-3">
+          <div className="flex items-center justify-center gap-2 px-2">
+            <AppIconView icon={branding.app_icon} size={40} className="shadow-sm border border-slate-200" />
+            <h1 className="text-xl sm:text-2xl font-black text-slate-800 tracking-tight text-center">
+              {branding.app_title}
+            </h1>
+          </div>
           <div className="inline-flex max-w-full items-center gap-1 rounded-full bg-white border border-slate-200 shadow-sm p-1">
             <button
               type="button"
@@ -5286,6 +5317,8 @@ export default function FamilyScheduler() {
                 <X size={18} />
               </button>
             </div>
+
+            <AppBrandingEditor value={branding} onSaved={saveAppBrandingFromUi} />
 
             <button
               type="button"

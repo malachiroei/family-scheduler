@@ -1,17 +1,22 @@
 import { NextRequest, NextResponse } from "next/server";
+import { defaultAppBranding } from "@/app/lib/appBranding";
 import { fallbackRoster, type FamilyRole, type StoredFamilyMember } from "@/app/lib/familyMembers";
-import { loadFamilyRoster, publicRosterPayload, saveFamilyRoster } from "@/app/lib/familyRosterStore";
+import { loadAppBranding, loadFamilyRoster, publicRosterPayload, saveFamilyRoster } from "@/app/lib/familyRosterStore";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
 
 export async function GET() {
   try {
-    const roster = await loadFamilyRoster();
-    return NextResponse.json({ ok: true, ...publicRosterPayload(roster) });
+    const [roster, branding] = await Promise.all([loadFamilyRoster(), loadAppBranding()]);
+    return NextResponse.json({ ok: true, ...publicRosterPayload(roster), branding });
   } catch (error) {
     console.error("[api/family] GET failed", error);
-    return NextResponse.json({ ok: true, ...publicRosterPayload(fallbackRoster) });
+    return NextResponse.json({
+      ok: true,
+      ...publicRosterPayload(fallbackRoster),
+      branding: defaultAppBranding(),
+    });
   }
 }
 

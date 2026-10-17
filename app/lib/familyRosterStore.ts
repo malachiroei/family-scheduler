@@ -1,5 +1,12 @@
 import { getDatabaseConfig, sql, sqlJson } from "@/app/lib/db";
 import {
+  APP_BRANDING_STATE_KEY,
+  mergeAppBranding,
+  parseAppBranding,
+  sanitizeAppBrandingInput,
+  type AppBranding,
+} from "@/app/lib/appBranding";
+import {
   createFamilyRoster,
   fallbackRoster,
   FAMILY_ROSTER_STATE_KEY,
@@ -16,6 +23,7 @@ type StoredPayload = {
 
 let stateTableReady = false;
 let rosterCache: { roster: FamilyRoster; at: number } | null = null;
+let brandingCache: { branding: AppBranding; at: number } | null = null;
 const ROSTER_CACHE_MS = 10_000;
 
 const getErrorMessage = (error: unknown) =>
@@ -191,6 +199,59 @@ export const saveFamilyRoster = async (input: StoredFamilyMember[]): Promise<Fam
   const roster = createFamilyRoster(members, "db");
   rosterCache = { roster, at: Date.now() };
   return roster;
+};
+
+export const loadAppBranding = async (): Promise<AppBranding> => {
+  const fallback = mergeAppBranding(null);
+  try {
+    if (brandingCache && Date.now() - brandingCache.at < ROSTER_CACHE_MS) {
+      return brandingCache.branding;
+    }
+    const tableStatus = await ensureSchedulerStateTable();
+    if (!tableStatus.ok) {
+      return fallback;
+    }
+    const result = await sql`
+      SELECT payload
+      FROM scheduler_state
+      WHERE state_key = ${APP_BRANDING_STATE_KEY}
+      LIMIT 1
+    `;
+    const row = result.rows[0] as { payload?: unknown } | undefined;
+    const branding = mergeAppBranding(parseAppBranding(row?.payload));
+    brandingCache = { branding, at: Date.now() };
+    return branding;
+  } catch (error) {
+    console.error("[app-branding] load failed; using default", error);
+    return fallback;
+  }
+};
+
+export const saveAppBranding = async (input: { app_title?: unknown; app_icon?: unknown }): Promise<AppBranding> => {
+  const branding = sanitizeAppBrandingInput(input);
+  const tableStatus = await ensureSchedulerStateTable();
+  if (!tableStatus.ok) {
+    throw new Error(
+      tableStatus.code === "MISSING_POSTGRES_ENV"
+        ? "חסר חיבור למסד הנתונים"
+        : tableStatus.error || "שמירת עיצוב הלוח נכשלה",
+    );
+  }
+  try {
+    await sql`
+      INSERT INTO scheduler_state (state_key, payload, updated_at)
+      VALUES (${APP_BRANDING_STATE_KEY}, ${sqlJson(branding)}, NOW())
+      ON CONFLICT (state_key)
+      DO UPDATE SET
+        payload = EXCLUDED.payload,
+        updated_at = NOW()
+    `;
+  } catch (error) {
+    console.error("[app-branding] save failed", error);
+    throw new Error(getErrorMessage(error) || "שמירת עיצוב הלוח נכשלה");
+  }
+  brandingCache = { branding, at: Date.now() };
+  return branding;
 };
 
 export const publicRosterPayload = (roster: FamilyRoster) => ({
