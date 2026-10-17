@@ -61,7 +61,7 @@ export default async function OpenGraphImage() {
               src={dataUri}
               width={360}
               height={360}
-              style={{ borderRadius: 72, objectFit: "contain" }}
+              style={{ borderRadius: 72 }}
             />
           </div>
         ),
