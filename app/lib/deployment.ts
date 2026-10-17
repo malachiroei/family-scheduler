@@ -34,10 +34,10 @@ export const isOriginalHouseholdEnabled = (host = "") => {
 
 export const appMetadataBase = (): URL => {
   const candidates = [
-    process.env.NEXT_PUBLIC_VERCEL_PROJECT_PRODUCTION_URL,
     process.env.VERCEL_PROJECT_PRODUCTION_URL,
-    process.env.NEXT_PUBLIC_VERCEL_URL,
+    process.env.NEXT_PUBLIC_VERCEL_PROJECT_PRODUCTION_URL,
     process.env.VERCEL_URL,
+    process.env.NEXT_PUBLIC_VERCEL_URL,
   ].filter((value): value is string => Boolean(value));
   for (const value of candidates) {
     try {
@@ -47,4 +47,15 @@ export const appMetadataBase = (): URL => {
     }
   }
   return new URL("http://localhost:3000");
+};
+
+export const siteUrlFromHost = (host?: string | null): string => {
+  const hostname = (host ?? "").split(",")[0].trim().replace(/^https?:\/\//i, "");
+  if (!hostname) {
+    return appMetadataBase().origin;
+  }
+  if (/^(localhost|127\.0\.0\.1)(:\d+)?$/i.test(hostname)) {
+    return `http://${hostname}`;
+  }
+  return `https://${hostname}`;
 };

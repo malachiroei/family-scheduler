@@ -40,6 +40,41 @@ export const appIconSrc = (icon: string) => {
 export const defaultFaviconHref = () =>
   isOriginalHouseholdEnabled() ? ORIGINAL_FAVICON_SRC : GENERIC_APP_ICON;
 
+export const OG_IMAGE_WIDTH = 1200;
+export const OG_IMAGE_HEIGHT = 630;
+
+export const fallbackShareIconPath = () =>
+  isOriginalHouseholdEnabled() ? ORIGINAL_LOGO_SRC : GENERIC_APP_ICON;
+
+export const resolveShareImagePath = (icon?: string | null): string => {
+  const fallback = fallbackShareIconPath();
+  if (!icon) {
+    return fallback;
+  }
+  const src = appIconSrc(icon);
+  if (src.startsWith("data:image/")) {
+    return fallback;
+  }
+  if (/^https?:\/\//i.test(src) || src.startsWith("/")) {
+    return src;
+  }
+  return fallback;
+};
+
+export const toAbsoluteAssetUrl = (siteUrl: string, appIconUrl?: string | null): string => {
+  const base = siteUrl.replace(/\/$/, "");
+  if (!appIconUrl) {
+    return `${base}${fallbackShareIconPath()}`;
+  }
+  if (appIconUrl.startsWith("http://") || appIconUrl.startsWith("https://")) {
+    return appIconUrl;
+  }
+  if (appIconUrl.startsWith("data:")) {
+    return `${base}${fallbackShareIconPath()}`;
+  }
+  return `${base}${appIconUrl.startsWith("/") ? appIconUrl : `/${appIconUrl}`}`;
+};
+
 const emojiFaviconDataUri = (emoji: string) => {
   const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><text x="50%" y="56%" dominant-baseline="middle" text-anchor="middle" font-size="48">${emoji}</text></svg>`;
   return `data:image/svg+xml,${encodeURIComponent(svg)}`;
