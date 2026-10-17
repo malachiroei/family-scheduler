@@ -320,12 +320,11 @@ const addDays = (date: Date, days: number) => {
   return next;
 };
 
+const startOfLocalDay = (date: Date) => new Date(date.getFullYear(), date.getMonth(), date.getDate());
+
 const getWeekStart = (date: Date) => {
-  const next = new Date(date);
-  const day = next.getDay();
-  next.setHours(0, 0, 0, 0);
-  next.setDate(next.getDate() - day);
-  return next;
+  const local = startOfLocalDay(date);
+  return new Date(local.getFullYear(), local.getMonth(), local.getDate() - local.getDay());
 };
 
 const getNextOccurrenceDate = (dayIndex: number, fromDate: Date) => {
@@ -1214,10 +1213,7 @@ const normalizePersistedState = (
   payload: PersistedStatePayload | null | undefined,
   fallbackWeekStart: Date
 ) => {
-  const parsedWeekStart = payload?.weekStart ? new Date(payload.weekStart) : null;
-  const safeWeekStart = parsedWeekStart && !Number.isNaN(parsedWeekStart.getTime())
-    ? getWeekStart(parsedWeekStart)
-    : fallbackWeekStart;
+  const safeWeekStart = getWeekStart(fallbackWeekStart);
 
   const safeWeeksData = {
     [toIsoDate(safeWeekStart)]: createEmptyWeekDays(safeWeekStart),
@@ -1817,6 +1813,7 @@ export default function FamilyScheduler() {
 
   const weekKey = toIsoDate(weekStart);
   const days = weeksData[weekKey] ?? [];
+  const todayIso = toIsoDate(new Date());
   // The blocking spinner is only for the very first load, while the board is still completely empty.
   // Week switches and background refreshes keep the board visible (see isSyncingSchedule).
   const boardIsEmpty = days.every((day) => day.events.length === 0);
@@ -2143,7 +2140,7 @@ export default function FamilyScheduler() {
           const parsed = JSON.parse(raw) as PersistedStatePayload;
           const normalized = normalizePersistedState(parsed, initialWeekStart);
           if (!cancelled) {
-            setWeekStart(normalized.weekStart);
+            setWeekStart(initialWeekStart);
             setRecurringTemplates(normalized.recurringTemplates);
             setWeeksData(normalized.weeksData);
           }
@@ -2162,7 +2159,7 @@ export default function FamilyScheduler() {
           const payload = await response.json() as { state?: PersistedStatePayload };
           if (payload?.state && !cancelled) {
             const normalized = normalizePersistedState(payload.state, initialWeekStart);
-            setWeekStart(normalized.weekStart);
+            setWeekStart(initialWeekStart);
             setRecurringTemplates(normalized.recurringTemplates);
             setWeeksData(normalized.weeksData);
             return;
@@ -3755,7 +3752,7 @@ export default function FamilyScheduler() {
   }, [weekKey, isHydrated]);
 
   useEffect(() => {
-    if (!isHydrated || hasAutoScrolledToTodayRef.current) {
+    if (!isHydrated || hasAutoScrolledToTodayRef.current || days.length === 0) {
       return;
     }
 
@@ -3765,14 +3762,19 @@ export default function FamilyScheduler() {
       return;
     }
 
-    const targetDayCard = dayCardRefs.current[today.getDay()] ?? null;
+    const todayIso = toIsoDate(today);
+    const todayIndex = days.findIndex((day) => day.isoDate === todayIso);
+    const targetDayCard = dayCardRefs.current[todayIndex >= 0 ? todayIndex : today.getDay()] ?? null;
     if (!targetDayCard) {
       return;
     }
 
-    targetDayCard.scrollIntoView({ behavior: 'auto', block: 'start', inline: 'nearest' });
-    hasAutoScrolledToTodayRef.current = true;
-  }, [isHydrated, weekKey, days.length]);
+    const timer = window.setTimeout(() => {
+      targetDayCard.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'nearest' });
+      hasAutoScrolledToTodayRef.current = true;
+    }, 120);
+    return () => window.clearTimeout(timer);
+  }, [isHydrated, weekKey, days.length, scheduleLoadedWeekKey]);
 
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
   const parseInstructionFallback = (text: string): { targetWeekStart: Date; events: AiEvent[] } | null => {
@@ -5012,16 +5014,26 @@ export default function FamilyScheduler() {
               return normalizeEventDateKey(event.date, new Date(`${day.isoDate}T00:00:00`)) === currentCellDate;
           });
 
+          const isToday = day.isoDate === todayIso;
           return (
           <div
             key={day.isoDate}
             ref={(element) => {
               dayCardRefs.current[dayIndex] = element;
             }}
-            className="bg-white rounded-3xl shadow-xl overflow-hidden border border-slate-100 ring-1 ring-slate-200 print-day-card flex flex-col min-h-[280px]"
+            className={`bg-white rounded-3xl shadow-xl overflow-hidden border print-day-card flex flex-col min-h-[280px] ${
+              isToday
+                ? 'border-indigo-400 ring-2 ring-indigo-400 ring-offset-2 ring-offset-[#f8fafc]'
+                : 'border-slate-100 ring-1 ring-slate-200'
+            }`}
           >
-            <div className="bg-[#1e293b] text-white p-4 flex justify-between items-center shrink-0">
-              <span className="font-bold text-lg">{day.dayName}</span>
+            <div className={`text-white p-4 flex justify-between items-center shrink-0 ${isToday ? 'bg-indigo-700' : 'bg-[#1e293b]'}`}>
+              <span className="font-bold text-lg flex items-center gap-2">
+                {day.dayName}
+                {isToday ? (
+                  <span className="rounded-full bg-white/20 px-2 py-0.5 text-[11px] font-extrabold tracking-wide">היום</span>
+                ) : null}
+              </span>
               <span className="text-sm font-mono opacity-70">{day.date}</span>
             </div>
 
@@ -5353,28 +5365,6 @@ export default function FamilyScheduler() {
             >
               עריכת בני המשפחה
             </button>
-
-            <div className="rounded-xl border border-amber-200 bg-amber-50 p-3 space-y-2">
-              <div className="text-sm font-bold text-amber-950">מחק משחקים מיובאים</div>
-              <p className="text-xs text-amber-900">
-                מוחק מהלו״ז רק משחקי אקסל ששובצו לילד/ה (לא משימות רגילות). אחרי זה אפשר לייבא מחדש עם התאריכים הנכונים.
-              </p>
-              <div className="flex flex-wrap gap-1.5">
-                {roster.childDisplayNames.map((name) => (
-                  <button
-                    key={`clear-fixtures-${name}`}
-                    type="button"
-                    onClick={() => {
-                      setShowSettingsModal(false);
-                      void handleClearImportedFixtures(name);
-                    }}
-                    className="rounded-lg border border-amber-300 bg-white px-3 py-1.5 text-xs font-bold text-amber-900 hover:bg-amber-100"
-                  >
-                    {name}
-                  </button>
-                ))}
-              </div>
-            </div>
 
             <div className="space-y-1.5">
               {isInstallReady && (
