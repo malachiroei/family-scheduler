@@ -26,7 +26,7 @@ export async function POST(request: NextRequest) {
     await ensurePushTables();
 
     const roster = await loadFamilyRoster();
-    const defaultTestChild = roster.pushChildNames[0] ?? "רביד";
+    const defaultTestChild = roster.pushChildNames[0] ?? roster.childDisplayNames[0] ?? "ילד 1";
     const targetChildRaw = await resolveTargetChild(request);
     const resolvedChild = roster.resolvePushName(targetChildRaw);
     const targetChild = resolvedChild && roster.isChildPushName(resolvedChild) ? resolvedChild : defaultTestChild;

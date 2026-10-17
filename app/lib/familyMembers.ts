@@ -1,6 +1,6 @@
 /**
  * Configurable family roster.
- * Priority: DB (`scheduler_state` / family_roster) → NEXT_PUBLIC_FAMILY_MEMBERS → default household.
+ * Priority: DB (`scheduler_state` / family_roster) → NEXT_PUBLIC_FAMILY_MEMBERS → generic placeholders.
  */
 
 export type FamilyRole = "child" | "parent";
@@ -42,12 +42,16 @@ export const COLOR_PALETTE = [
   { color: "bg-rose-500", iconColor: "text-rose-500" },
 ] as const;
 
-const DEFAULT_CHILDREN = ["רביד", "עמית", "אלין"] as const;
-const DEFAULT_PARENTS = ["סיון", "רועי"] as const;
+const DEFAULT_CHILDREN = ["ילד 1", "ילד 2"] as const;
+const DEFAULT_PARENTS = ["הורה 1", "הורה 2"] as const;
 
 type KnownSpec = { key: string; role: FamilyRole; aliases: string[]; pushName?: string };
 
 const KNOWN_BY_NAME: Record<string, KnownSpec> = {
+  "ילד 1": { key: "child1", role: "child", aliases: ["child1", "ילד 1"] },
+  "ילד 2": { key: "child2", role: "child", aliases: ["child2", "ילד 2"] },
+  "הורה 1": { key: "parent1", role: "parent", aliases: ["parent1", "הורה 1"] },
+  "הורה 2": { key: "parent2", role: "parent", aliases: ["parent2", "הורה 2"] },
   "רביד": { key: "ravid", role: "child", aliases: ["ravid", "רביד"] },
   "עמית": { key: "amit", role: "child", aliases: ["amit", "עמית"] },
   "אלין": { key: "alin", role: "child", aliases: ["alin", "אלין"] },
@@ -245,7 +249,7 @@ export const createFamilyRoster = (
   const children = members.filter((member) => member.role === "child");
   const parents = members.filter((member) => member.role === "parent");
   const memberKeys = members.map((member) => member.key);
-  const defaultChildKey = children[0]?.key ?? members[0]?.key ?? "amit";
+  const defaultChildKey = children[0]?.key ?? members[0]?.key ?? "child1";
 
   const byKey = new Map(members.map((member) => [member.key, member]));
   const byAlias = new Map<string, FamilyMember>();

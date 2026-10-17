@@ -1643,13 +1643,20 @@ type CreateWeekDaysOptions = {
   johnnySuppressedIds?: Set<string>;
 };
 
+const isBuiltinJohnnyEnabled = () => {
+  const raw = String(process.env.NEXT_PUBLIC_ENABLE_BUILTIN_JOHNNY ?? "").trim().toLowerCase();
+  return raw === "1" || raw === "true" || raw === "yes";
+};
+
 const createWeekDays = (
   weekStart: Date,
   includeDemo: boolean,
   recurringTemplates: RecurringTemplate[],
   options?: CreateWeekDaysOptions
 ): DaySchedule[] => {
-  const mergedRecurringTemplates = options?.skipDefaultRecurringTemplates
+  // Hardcoded remote-learning / English templates stay off unless a caller opts in.
+  const skipDefaults = options?.skipDefaultRecurringTemplates !== false;
+  const mergedRecurringTemplates = skipDefaults
     ? recurringTemplates
     : mergeRecurringTemplatesWithDefaults(recurringTemplates);
   const days: DaySchedule[] = dayNames.map((dayName, idx) => {
@@ -1675,11 +1682,11 @@ const createWeekDays = (
     });
   };
 
-  buildJohnnyEvents(weekStart, options?.johnnySuppressedIds).forEach(({ dayIndex, event }) => addEvent(dayIndex, event));
+  if (isBuiltinJohnnyEnabled()) {
+    buildJohnnyEvents(weekStart, options?.johnnySuppressedIds).forEach(({ dayIndex, event }) => addEvent(dayIndex, event));
+  }
 
-  mergedRecurringTemplates
-    .filter((template) => !template.title.includes('ג׳וני') && !template.title.includes("ג'וני"))
-    .forEach((template) => {
+  mergedRecurringTemplates.forEach((template) => {
     addEvent(template.dayIndex, {
       id: template.persistedRowId ?? `${template.templateId}-${toIsoDate(weekStart)}`,
       date: toEventDateKey(addDays(weekStart, template.dayIndex)),
@@ -1694,7 +1701,7 @@ const createWeekDays = (
       requireConfirmation: template.requireConfirmation,
       reminderLeadMinutes: template.reminderLeadMinutes,
     });
-    });
+  });
 
   if (includeDemo) {
     addEvent(0, createEvent({ date: toEventDateKey(new Date(`${days[0].isoDate}T00:00:00`)), time: '14:45', child: 'alin', title: 'תגבור פלא', type: 'lesson' }));
