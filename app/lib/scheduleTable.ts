@@ -1,4 +1,5 @@
 import { sql } from "@/app/lib/db";
+import { defaultChildKey } from "@/app/lib/familyMembers";
 import { normalizeMetadataTime, parseMetadataBoolean } from "@/app/lib/scheduleTime";
 
 export type ScheduleEventMetadata = {
@@ -24,7 +25,7 @@ export type ScheduleEventMetadata = {
 const defaultMetadata = (): ScheduleEventMetadata => ({
   dayIndex: 0,
   time: "08:00",
-  child: "amit",
+  child: defaultChildKey,
   type: "lesson",
   zoomLink: null,
   isRecurring: false,

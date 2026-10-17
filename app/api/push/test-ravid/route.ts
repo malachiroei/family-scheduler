@@ -2,12 +2,13 @@ import { NextResponse } from "next/server";
 import { NextRequest } from "next/server";
 import { sql } from "@/app/lib/db";
 import { ensurePushTables, sendPushToEndpoint } from "@/app/lib/push";
+import { isChildPushName, pushChildNames, resolvePushName } from "@/app/lib/familyMembers";
 
 type EndpointRow = {
   endpoint: string;
 };
 
-const allowedChildNames = ["רביד", "עמית", "אלין"] as const;
+const defaultTestChild = pushChildNames[0] ?? "רביד";
 
 const resolveTargetChild = async (request: NextRequest) => {
   const fromQuery = request.nextUrl.searchParams.get("childName") || request.nextUrl.searchParams.get("userName");
@@ -27,9 +28,8 @@ export async function POST(request: NextRequest) {
     await ensurePushTables();
 
     const targetChildRaw = await resolveTargetChild(request);
-    const targetChild = allowedChildNames.includes(targetChildRaw as (typeof allowedChildNames)[number])
-      ? targetChildRaw
-      : "רביד";
+    const resolvedChild = resolvePushName(targetChildRaw);
+    const targetChild = resolvedChild && isChildPushName(resolvedChild) ? resolvedChild : defaultTestChild;
 
     const result = await sql<EndpointRow>`
       SELECT endpoint

@@ -2,15 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { sql } from "@/app/lib/db";
 import { ensureScheduleMetadataColumn, parseScheduleMetadata } from "@/app/lib/scheduleTable";
 import { sendPushToAll, sendPushToParents } from "@/app/lib/push";
-
-const childLabelMap: Record<string, string> = {
-  ravid: "רביד",
-  amit: "עמית",
-  alin: "אלין",
-  "רביד": "רביד",
-  "עמית": "עמית",
-  "אלין": "אלין",
-};
+import { labelForMemberKey } from "@/app/lib/familyMembers";
 
 export async function POST(request: NextRequest) {
   try {
@@ -53,13 +45,13 @@ export async function POST(request: NextRequest) {
 
       const meta = parseScheduleMetadata(existingRow.metadata);
       const childFromDb = meta.child.trim();
-      const childName = childNameRaw || childLabelMap[childFromDb.toLowerCase()] || childLabelMap[childFromDb] || "הילד";
+      const childName = childNameRaw || labelForMemberKey(childFromDb) || "הילד";
       return NextResponse.json({ ok: true, eventId, childName, completed: true, alreadyConfirmed: true });
     }
 
     const meta = parseScheduleMetadata(row.metadata);
     const childFromDb = meta.child.trim();
-    const childName = childNameRaw || childLabelMap[childFromDb.toLowerCase()] || childLabelMap[childFromDb] || "הילד";
+    const childName = childNameRaw || labelForMemberKey(childFromDb) || "הילד";
 
     const parentPayload = {
       title: "אישור משימה",

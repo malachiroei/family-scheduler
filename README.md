@@ -15,6 +15,9 @@ VAPID_SUBJECT=mailto:you@example.com
 
 # Protect /api/push/remind cron endpoint (recommended)
 CRON_SECRET=your_random_secret
+
+# Optional family roster (comma-separated). When unset, defaults to רביד, עמית, אלין + parents סיון, רועי.
+# NEXT_PUBLIC_FAMILY_MEMBERS=דני,מאיה,נועם
 ```
 
 ## PWA + Install

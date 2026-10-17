@@ -2,15 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { sql } from "@/app/lib/db";
 import { ensureScheduleMetadataColumn, parseScheduleMetadata } from "@/app/lib/scheduleTable";
 import { sendPushToParents } from "@/app/lib/push";
-
-const childLabelMap: Record<string, string> = {
-  ravid: "רביד",
-  amit: "עמית",
-  alin: "אלין",
-  "רביד": "רביד",
-  "עמית": "עמית",
-  "אלין": "אלין",
-};
+import { labelForMemberKey } from "@/app/lib/familyMembers";
 
 export async function POST(request: NextRequest) {
   try {
@@ -43,7 +35,7 @@ export async function POST(request: NextRequest) {
 
     const meta = parseScheduleMetadata(row.metadata);
     const childFromDb = meta.child.trim();
-    const childName = childNameRaw || childLabelMap[childFromDb.toLowerCase()] || childLabelMap[childFromDb] || "הילד";
+    const childName = childNameRaw || labelForMemberKey(childFromDb) || "הילד";
     const taskTitle = String(row.title || "משימה").trim() || "משימה";
 
     await sendPushToParents({

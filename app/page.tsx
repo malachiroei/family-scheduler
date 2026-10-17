@@ -6,17 +6,26 @@ import html2canvas from 'html2canvas';
 import AgentChat from '@/app/components/AgentChat';
 import { normalizeMetadataTime, parseMetadataBoolean } from '@/app/lib/scheduleTime';
 import { fixtureLeagueBadge } from '@/app/lib/fixtureLeague';
+import {
+  baseChildrenConfig,
+  childDisplayNames,
+  childFormOptions,
+  defaultChildKey,
+  escapeRegExp,
+  familyMembers,
+  getMemberKeysFromChildField,
+  isAllowedScheduleChild,
+  isChildMemberKey,
+  isParentMemberKey,
+  labelForMemberKey,
+  memberAliasPattern,
+  pushChildNames,
+  pushUserNames,
+  resolveMemberKey,
+} from '@/app/lib/familyMembers';
 
-const baseChildrenConfig = {
-  ravid: { name: 'רביד', color: 'bg-blue-500', iconColor: 'text-blue-500' },
-  amit: { name: 'עמית', color: 'bg-green-500', iconColor: 'text-green-500' },
-  alin: { name: 'אלין', color: 'bg-pink-500', iconColor: 'text-pink-500' },
-  roi: { name: 'רועי', color: 'bg-orange-500', iconColor: 'text-orange-500' },
-  sivan: { name: 'סיון', color: 'bg-violet-500', iconColor: 'text-violet-500' },
-};
-
-type BaseChildKey = keyof typeof baseChildrenConfig;
-type ChildKey = BaseChildKey | 'amit_alin' | 'alin_ravid' | 'amit_ravid';
+type BaseChildKey = string;
+type ChildKey = string;
 type KnownEventType = 'dog' | 'gym' | 'sport' | 'lesson' | 'dance';
 type EventType = string;
 
@@ -116,20 +125,12 @@ const activityTypePresets: Array<{ value: EventType; label: string; emoji: strin
   { value: 'other', label: 'אחר', emoji: '✨' },
 ];
 
-const childOptions: Array<{ key: ChildKey; label: string }> = [
-  { key: 'ravid', label: 'רביד' },
-  { key: 'amit', label: 'עמית' },
-  { key: 'alin', label: 'אלין' },
-  { key: 'roi', label: 'רועי' },
-  { key: 'sivan', label: 'סיון' },
-  { key: 'amit_alin', label: 'עמית ואלין (ביחד)' },
-  { key: 'alin_ravid', label: 'אלין ורביד (ביחד)' },
-  { key: 'amit_ravid', label: 'עמית ורביד (ביחד)' },
-];
+const childOptions: Array<{ key: ChildKey; label: string }> = childFormOptions;
 
 const AI_OCR_SYSTEM_PROMPT = `אתה מנתח צילום מסך של אפליקציית שיעורים (למשל "השיעורים שלי") או טקסט לוז WhatsApp.
 חלץ מהתמונה ומהטקסט אירועים בפורמט JSON בלבד (Array).
 אם מופיעים תאריכים כמו 20/04/26 או 17/02/26 ושעות בטווח (למשל 15:00–15:25), השתמש בשעת ההתחלה בלבד.
+בני המשפחה: ${familyMembers.map((member) => `${member.name} => child: "${member.key}"`).join(", ")}.
 מורים ושיוך ילדים (חובה לפי שם המורה):
 - Karl / קארל => child: "amit" (עמית)
 - Rachel / רייצ׳ל / RAVHEL / רחל (באנגלית באפליקציה) => child: "alin" (אלין)
@@ -194,8 +195,8 @@ type BeforeInstallPromptEvent = Event & {
   userChoice: Promise<{ outcome: 'accepted' | 'dismissed'; platform: string }>;
 };
 
-type PushUserName = 'רביד' | 'עמית' | 'אלין' | 'סיוון' | 'רועי';
-type PushChildName = 'רביד' | 'עמית' | 'אלין';
+type PushUserName = string;
+type PushChildName = string;
 type ReminderLeadMinutes = 5 | 10 | 15 | 30 | 60 | 120 | 1440;
 type PushSoundPreset = '/sounds/standard.mp3' | '/sounds/bell.mp3' | '/sounds/modern.mp3';
 type PresenceUser = {
@@ -206,8 +207,8 @@ type PresenceUser = {
   lastSeen: string | null;
 };
 
-const pushUserOptions: PushUserName[] = ['רביד', 'עמית', 'אלין', 'סיוון', 'רועי'];
-const pushChildOptions: PushChildName[] = ['רביד', 'עמית', 'אלין'];
+const pushUserOptions: PushUserName[] = pushUserNames;
+const pushChildOptions: PushChildName[] = pushChildNames;
 const PUSH_USER_STORAGE_KEY = 'family-scheduler-push-user';
 const PUSH_MIGRATION_FLAG_KEY = 'family-scheduler-push-migrated-v1';
 const PUSH_PREFS_STORAGE_KEY = 'family-scheduler-push-preferences-v1';
@@ -262,11 +263,8 @@ const sanitizePushSound = (value: unknown): PushSoundPreset => {
     : defaultPushSound;
 };
 
-const isParentPushUser = (value: PushUserName | ''): value is 'סיוון' | 'רועי' =>
-  value === 'סיוון' || value === 'רועי';
-
-const isParentUserOption = (value: PushUserName): value is 'סיוון' | 'רועי' =>
-  value === 'סיוון' || value === 'רועי';
+const isParentPushUser = (value: PushUserName | ''): boolean => Boolean(value) && isParentMemberKey(value);
+const isParentUserOption = (value: PushUserName): boolean => isParentMemberKey(value);
 
 const normalizeWeekEventsWithDate = (weeksData: Record<string, DaySchedule[]> | undefined) => {
   if (!weeksData || typeof weeksData !== 'object') {
@@ -390,14 +388,6 @@ const toDisplayDate = (date: Date) => {
   return `${d}.${m}`;
 };
 
-const bulkImportChildLabel: Record<BaseChildKey, string> = {
-  ravid: 'רביד',
-  amit: 'עמית',
-  alin: 'אלין',
-  roi: 'רועי',
-  sivan: 'סיון',
-};
-
 /** Text after the weekday + time on a bulk line — use as task title when descriptive (e.g. משחק בוגרות…). */
 const stripBulkScheduleLineDescription = (raw: string): string => {
   let s = raw.trim();
@@ -416,7 +406,7 @@ const buildLocalBulkImportSummary = (events: AiEvent[], targetWeekStart: Date): 
   const ws = getWeekStart(targetWeekStart);
   const rangeLabel = `${toDisplayDate(ws)}–${toDisplayDate(addDays(ws, 6))}`;
   const lines = events.map((ev) => {
-    const who = bulkImportChildLabel[coerceBaseChildKey(String(ev.child))] ?? String(ev.child);
+    const who = labelForMemberKey(coerceBaseChildKey(String(ev.child)));
     const dayLabel = dayNames[ev.dayIndex] ?? `יום ${ev.dayIndex}`;
     const timeLabel = normalizeTimeForPicker(ev.time);
     const title = (ev.title || '').trim() || 'פעילות';
@@ -607,15 +597,7 @@ const getDayIndexFromText = (text: string): number | null => {
   return null;
 };
 
-const normalizeChildKey = (value: string): BaseChildKey | null => {
-  const normalized = value.trim().toLowerCase();
-  if (normalized === 'amit' || normalized === 'עמית') return 'amit';
-  if (normalized === 'ravid' || normalized === 'רביד') return 'ravid';
-  if (normalized === 'alin' || normalized === 'אלין') return 'alin';
-  if (normalized === 'roi' || normalized === 'רועי') return 'roi';
-  if (normalized === 'sivan' || normalized === 'סיון') return 'sivan';
-  return null;
-};
+const normalizeChildKey = (value: string): BaseChildKey | null => resolveMemberKey(value);
 
 /** RTL marks / NBSP from paste can break strict equality — still map to a child for save + summary. */
 const coerceBaseChildKey = (value: string): BaseChildKey => {
@@ -623,7 +605,7 @@ const coerceBaseChildKey = (value: string): BaseChildKey => {
     .replace(/[\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, '')
     .replace(/\u00a0/g, ' ')
     .trim();
-  return normalizeChildKey(cleaned) ?? 'amit';
+  return normalizeChildKey(cleaned) ?? defaultChildKey;
 };
 
 const normalizeAiEventForImport = (ev: AiEvent, scheduleFullText = ''): AiEvent => {
@@ -652,7 +634,7 @@ const dedupeAiEvents = (events: AiEvent[]): AiEvent[] => {
   return out;
 };
 
-const MENTIONS_CHILD_IN_SCHEDULE_TEXT = /(עמית|רביד|אלין|amit|ravid|alin)/i;
+const MENTIONS_CHILD_IN_SCHEDULE_TEXT = new RegExp(`(${memberAliasPattern})`, 'i');
 
 const isGenericTrainingTitle = (title: string) => {
   const t = title.trim();
@@ -677,7 +659,7 @@ const buildScheduleClarification = (
     events.some((e) => isGenericTrainingTitle(e.title || '')) && !sportHintInText;
   const questions: string[] = [];
   if (needsWho) {
-    questions.push('למי לשייך את המשימות? (כתבי למשל: עמית, רביד או אלין)');
+    questions.push(`למי לשייך את המשימות? (כתבי למשל: ${childDisplayNames.join(', ')})`);
   }
   if (needsWhat) {
     questions.push('על איזו פעילות מדובר? (למשל: כדורסל, שחייה, כושר...)');
@@ -690,10 +672,10 @@ const parseClarificationReply = (reply: string): { child: BaseChildKey | null; a
   if (!raw) {
     return { child: null, activityNote: null };
   }
-  const childMatch = raw.match(/(עמית|רביד|אלין|amit|ravid|alin)/i);
+  const childMatch = raw.match(new RegExp(`(${memberAliasPattern})`, 'i'));
   const child = childMatch ? normalizeChildKey(childMatch[1]) : null;
   const rest = raw
-    .replace(/(עמית|רביד|אלין|amit|ravid|alin)/gi, ' ')
+    .replace(new RegExp(`(${memberAliasPattern})`, 'gi'), ' ')
     .replace(/[,;،]/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
@@ -725,25 +707,20 @@ const applyActivityDetailToDraftEvents = (events: AiEvent[], detail: string): Ai
 const SCHEDULE_FETCH_TIMEOUT_MS = 20000;
 
 const normalizeChildForSave = (value: string): ChildKey => {
-  const normalized = value.trim().toLowerCase();
-  if (normalized === 'ravid' || normalized === 'amit' || normalized === 'alin' || normalized === 'roi' || normalized === 'sivan') {
-    return normalized as ChildKey;
+  const trimmed = value.trim();
+  if (isAllowedScheduleChild(trimmed)) {
+    return resolveMemberKey(trimmed) ?? trimmed;
   }
-  if (normalized === 'amit_alin' || normalized === 'alin_ravid' || normalized === 'amit_ravid') {
-    return normalized as ChildKey;
-  }
-  return 'amit';
+  return defaultChildKey;
 };
 
 const normalizeChildFilterValue = (value: unknown): 'all' | BaseChildKey => {
-  if (value === 'ravid' || value === 'amit' || value === 'alin' || value === 'roi' || value === 'sivan') {
-    return value;
-  }
-  return 'all';
+  if (typeof value !== 'string') return 'all';
+  return resolveMemberKey(value) ?? 'all';
 };
 
 const detectChildFromText = (text: string): BaseChildKey | null => {
-  const match = text.match(/(עמית|רביד|אלין|amit|ravid|alin)/i);
+  const match = text.match(new RegExp(`(${memberAliasPattern})`, 'i'));
   if (match) {
     return normalizeChildKey(match[1]);
   }
@@ -786,6 +763,18 @@ const detectDefaultChildFromScheduleHeader = (text: string): BaseChildKey | null
   ) {
     return 'ravid';
   }
+  for (const member of familyMembers) {
+    const name = escapeRegExp(member.name);
+    const key = escapeRegExp(member.key);
+    if (
+      new RegExp(
+        `של\\s*${name}|ל${name}\\b|${name}\\s+לשבוע|לו["׳']?ז\\s+של\\s*${name}|לו["׳']?ז\\s+${name}\\b|לוז\\s+${name}\\b|for\\s*${key}\\b`,
+        'i',
+      ).test(head)
+    ) {
+      return member.key;
+    }
+  }
   return null;
 };
 
@@ -797,10 +786,10 @@ const inferScheduleHeaderChild = (text: string): BaseChildKey | null => {
   let head = normalizeScheduleHeaderQuotes(text.slice(0, 2200));
   head = head.replace(/[\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, '');
   const patterns = [
-    /לו\s*["׳'\u05F3\u05F4]?\s*ז\s+ל\s*(עמית|רביד|אלין)\b/i,
-    /לו\s*["׳'\u05F3\u05F4]?\s*ז\s+(עמית|רביד|אלין)\b/i,
-    /לוז\s+(עמית|רביד|אלין)\b/i,
-    /לו\s*ז\s+(עמית|רביד|אלין)\b/i,
+    new RegExp(`לו\\s*["׳'\\u05F3\\u05F4]?\\s*ז\\s+ל\\s*(${memberAliasPattern})\\b`, 'i'),
+    new RegExp(`לו\\s*["׳'\\u05F3\\u05F4]?\\s*ז\\s+(${memberAliasPattern})\\b`, 'i'),
+    new RegExp(`לוז\\s+(${memberAliasPattern})\\b`, 'i'),
+    new RegExp(`לו\\s*ז\\s+(${memberAliasPattern})\\b`, 'i'),
   ];
   for (const p of patterns) {
     const m = head.match(p);
@@ -827,6 +816,16 @@ const inferScheduleHeaderChild = (text: string): BaseChildKey | null => {
   }
   if (/(?:לו\s*["׳'\u05F3\u05F4]?\s*ז|לוז)\s+[^\n]{0,48}\bאלין\b/i.test(head) || /\bאלין\s+לשבוע/i.test(head)) {
     return 'alin';
+  }
+  for (const member of familyMembers) {
+    const name = escapeRegExp(member.name);
+    if (
+      new RegExp(`(?:לו\\s*["׳'\\u05F3\\u05F4]?\\s*ז|לוז)\\s+[^\\n]{0,48}${name}`, 'i').test(head) ||
+      new RegExp(`ל${name}\\s+לשבוע`, 'i').test(head) ||
+      new RegExp(`${name}\\s+לשבוע`, 'i').test(head)
+    ) {
+      return member.key;
+    }
   }
   return null;
 };
@@ -1021,7 +1020,7 @@ const parseComplexWhatsAppMessage = (
             effectiveHeaderChild ??
             detectChildFromText(lineFromMatch) ??
             detectChildFromText(line) ??
-            'amit';
+            defaultChildKey;
 
           const targetDate = addDays(targetWeekStart, dayIndex);
           const key = `${dayIndex}|${mainTime}|${resolvedTitle}|${child}`;
@@ -1068,7 +1067,7 @@ const parseComplexWhatsAppMessage = (
         resolvedTitle = `${resolvedTitle} (${rangeTimesB[0]}–${rangeTimesB[rangeTimesB.length - 1]})`;
       }
 
-      const child = effectiveHeaderChild ?? detectChildFromText(line) ?? 'amit';
+      const child = effectiveHeaderChild ?? detectChildFromText(line) ?? defaultChildKey;
 
       const targetDate = addDays(targetWeekStart, dayIndex);
       const key = `${dayIndex}|${mainTime}|${resolvedTitle}|${child}`;
@@ -1307,8 +1306,7 @@ const isJohnnyScheduleTitle = (title: string) => /ג׳וני|ג'וני/i.test(`$
 const isJohnnyEventLike = (event: { type?: string; title?: string }) =>
   String(event.type || '').toLowerCase() === 'dog' || isJohnnyScheduleTitle(String(event.title || ''));
 
-const isSwapChild = (value: string): value is 'ravid' | 'amit' | 'alin' =>
-  value === 'ravid' || value === 'amit' || value === 'alin';
+const isSwapChild = (value: string): boolean => isChildMemberKey(value);
 
 /** Saturday rule: ravid never walks Johnny on Saturday morning. */
 const isRavidSaturdayMorning = (dayIndex: number, time: string, child: string) =>
@@ -1371,12 +1369,14 @@ const formatSchedulePersistenceError = (error: unknown): string => {
   return 'שמירה לשרת נכשלה. נסי שוב.';
 };
 
-const getChildKeys = (key: ChildKey): BaseChildKey[] => {
-  if (key === 'amit_alin') return ['amit', 'alin'];
-  if (key === 'alin_ravid') return ['alin', 'ravid'];
-  if (key === 'amit_ravid') return ['amit', 'ravid'];
-  return [key];
-};
+const getChildKeys = (key: ChildKey): BaseChildKey[] => getMemberKeysFromChildField(key);
+
+const memberVisual = (key: string) =>
+  baseChildrenConfig[key] ?? {
+    name: labelForMemberKey(key) || key,
+    color: 'bg-slate-400',
+    iconColor: 'text-slate-500',
+  };
 
 const remoteLearningTemplates: RecurringTemplate[] = [
   {
@@ -1801,7 +1801,7 @@ export default function FamilyScheduler() {
   const [hasConfirmedPushIdentitySelection, setHasConfirmedPushIdentitySelection] = useState(false);
   const [hasLoadedPushUser, setHasLoadedPushUser] = useState(false);
   const [parentReceiveAll, setParentReceiveAll] = useState(true);
-  const [parentWatchChildren, setParentWatchChildren] = useState<PushChildName[]>(['רביד', 'עמית', 'אלין']);
+  const [parentWatchChildren, setParentWatchChildren] = useState<PushChildName[]>([...pushChildOptions]);
   const [reminderLeadMinutes, setReminderLeadMinutes] = useState<ReminderLeadMinutes>(defaultPushLeadMinutes);
   const [pushSound, setPushSound] = useState<PushSoundPreset>(defaultPushSound);
   const [installPromptEvent, setInstallPromptEvent] = useState<BeforeInstallPromptEvent | null>(null);
@@ -2435,7 +2435,7 @@ export default function FamilyScheduler() {
 
     if (isParentUserOption(user)) {
       setParentReceiveAll(true);
-      setParentWatchChildren(['רביד', 'עמית', 'אלין']);
+      setParentWatchChildren([...pushChildOptions]);
     }
   };
 
@@ -2454,7 +2454,7 @@ export default function FamilyScheduler() {
         setShowPushIdentityPrompt(false);
         if (isParentUserOption(user)) {
           setParentReceiveAll(true);
-          setParentWatchChildren(['רביד', 'עמית', 'אלין']);
+          setParentWatchChildren([...pushChildOptions]);
         }
       }
     } catch {
@@ -2828,7 +2828,7 @@ export default function FamilyScheduler() {
     }
 
     if (!selectedChildForDirectTest) {
-      setApiError('בחרו קודם משתמש ילד (רביד/עמית/אלין) כדי לשלוח בדיקה ישירה.');
+      setApiError(`בחרו קודם משתמש ילד (${childDisplayNames.join('/')}) כדי לשלוח בדיקה ישירה.`);
       return;
     }
 
@@ -2922,7 +2922,7 @@ export default function FamilyScheduler() {
     try {
       const childName = (!isParentPushUser(pushUserName) && pushUserName)
         ? pushUserName
-        : baseChildrenConfig[getChildKeys(eventToConfirm.child)[0]].name;
+        : memberVisual(getChildKeys(eventToConfirm.child)[0]).name;
 
       const response = await fetch(toApiUrl('/api/notifications/ack'), {
         method: 'POST',
@@ -3452,7 +3452,7 @@ export default function FamilyScheduler() {
 
     setPushUserName('');
     setParentReceiveAll(true);
-    setParentWatchChildren(['רביד', 'עמית', 'אלין']);
+    setParentWatchChildren([...pushChildOptions]);
     setReminderLeadMinutes(defaultPushLeadMinutes);
     setPushSound(defaultPushSound);
     setSuccessMessage('ההגדרות אופסו בהצלחה.');
@@ -3749,7 +3749,7 @@ export default function FamilyScheduler() {
   const renderChildBadges = (childKey: ChildKey) => (
     <div className="flex flex-wrap items-center gap-1.5">
       {getChildKeys(childKey).map((baseKey) => {
-        const config = baseChildrenConfig[baseKey];
+        const config = memberVisual(baseKey);
         return (
           <span
             key={`${childKey}-${baseKey}`}
@@ -3944,7 +3944,7 @@ export default function FamilyScheduler() {
           let lineY = y + 50;
           cardEvents.forEach((event) => {
             const childKeys = getChildKeys(event.child);
-            const childName = childKeys.map((key) => baseChildrenConfig[key].name).join(' + ');
+            const childName = childKeys.map((key) => memberVisual(key).name).join(' + ');
             const eventLine = truncate(`${event.time}  ${event.title}`, 27);
             const childLine = truncate(childName, 26);
 
@@ -4418,7 +4418,7 @@ export default function FamilyScheduler() {
       recurringWeekly: false,
       data: {
         time: '08:00',
-        child: 'amit',
+        child: defaultChildKey,
         title: '',
         type: 'lesson',
         sendNotification: true,
@@ -4667,7 +4667,7 @@ export default function FamilyScheduler() {
           await handleSubmit(next.event, next.dayIndex, next.weekStart);
           const nextDate = parseEventDateKey(next.event.date);
           const nextLabel = nextDate ? `${dayNames[nextDate.getDay()]} ${toDisplayDate(nextDate)}` : 'בהמשך';
-          message = `בוצעה החלפה: ${baseChildrenConfig[prompt.fromChild].name} מורידה את ג׳וני ב${nextLabel} (${next.event.time}) במקום ${baseChildrenConfig[prompt.toChild].name}.`;
+          message = `בוצעה החלפה: ${memberVisual(prompt.fromChild).name} מורידה את ג׳וני ב${nextLabel} (${next.event.time}) במקום ${memberVisual(prompt.toChild).name}.`;
         } else {
           message = 'התורנות עודכנה. לא נמצאה תורנות עתידית מתאימה להחלפה.';
         }
@@ -4822,7 +4822,7 @@ export default function FamilyScheduler() {
             </button>
           </div>
           {(Object.keys(baseChildrenConfig) as BaseChildKey[]).map((childKey) => {
-            const config = baseChildrenConfig[childKey];
+            const config = memberVisual(childKey);
             const isActive = selectedChildFilters.includes(childKey);
             return (
               <button
@@ -4951,7 +4951,7 @@ export default function FamilyScheduler() {
                 </button>
               )}
               {visibleEvents.map((event) => {
-                const mainIconColor = baseChildrenConfig[getChildKeys(event.child)[0]].iconColor;
+                const mainIconColor = memberVisual(getChildKeys(event.child)[0]).iconColor;
                 const eventLink = typeof event.zoomLink === 'string' ? event.zoomLink.trim() : '';
                 const leagueBadge = fixtureLeagueBadge(`${event.league || ''} ${event.title || ''}`);
                 return (
@@ -5159,7 +5159,7 @@ export default function FamilyScheduler() {
                 <ul className="space-y-2">
                   {visibleListEvents.map((ev) => {
                     const childKey = normalizeChildKey(String(ev.child));
-                    const childName = childKey ? baseChildrenConfig[childKey].name : String(ev.child);
+                    const childName = childKey ? memberVisual(childKey).name : String(ev.child);
                     const now = new Date();
                     const past = isEventStartInPast(ev, now);
                     const leagueBadge = fixtureLeagueBadge(`${ev.league || ''} ${ev.title || ''}`);
@@ -5212,8 +5212,8 @@ export default function FamilyScheduler() {
                             <span>·</span>
                             <span>{normalizeTimeForPicker(ev.time)}</span>
                             <span>·</span>
-                            <span className={`inline-flex items-center gap-1 ${childKey ? baseChildrenConfig[childKey].iconColor : 'text-slate-600'}`}>
-                              <span className={`h-2 w-2 rounded-full ${childKey ? baseChildrenConfig[childKey].color : 'bg-slate-400'}`} />
+                            <span className={`inline-flex items-center gap-1 ${childKey ? memberVisual(childKey).iconColor : 'text-slate-600'}`}>
+                              <span className={`h-2 w-2 rounded-full ${childKey ? memberVisual(childKey).color : 'bg-slate-400'}`} />
                               {childName}
                             </span>
                           </div>
@@ -5912,7 +5912,7 @@ export default function FamilyScheduler() {
           <div className="w-full max-w-sm bg-white rounded-2xl shadow-2xl border border-slate-200 p-5 space-y-4" dir="rtl">
             <h3 className="text-lg font-bold text-slate-800">החלפת תורנות ג׳וני</h3>
             <p className="text-sm text-slate-600 leading-relaxed">
-              {`שמת את ${baseChildrenConfig[johnnySwapPrompt.toChild].name} במקום ${baseChildrenConfig[johnnySwapPrompt.fromChild].name}. האם לבצע החלפה מאזנת בתורנות הבאה של השבוע (ש${baseChildrenConfig[johnnySwapPrompt.fromChild].name} תוריד במקום ${baseChildrenConfig[johnnySwapPrompt.toChild].name}) כדי לשמור על חלוקה שווה?`}
+              {`שמת את ${memberVisual(johnnySwapPrompt.toChild).name} במקום ${memberVisual(johnnySwapPrompt.fromChild).name}. האם לבצע החלפה מאזנת בתורנות הבאה של השבוע (ש${memberVisual(johnnySwapPrompt.fromChild).name} תוריד במקום ${memberVisual(johnnySwapPrompt.toChild).name}) כדי לשמור על חלוקה שווה?`}
             </p>
             <div className="flex flex-col gap-2">
               <button

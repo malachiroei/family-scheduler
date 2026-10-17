@@ -1,9 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
 import { sql } from "@/app/lib/db";
 import { ensurePushTables } from "@/app/lib/push";
+import { pushUserNames, resolvePushName } from "@/app/lib/familyMembers";
 
-const allowedUsers = ["רביד", "עמית", "אלין", "סיוון", "רועי"] as const;
-type AllowedUser = (typeof allowedUsers)[number];
+const allowedUsers = pushUserNames;
+type AllowedUser = string;
 
 type PresenceRow = {
   user_name: string;
@@ -39,18 +40,16 @@ const normalizeAllowedUser = (value: unknown): AllowedUser | null => {
     return null;
   }
 
-  return allowedUsers.includes(trimmed as AllowedUser)
-    ? (trimmed as AllowedUser)
-    : (() => {
-      try {
-        const decoded = Buffer.from(trimmed, "latin1").toString("utf8").trim();
-        return allowedUsers.includes(decoded as AllowedUser)
-          ? (decoded as AllowedUser)
-          : null;
-      } catch {
-        return null;
-      }
-    })();
+  const direct = resolvePushName(trimmed);
+  if (direct) {
+    return direct;
+  }
+  try {
+    const decoded = Buffer.from(trimmed, "latin1").toString("utf8").trim();
+    return resolvePushName(decoded);
+  } catch {
+    return null;
+  }
 };
 
 export async function GET() {

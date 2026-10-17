@@ -1,5 +1,15 @@
 import { sql } from "@/app/lib/db";
 import { ensureScheduleMetadataColumn, parseScheduleMetadata } from "@/app/lib/scheduleTable";
+import {
+  childPushNamesFromField,
+  isChildPushName,
+  isParentPushName,
+  parentPushNamesFromField,
+  pushChildNames,
+  pushParentNames,
+  pushUserNames,
+  resolvePushName,
+} from "@/app/lib/familyMembers";
 import webpush from "web-push";
 
 type PushPayload = {
@@ -40,19 +50,19 @@ type TaskRow = {
   reminder_lead_minutes?: number | null;
 };
 
-const childUserNames = ["רביד", "עמית", "אלין"] as const;
-const parentUserNames = ["סיוון", "רועי"] as const;
+const childUserNames = pushChildNames;
+const parentUserNames = pushParentNames;
 
-type ChildUserName = (typeof childUserNames)[number];
-type ParentUserName = (typeof parentUserNames)[number];
-type AllowedUserName = ChildUserName | ParentUserName;
+type ChildUserName = string;
+type ParentUserName = string;
+type AllowedUserName = string;
 
 const childNameSet = new Set<string>(childUserNames);
 const parentNameSet = new Set<string>(parentUserNames);
-const allowedUserNames = [...childUserNames, ...parentUserNames] as const;
+const allowedUserNames = pushUserNames;
 
-const isChildUserName = (value: string): value is ChildUserName => childNameSet.has(value);
-const isParentUserName = (value: string): value is ParentUserName => parentNameSet.has(value);
+const isChildUserName = (value: string): value is ChildUserName => isChildPushName(value);
+const isParentUserName = (value: string): value is ParentUserName => isParentPushName(value);
 
 const normalizeAllowedUserName = (value: unknown): AllowedUserName | null => {
   if (typeof value !== "string") {
@@ -64,76 +74,28 @@ const normalizeAllowedUserName = (value: unknown): AllowedUserName | null => {
     return null;
   }
 
-  if (childNameSet.has(trimmed) || parentNameSet.has(trimmed)) {
-    return trimmed as AllowedUserName;
+  const direct = resolvePushName(trimmed);
+  if (direct) {
+    return direct;
   }
 
   try {
     const decoded = Buffer.from(trimmed, "latin1").toString("utf8").trim();
-    if (childNameSet.has(decoded) || parentNameSet.has(decoded)) {
-      return decoded as AllowedUserName;
-    }
+    return resolvePushName(decoded);
   } catch {
-    // no-op
+    return null;
   }
-
-  return null;
 };
 
-const childKeyToName: Record<string, ChildUserName> = {
-  ravid: "רביד",
-  amit: "עמית",
-  alin: "אלין",
-  "רביד": "רביד",
-  "עמית": "עמית",
-  "אלין": "אלין",
-};
-
-const parentKeyToName: Record<string, ParentUserName> = {
-  roi: "רועי",
-  roei: "רועי",
-  roey: "רועי",
-  "רועי": "רועי",
-  sivan: "סיוון",
-  sivon: "סיוון",
-  "סיון": "סיוון",
-  "סיוון": "סיוון",
-};
-
-const normalizeTaskParentNames = (rawChild: string): ParentUserName[] => {
-  const tokens = rawChild
-    .trim()
-    .toLowerCase()
-    .split(/[_,\s]+/)
-    .map((token) => token.trim())
-    .filter(Boolean);
-  return Array.from(new Set(tokens.map((token) => parentKeyToName[token]).filter(Boolean)));
-};
+const normalizeTaskParentNames = (rawChild: string): ParentUserName[] =>
+  parentPushNamesFromField(rawChild);
 
 const normalizeTaskChildNames = (rawChild: string): ChildUserName[] => {
-  const normalized = rawChild.trim().toLowerCase();
-  if (!normalized) {
-    return [];
+  const fromKeys = childPushNamesFromField(rawChild);
+  if (fromKeys.length) {
+    return fromKeys;
   }
-
-  const values = normalized
-    .split("_")
-    .map((token) => token.trim())
-    .filter(Boolean)
-    .map((token) => childKeyToName[token])
-    .filter(Boolean) as ChildUserName[];
-
-  if (/רביד/.test(rawChild)) {
-    values.push("רביד");
-  }
-  if (/עמית/.test(rawChild)) {
-    values.push("עמית");
-  }
-  if (/אלין/.test(rawChild)) {
-    values.push("אלין");
-  }
-
-  return [...new Set(values)];
+  return childUserNames.filter((name) => name && rawChild.includes(name));
 };
 
 const reminderLeadOptions = [5, 10, 15, 30, 60, 120, 1440] as const;
@@ -277,8 +239,8 @@ export const savePushSubscription = async (subscription: unknown) => {
     : [];
   const watchChildren = incomingWatchChildren
     .filter((value): value is string => typeof value === "string")
-    .map((value) => value.trim())
-    .filter((value) => childNameSet.has(value));
+    .map((value) => resolvePushName(value.trim()))
+    .filter((value): value is string => Boolean(value && childNameSet.has(value)));
 
   const isParent = userName ? parentNameSet.has(userName) : false;
   const receiveAll = isParent ? receiveAllRaw : false;
@@ -474,8 +436,8 @@ const shouldSubscriptionReceiveTask = (
 
     const trackedChildren = String(subscription.watch_children || "")
       .split(",")
-      .map((value) => value.trim())
-      .filter((value): value is ChildUserName => childNameSet.has(value));
+      .map((value) => resolvePushName(value.trim()))
+      .filter((value): value is ChildUserName => Boolean(value && childNameSet.has(value)));
 
     if (trackedChildren.length === 0) {
       return true;

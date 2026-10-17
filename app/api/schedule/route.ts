@@ -7,6 +7,13 @@ import {
   parseScheduleMetadata,
 } from "@/app/lib/scheduleTable";
 import { sendPushToAll, sendPushToParents } from "@/app/lib/push";
+import {
+  defaultChildKey,
+  familyChildren,
+  isAllowedScheduleChild,
+  labelForMemberKey,
+  resolveMemberKey,
+} from "@/app/lib/familyMembers";
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
@@ -35,43 +42,15 @@ const modelAliasMap: Record<string, SupportedModel> = {
   "gemini-1.5-flash-latest": "gemini-1.5-flash",
   "gemini-2.0-flash-exp": "gemini-2.0-flash",
 };
-const allowedChildren = ["ravid", "amit", "alin"] as const;
+const allowedChildren = familyChildren.map((member) => member.key);
 const allowedTypes = ["dog", "gym", "sport", "lesson", "dance"] as const;
-const allowedScheduleChildren = [
-  "ravid",
-  "amit",
-  "alin",
-  "roi",
-  "sivan",
-  "amit_alin",
-  "alin_ravid",
-  "amit_ravid",
-] as const;
-const childLabelMap: Record<string, string> = {
-  ravid: "רביד",
-  amit: "עמית",
-  alin: "אלין",
-  roi: "רועי",
-  sivan: "סיון",
-};
-
-const childTargetLabelMap: Record<string, string> = {
-  ravid: "רביד",
-  amit: "עמית",
-  alin: "אלין",
-  roi: "רועי",
-  sivan: "סיון",
-  amit_alin: "עמית ואלין",
-  alin_ravid: "אלין ורביד",
-  amit_ravid: "עמית ורביד",
-};
 
 const getChildTargetLabel = (rawChild: unknown) => {
-  const key = typeof rawChild === "string" ? rawChild.trim().toLowerCase() : "";
-  return childTargetLabelMap[key] || "הילדים";
+  const key = typeof rawChild === "string" ? rawChild.trim() : "";
+  return key ? labelForMemberKey(key) : "הילדים";
 };
 
-type ChildKey = (typeof allowedChildren)[number];
+type ChildKey = string;
 type EventType = (typeof allowedTypes)[number];
 
 type AiEvent = {
@@ -329,7 +308,7 @@ const sanitizeDbEvent = (event: unknown) => {
     dayIndexRaw > 6 ||
     !time ||
     !title ||
-    !allowedScheduleChildren.includes(child as (typeof allowedScheduleChildren)[number]) ||
+    !isAllowedScheduleChild(child) ||
     !type
   ) {
     return null;
@@ -374,7 +353,7 @@ const createIncomingFromFlatBody = (body: Record<string, unknown>) => {
     return null;
   }
 
-  if (!allowedScheduleChildren.includes(child as (typeof allowedScheduleChildren)[number])) {
+  if (!isAllowedScheduleChild(child)) {
     return null;
   }
 
@@ -519,7 +498,7 @@ const parseBulkEventsFromText = (text: string, weekStartIso: string) => {
         date: resolvedDate,
         dayIndex,
         time: normalizedTime,
-        child: "amit",
+        child: defaultChildKey,
         title: "אימון",
         type: "gym",
       });
@@ -621,9 +600,9 @@ const upsertScheduleEvent = async (incoming: ReturnType<typeof sanitizeDbEvent>)
     const savedDate = toIsoDate(savedDateRaw) || savedDateRaw;
     const meta = parseScheduleMetadata(saved.metadata);
     const savedChildRaw = meta.child.trim().toLowerCase();
-    const savedChild = allowedScheduleChildren.includes(savedChildRaw as (typeof allowedScheduleChildren)[number])
-      ? savedChildRaw
-      : "amit";
+    const savedChild = isAllowedScheduleChild(savedChildRaw)
+      ? resolveMemberKey(savedChildRaw) ?? savedChildRaw
+      : defaultChildKey;
 
     return {
       ok: true as const,
@@ -737,9 +716,9 @@ async function handleGet() {
       const normalizedDate = toIsoDate(rawDate) || rawDate;
       const meta = parseScheduleMetadata(r.metadata);
       const rawChild = meta.child.trim().toLowerCase();
-      const normalizedChild = allowedScheduleChildren.includes(rawChild as (typeof allowedScheduleChildren)[number])
-        ? rawChild
-        : "amit";
+      const normalizedChild = isAllowedScheduleChild(rawChild)
+        ? resolveMemberKey(rawChild) ?? rawChild
+        : defaultChildKey;
 
       return {
         id: r.id,
@@ -920,8 +899,7 @@ export async function PATCH(request: NextRequest) {
     }
 
     const meta = parseScheduleMetadata(row.metadata);
-    const childKey = meta.child.trim().toLowerCase();
-    const fallbackConfirmer = childLabelMap[childKey] || "הילד";
+    const fallbackConfirmer = labelForMemberKey(meta.child.trim()) || "הילד";
     const confirmer = confirmedByRaw || fallbackConfirmer;
     const taskTitle = String(row?.title || "משימה").trim() || "משימה";
 
@@ -952,7 +930,7 @@ const sanitizeEvents = (events: unknown): AiEvent[] => {
       const candidate = item as Record<string, unknown>;
       const dayIndex = Number(candidate.dayIndex);
       const time = typeof candidate.time === "string" ? candidate.time.trim() : "";
-      const child = typeof candidate.child === "string" ? candidate.child : "";
+      const child = typeof candidate.child === "string" ? resolveMemberKey(candidate.child) : null;
       const title = typeof candidate.title === "string" ? candidate.title.trim() : "";
       const type = typeof candidate.type === "string" ? candidate.type : "";
       const recurringWeekly = typeof candidate.recurringWeekly === "boolean"
@@ -965,7 +943,8 @@ const sanitizeEvents = (events: unknown): AiEvent[] => {
         dayIndex > 6 ||
         !time ||
         !title ||
-        !allowedChildren.includes(child as ChildKey) ||
+        !child ||
+        !allowedChildren.includes(child) ||
         !allowedTypes.includes(type as EventType)
       ) {
         return acc;
@@ -974,7 +953,7 @@ const sanitizeEvents = (events: unknown): AiEvent[] => {
       acc.push({
         dayIndex,
         time,
-        child: child as ChildKey,
+        child,
         title,
         type: type as EventType,
         recurringWeekly,
@@ -1165,7 +1144,7 @@ export async function POST(request: NextRequest) {
             date: item.date,
             dayIndex: item.dayIndex,
             time: item.time,
-            child: "amit",
+            child: defaultChildKey,
             title: item.title,
             type: item.type,
             isRecurring: false,
@@ -1245,13 +1224,14 @@ export async function POST(request: NextRequest) {
       );
     }
 
+    const childKeysPrompt = familyChildren.map((member) => member.key).join("|") || "child";
     const basePrompt = `אתה עוזר לו"ז משפחתי. נתח את הטקסט והחזר רק JSON תקין של מערך אירועים.
 שבוע העבודה הוא:
 0=יום ראשון, 1=יום שני, 2=יום שלישי, 3=יום רביעי, 4=יום חמישי, 5=יום שישי, 6=שבת
-ילדים מותרים: ravid, amit, alin
+ילדים מותרים: ${familyChildren.map((member) => `${member.key} (${member.name})`).join(", ")}
 סוגים מותרים: dog, gym, sport, lesson, dance
 פורמט לכל איבר (שדות חובה כמו למעלה; אופציונלי: recurringWeekly):
-{ "dayIndex": number, "time": string, "child": "ravid|amit|alin", "title": string, "type": "dog|gym|sport|lesson|dance", "recurringWeekly"?: boolean }
+{ "dayIndex": number, "time": string, "child": "${childKeysPrompt}", "title": string, "type": "dog|gym|sport|lesson|dance", "recurringWeekly"?: boolean }
 אם המשתמש מבקש משימה קבועה / חוזרת כל שבוע / "קבוע" / "כל שבוע" — קבע recurringWeekly: true לאירועים הרלוונטיים.
 
 אם מתקבלת תמונה, בצע OCR וחלץ ממנה ימים/שעות/ילד.
