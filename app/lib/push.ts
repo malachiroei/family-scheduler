@@ -171,6 +171,9 @@ const ensurePushTablesUncached = async (): Promise<void> => {
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )
   `;
+  await sql`
+    GRANT SELECT, INSERT, UPDATE, DELETE ON public.push_subscriptions TO anon, authenticated, service_role
+  `;
 
   await sql`ALTER TABLE push_subscriptions ADD COLUMN IF NOT EXISTS user_name TEXT`;
   await sql`ALTER TABLE push_subscriptions ADD COLUMN IF NOT EXISTS receive_all BOOLEAN NOT NULL DEFAULT FALSE`;
@@ -199,6 +202,9 @@ const ensurePushTablesUncached = async (): Promise<void> => {
       dispatch_key TEXT PRIMARY KEY,
       sent_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )
+  `;
+  await sql`
+    GRANT SELECT, INSERT, UPDATE, DELETE ON public.push_reminder_dispatches TO anon, authenticated, service_role
   `;
 };
 

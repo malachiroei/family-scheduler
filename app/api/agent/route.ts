@@ -181,6 +181,9 @@ const ensurePatternsTable = async () => {
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )
   `;
+  await sql`
+    GRANT SELECT, INSERT, UPDATE, DELETE ON public.family_learned_patterns TO anon, authenticated, service_role
+  `;
   // Migrations for tables created by the earlier version.
   await sql`ALTER TABLE family_learned_patterns ADD COLUMN IF NOT EXISTS sender_or_group TEXT NOT NULL DEFAULT ''`;
   await sql`ALTER TABLE family_learned_patterns ADD COLUMN IF NOT EXISTS confirmations_count INTEGER NOT NULL DEFAULT 0`;

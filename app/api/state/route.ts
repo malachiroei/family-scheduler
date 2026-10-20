@@ -41,6 +41,9 @@ const ensureTable = async () => {
         updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       )
     `;
+    await sql`
+      GRANT SELECT, INSERT, UPDATE, DELETE ON public.scheduler_state TO anon, authenticated, service_role
+    `;
     stateTableReady = true;
     return { ok: true as const };
   } catch (error) {

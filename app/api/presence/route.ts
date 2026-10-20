@@ -27,6 +27,9 @@ const ensurePresenceTable = async () => {
       last_seen TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )
   `;
+  await sql`
+    GRANT SELECT, INSERT, UPDATE, DELETE ON public.app_presence TO anon, authenticated, service_role
+  `;
   presenceTableReady = true;
 };
 

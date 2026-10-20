@@ -200,5 +200,6 @@ export const ensureScheduleMetadataColumn = async (): Promise<true> => {
   // For a fresh database run this SQL once manually:
   //   CREATE TABLE IF NOT EXISTS schedule (id TEXT PRIMARY KEY, title TEXT NOT NULL,
   //     "date" TEXT NOT NULL, metadata JSONB NOT NULL DEFAULT '{}'::jsonb);
+  //   GRANT SELECT, INSERT, UPDATE, DELETE ON public.schedule TO anon, authenticated, service_role;
   return true;
 };

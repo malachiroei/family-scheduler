@@ -1,0 +1,18 @@
+---
+description: New Supabase public tables must include explicit Data API grants (required from Oct 30, 2026).
+alwaysApply: true
+---
+
+# Supabase Data API grants
+
+From **October 30, 2026**, Supabase no longer auto-grants Data API access to new tables in `public`.
+
+Whenever you create a new table or write a migration (SQL file or `CREATE TABLE` in TypeScript), append this at the end of the script, with the real table name:
+
+```sql
+grant select, insert, update, delete on public.<table_name> to anon, authenticated, service_role;
+```
+
+- Do this for every new `public` table, including `CREATE TABLE IF NOT EXISTS`.
+- Re-running the same `GRANT` is safe.
+- Do not rely on default privileges.
