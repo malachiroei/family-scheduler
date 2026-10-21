@@ -1,4 +1,5 @@
 import { getDatabaseConfig, sql, sqlJson } from "@/app/lib/db";
+import { applySchedulerStateAccess } from "@/app/lib/schedulerStateAccess";
 import {
   APP_BRANDING_STATE_KEY,
   mergeAppBranding,
@@ -40,35 +41,6 @@ const trySql = async (label: string, run: () => Promise<unknown>) => {
   } catch (error) {
     console.warn(`[family-roster] ${label}:`, getErrorMessage(error));
     return false;
-  }
-};
-
-const applySchedulerStateAccess = async () => {
-  // Server uses the database URL (often postgres / service_role). Also grant common Supabase roles
-  // so a later switch to the pooler/anon role still works, and so RLS does not hide the row.
-  await trySql("grant postgres", () => sql`GRANT ALL ON TABLE public.scheduler_state TO postgres`);
-  await trySql("grant service_role", () => sql`GRANT ALL ON TABLE public.scheduler_state TO service_role`);
-  await trySql("grant authenticated", () => sql`GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.scheduler_state TO authenticated`);
-  await trySql("grant anon", () => sql`GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.scheduler_state TO anon`);
-  const disabledRls = await trySql(
-    "disable rls",
-    () => sql`ALTER TABLE public.scheduler_state DISABLE ROW LEVEL SECURITY`,
-  );
-  if (!disabledRls) {
-    await trySql("enable rls", () => sql`ALTER TABLE public.scheduler_state ENABLE ROW LEVEL SECURITY`);
-    await trySql(
-      "drop old policy",
-      () => sql`DROP POLICY IF EXISTS scheduler_state_all ON public.scheduler_state`,
-    );
-    await trySql(
-      "create policy",
-      () => sql`
-        CREATE POLICY scheduler_state_all ON public.scheduler_state
-        FOR ALL
-        USING (true)
-        WITH CHECK (true)
-      `,
-    );
   }
 };
 

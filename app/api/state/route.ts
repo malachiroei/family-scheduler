@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getDatabaseConfig, sql } from "@/app/lib/db";
+import { applySchedulerStateAccess } from "@/app/lib/schedulerStateAccess";
 import { parseMetadataBoolean } from "@/app/lib/scheduleTime";
 
 console.log("Current ENV keys:", Object.keys(process.env));
@@ -41,9 +42,7 @@ const ensureTable = async () => {
         updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       )
     `;
-    await sql`
-      GRANT SELECT, INSERT, UPDATE, DELETE ON public.scheduler_state TO anon, authenticated, service_role
-    `;
+    await applySchedulerStateAccess();
     stateTableReady = true;
     return { ok: true as const };
   } catch (error) {
