@@ -1,7 +1,7 @@
 "use client";
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import Image from 'next/image';
-import { Dog, Dumbbell, Music, GraduationCap, Trophy, Printer, MessageCircle, ChevronRight, ChevronLeft, X, Plus, CalendarDays, Settings, RefreshCw, Video, ClipboardList, Trash2, Share2 } from 'lucide-react';
+import { Dog, Dumbbell, Music, GraduationCap, Trophy, Printer, MessageCircle, ChevronRight, ChevronLeft, X, Plus, CalendarDays, Settings, RefreshCw, Video, ClipboardList, Trash2, Share2, Pencil } from 'lucide-react';
 import html2canvas from 'html2canvas';
 import AgentChat from '@/app/components/AgentChat';
 import FamilyRosterEditor from '@/app/components/FamilyRosterEditor';
@@ -1858,6 +1858,8 @@ export default function FamilyScheduler() {
     originalRecurringTemplateId?: string;
     /** Owner when the dialog was opened (used by the Johnny smart swap). */
     originalChild?: ChildKey;
+    /** Opened from the "כל המשימות" list: saving must not move the board to the edited task's week. */
+    fromList?: boolean;
   } | null>(null);
   const [johnnySwapPrompt, setJohnnySwapPrompt] = useState<{
     updatedEvent: SchedulerEvent;
@@ -3799,9 +3801,13 @@ export default function FamilyScheduler() {
     }
   };
 
-  const loadUpcomingList = useCallback(async () => {
-    setUpcomingListLoading(true);
-    setApiError('');
+  const loadUpcomingList = useCallback(async (options?: { silent?: boolean }) => {
+    // Silent reloads (after an edit) keep the current list on screen and do not touch error messages.
+    const silent = Boolean(options?.silent);
+    if (!silent) {
+      setUpcomingListLoading(true);
+      setApiError('');
+    }
     try {
       const response = await fetch(toApiUrl('/api/schedule'), { cache: 'no-store' });
       const payload = await readJsonSafe(response);
@@ -3814,11 +3820,17 @@ export default function FamilyScheduler() {
         .sort(compareScheduleApiEventsByDateTime);
       setUpcomingListEvents(next);
     } catch (error) {
+      if (silent) {
+        console.warn('[UI] silent list reload failed', error);
+        return;
+      }
       const msg = error instanceof Error ? error.message : 'טעינה נכשלה';
       setApiError(msg);
       setUpcomingListEvents([]);
     } finally {
-      setUpcomingListLoading(false);
+      if (!silent) {
+        setUpcomingListLoading(false);
+      }
     }
   }, []);
 
@@ -3865,6 +3877,66 @@ export default function FamilyScheduler() {
   const oneOffListEvents = upcomingListEvents.filter((ev) => !isRecurringListEvent(ev));
   const futureListEvents = oneOffListEvents.filter((ev) => !isPastDay(ev)); // nearest first
   const pastListEvents = oneOffListEvents.filter(isPastDay).reverse(); // newest first
+  /** Opens the regular edit dialog pre-filled from a row of the "כל המשימות" list. */
+  const openEditFromList = (ev: ScheduleApiEvent) => {
+    const rowDate = parseEventDateKey(ev.date);
+    if (!rowDate) {
+      setApiError('תאריך המשימה לא תקין, לא ניתן לערוך.');
+      return;
+    }
+    const recurring = parseMetadataBoolean(ev.isRecurring);
+    const interval = Number(ev.recurrenceIntervalWeeks);
+    const intervalWeeks = recurring && Number.isInteger(interval) && interval >= 2 ? interval : undefined;
+
+    // A recurring series is shown on its next real occurrence; one-off tasks on their own date.
+    let shownDate = rowDate;
+    if (recurring) {
+      const dayIdx = rowDate.getDay();
+      const base = getWeekStart(new Date());
+      for (let k = 0; k < 60; k += 1) {
+        const ws = addDays(base, 7 * k);
+        if (!isRecurringTemplateActiveInWeek({ recurrenceIntervalWeeks: intervalWeeks, recurrenceAnchorDate: ev.recurrenceAnchorDate }, ws)) {
+          continue;
+        }
+        const candidate = addDays(ws, dayIdx);
+        if (candidate.getTime() >= startOfToday.getTime()) {
+          shownDate = candidate;
+          break;
+        }
+      }
+    }
+
+    const templateId = recurring ? (ev.recurringTemplateId?.trim() || ev.id) : undefined;
+    setApiError('');
+    setEditingEvent({
+      sourceWeekKey: toIsoDate(getWeekStart(shownDate)),
+      dayIndex: shownDate.getDay(),
+      selectedDate: toIsoDate(shownDate),
+      recurringWeekly: recurring,
+      originalRecurringTemplateId: templateId,
+      originalChild: String(ev.child),
+      fromList: true,
+      data: {
+        id: ev.id,
+        date: toEventDateKey(shownDate),
+        time: normalizeTimeForPicker(ev.time),
+        child: normalizeChildForSave(String(ev.child)),
+        title: ev.title,
+        zoomLink: ev.zoomLink,
+        type: ev.type,
+        isRecurring: recurring,
+        recurringTemplateId: templateId,
+        recurrenceIntervalWeeks: intervalWeeks,
+        recurrenceAnchorDate: intervalWeeks ? ev.recurrenceAnchorDate : undefined,
+        completed: Boolean(ev.completed),
+        sendNotification: ev.sendNotification ?? true,
+        requireConfirmation: Boolean(ev.requireConfirmation),
+        reminderLeadMinutes: sanitizeReminderLead(ev.reminderLeadMinutes),
+        league: ev.league,
+      },
+    });
+  };
+
   // Recurring: one row per series (template), ordered Sunday -> Saturday, then by time.
   const recurringListEvents = (() => {
     const seen = new Set<string>();
@@ -4813,6 +4885,91 @@ export default function FamilyScheduler() {
     }
   };
 
+  /** Shows an edited task in the "כל המשימות" list immediately (the real list is reloaded after the save). */
+  const patchUpcomingListLocally = (updated: SchedulerEvent, date: Date) => {
+    setUpcomingListEvents((prev) => {
+      const patch: ScheduleApiEvent = {
+        id: updated.id,
+        date: toIsoDate(date),
+        dayIndex: date.getDay(),
+        time: updated.time,
+        child: updated.child,
+        title: updated.title,
+        zoomLink: updated.zoomLink,
+        type: updated.type,
+        isRecurring: updated.isRecurring,
+        recurringTemplateId: updated.recurringTemplateId,
+        recurrenceIntervalWeeks: updated.recurrenceIntervalWeeks,
+        recurrenceAnchorDate: updated.recurrenceAnchorDate,
+        completed: updated.completed,
+        sendNotification: updated.sendNotification,
+        requireConfirmation: updated.requireConfirmation,
+        reminderLeadMinutes: updated.reminderLeadMinutes,
+        league: updated.league,
+      };
+      const exists = prev.some((e) => e.id === updated.id);
+      const next = exists ? prev.map((e) => (e.id === updated.id ? { ...e, ...patch } : e)) : [...prev, patch];
+      return next.sort(compareScheduleApiEventsByDateTime);
+    });
+  };
+
+  /** Re-materialises an edited recurring series in every week already loaded on the board. */
+  const applyRecurringEditLocally = (updated: SchedulerEvent, dayIndex: number) => {
+    const templateId = updated.recurringTemplateId || updated.id;
+    const template: RecurringTemplate = {
+      templateId,
+      persistedRowId: updated.id,
+      dayIndex,
+      time: updated.time,
+      child: updated.child,
+      title: updated.title,
+      zoomLink: updated.zoomLink,
+      type: updated.type,
+      isRecurring: true,
+      recurrenceIntervalWeeks: updated.recurrenceIntervalWeeks,
+      recurrenceAnchorDate: updated.recurrenceAnchorDate,
+      sendNotification: updated.sendNotification,
+      requireConfirmation: updated.requireConfirmation,
+      reminderLeadMinutes: updated.reminderLeadMinutes,
+    };
+    setRecurringTemplates((prev) => [...prev.filter((t) => t.templateId !== templateId && t.persistedRowId !== updated.id), template]);
+    setWeeksData((prev) => {
+      const next: Record<string, DaySchedule[]> = {};
+      Object.entries(prev).forEach(([key, week]) => {
+        const ws = new Date(`${key}T00:00:00`);
+        const days = week.map((day) => ({
+          ...day,
+          events: day.events.filter((e) => e.recurringTemplateId !== templateId && e.id !== updated.id),
+        }));
+        if (!Number.isNaN(ws.getTime()) && isRecurringTemplateActiveInWeek(template, ws)) {
+          const date = addDays(ws, dayIndex);
+          days[dayIndex].events = sortEvents([
+            ...days[dayIndex].events,
+            {
+              id: updated.id,
+              date: toEventDateKey(date),
+              time: normalizeTimeForPicker(updated.time),
+              child: updated.child,
+              title: updated.title,
+              zoomLink: updated.zoomLink,
+              type: updated.type,
+              isRecurring: true,
+              recurringTemplateId: templateId,
+              recurrenceIntervalWeeks: updated.recurrenceIntervalWeeks,
+              recurrenceAnchorDate: updated.recurrenceAnchorDate,
+              completed: false,
+              sendNotification: updated.sendNotification ?? true,
+              requireConfirmation: Boolean(updated.requireConfirmation),
+              reminderLeadMinutes: sanitizeReminderLead(updated.reminderLeadMinutes),
+            },
+          ]);
+        }
+        next[key] = days;
+      });
+      return next;
+    });
+  };
+
   const saveEditedEvent = async () => {
     console.log('Action triggered:', 'edit');
     if (!editingEvent) {
@@ -4843,6 +5000,14 @@ export default function FamilyScheduler() {
     const targetWeekKey = toIsoDate(targetWeekStart);
     const targetDayIndex = selectedDate.getDay();
     const normalizedChild = normalizeChildForSave(editingEvent.data.child);
+    const requestedInterval = Number(editingEvent.data.recurrenceIntervalWeeks);
+    const intervalWeeks = editingEvent.recurringWeekly && Number.isInteger(requestedInterval) && requestedInterval >= 2
+      ? requestedInterval
+      : undefined;
+    const rawAnchor = editingEvent.data.recurrenceAnchorDate?.trim() || '';
+    const anchorDate = intervalWeeks
+      ? (/^\d{4}-\d{2}-\d{2}$/.test(rawAnchor) ? rawAnchor : editingEvent.selectedDate)
+      : undefined;
     const updatedEvent: SchedulerEvent = {
       ...editingEvent.data,
       date: toApiDateString(selectedDate, selectedDate),
@@ -4854,6 +5019,8 @@ export default function FamilyScheduler() {
       recurringTemplateId: editingEvent.recurringWeekly
         ? (editingEvent.originalRecurringTemplateId ?? editingEvent.data.recurringTemplateId ?? generateId())
         : undefined,
+      recurrenceIntervalWeeks: intervalWeeks,
+      recurrenceAnchorDate: anchorDate,
     };
 
     if (isJohnnyEventLike(updatedEvent)) {
@@ -4882,18 +5049,34 @@ export default function FamilyScheduler() {
       }
     }
 
-    if (targetWeekKey !== weekKey) {
+    const fromList = Boolean(editingEvent.fromList);
+    // Edits started from the full list keep the board on the week the user is looking at.
+    if (!fromList && targetWeekKey !== weekKey) {
       setWeekStart(targetWeekStart);
+    }
+
+    // Optimistic UI: the list and the board show the change right away; the save below confirms or rolls back.
+    if (showUpcomingListModal) {
+      patchUpcomingListLocally(updatedEvent, selectedDate);
+    }
+    if (updatedEvent.isRecurring) {
+      applyRecurringEditLocally(updatedEvent, targetDayIndex);
     }
 
     try {
       console.log('[UI] edit submit payload', { targetDayIndex, targetWeekStart: toIsoDate(targetWeekStart), updatedEvent });
-      await handleSubmit(updatedEvent, targetDayIndex, targetWeekStart);
+      await handleSubmit(updatedEvent, targetDayIndex, fromList ? weekStart : targetWeekStart);
     } catch (error) {
       setApiError(formatSchedulePersistenceError(error));
+      if (showUpcomingListModal) {
+        void loadUpcomingList({ silent: true }); // restore the true server state
+      }
       return;
     }
 
+    if (showUpcomingListModal) {
+      void loadUpcomingList({ silent: true });
+    }
     setEditingEvent(null);
     setSuccessMessage('המשימה עודכנה בהצלחה.');
     if (apiError) {
@@ -5497,16 +5680,28 @@ export default function FamilyScheduler() {
                               : 'border-emerald-200 bg-emerald-50/40'
                         }`}
                       >
-                        <button
-                          type="button"
-                          onClick={() => { void deleteFromUpcomingList(ev); }}
-                          disabled={dbSyncStatus.state === 'saving'}
-                          className="shrink-0 mt-0.5 h-9 w-9 rounded-lg border border-red-200 bg-white text-red-600 hover:bg-red-50 flex items-center justify-center disabled:opacity-50"
-                          title="מחק משימה"
-                          aria-label={`מחק ${ev.title}`}
-                        >
-                          <Trash2 size={16} />
-                        </button>
+                        <div className="shrink-0 mt-0.5 flex items-center gap-1.5">
+                          <button
+                            type="button"
+                            onClick={() => openEditFromList(ev)}
+                            disabled={dbSyncStatus.state === 'saving'}
+                            className="h-9 w-9 rounded-lg border border-slate-200 bg-white text-slate-500 hover:bg-indigo-50 hover:text-indigo-600 hover:border-indigo-200 flex items-center justify-center disabled:opacity-50"
+                            title="ערוך משימה"
+                            aria-label={`ערוך ${ev.title}`}
+                          >
+                            <Pencil size={16} />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => { void deleteFromUpcomingList(ev); }}
+                            disabled={dbSyncStatus.state === 'saving'}
+                            className="h-9 w-9 rounded-lg border border-red-200 bg-white text-red-600 hover:bg-red-50 flex items-center justify-center disabled:opacity-50"
+                            title="מחק משימה"
+                            aria-label={`מחק ${ev.title}`}
+                          >
+                            <Trash2 size={16} />
+                          </button>
+                        </div>
                         <div className="flex-1 min-w-0">
                           <div className="flex flex-wrap items-center gap-2 justify-end">
                             {leagueBadge && (
@@ -6068,19 +6263,41 @@ export default function FamilyScheduler() {
             )}
 
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-              <label className="text-sm text-slate-700 font-medium">
-                תאריך
-                <div className="relative mt-1">
-                  <CalendarDays size={16} className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400" />
-                  <input
-                    type="date"
-                    value={editingEvent.selectedDate}
-                    onChange={(e) => setEditingEvent((prev) => prev ? ({ ...prev, selectedDate: e.target.value }) : prev)}
+              {editingEvent.recurringWeekly ? (
+                <label className="text-sm text-slate-700 font-medium">
+                  יום בשבוע
+                  <select
+                    value={new Date(`${editingEvent.selectedDate}T00:00:00`).getDay() || 0}
+                    onChange={(e) => setEditingEvent((prev) => {
+                      if (!prev) return prev;
+                      const current = new Date(`${prev.selectedDate}T00:00:00`);
+                      if (Number.isNaN(current.getTime())) return prev;
+                      const delta = Number(e.target.value) - current.getDay();
+                      return { ...prev, selectedDate: toIsoDate(addDays(current, delta)) };
+                    })}
                     disabled={Boolean(editingEvent.data.completed)}
-                    className="w-full border border-slate-300 rounded-xl pl-3 pr-9 py-2 outline-none focus:border-blue-400"
-                  />
-                </div>
-              </label>
+                    className="mt-1 w-full border border-slate-300 rounded-xl px-3 py-2 outline-none focus:border-blue-400"
+                  >
+                    {dayNames.map((name, index) => (
+                      <option key={`edit-weekday-${name}`} value={index}>{name}</option>
+                    ))}
+                  </select>
+                </label>
+              ) : (
+                <label className="text-sm text-slate-700 font-medium">
+                  תאריך
+                  <div className="relative mt-1">
+                    <CalendarDays size={16} className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400" />
+                    <input
+                      type="date"
+                      value={editingEvent.selectedDate}
+                      onChange={(e) => setEditingEvent((prev) => prev ? ({ ...prev, selectedDate: e.target.value }) : prev)}
+                      disabled={Boolean(editingEvent.data.completed)}
+                      className="w-full border border-slate-300 rounded-xl pl-3 pr-9 py-2 outline-none focus:border-blue-400"
+                    />
+                  </div>
+                </label>
+              )}
 
               <label className="text-sm text-slate-700 font-medium">
                 ילד/ה
@@ -6161,8 +6378,50 @@ export default function FamilyScheduler() {
                 disabled={Boolean(editingEvent.data.completed)}
                 className="h-4 w-4 rounded border-slate-300"
               />
-              פעילות שבועית חוזרת
+              פעילות חוזרת
             </label>
+
+            {editingEvent.recurringWeekly && (
+              <div className="border border-slate-200 rounded-xl p-3 space-y-2 bg-slate-50">
+                <label className="text-sm text-slate-700 font-medium block">
+                  תדירות
+                  <select
+                    value={Number(editingEvent.data.recurrenceIntervalWeeks) >= 2 ? Number(editingEvent.data.recurrenceIntervalWeeks) : 1}
+                    onChange={(e) => {
+                      const interval = Number(e.target.value);
+                      setEditingEvent((prev) => prev ? ({
+                        ...prev,
+                        data: {
+                          ...prev.data,
+                          recurrenceIntervalWeeks: interval >= 2 ? interval : undefined,
+                          recurrenceAnchorDate: interval >= 2 ? (prev.data.recurrenceAnchorDate || prev.selectedDate) : undefined,
+                        },
+                      }) : prev);
+                    }}
+                    disabled={Boolean(editingEvent.data.completed)}
+                    className="mt-1 w-full border border-slate-300 rounded-xl px-3 py-2 outline-none focus:border-blue-400"
+                  >
+                    <option value={1}>כל שבוע</option>
+                    <option value={2}>כל שבועיים</option>
+                  </select>
+                </label>
+                {Number(editingEvent.data.recurrenceIntervalWeeks) >= 2 && (
+                  <label className="text-sm text-slate-700 font-medium block">
+                    החל מתאריך (השבוע הראשון שבו המשימה מופיעה)
+                    <input
+                      type="date"
+                      value={editingEvent.data.recurrenceAnchorDate || editingEvent.selectedDate}
+                      onChange={(e) => setEditingEvent((prev) => prev ? ({
+                        ...prev,
+                        data: { ...prev.data, recurrenceAnchorDate: e.target.value || undefined },
+                      }) : prev)}
+                      disabled={Boolean(editingEvent.data.completed)}
+                      className="mt-1 w-full border border-slate-300 rounded-xl px-3 py-2 outline-none focus:border-blue-400"
+                    />
+                  </label>
+                )}
+              </div>
+            )}
 
             <div className="border border-slate-200 rounded-xl p-3 space-y-2 bg-slate-50">
               <div className="text-xs font-bold text-slate-600">הגדרות התראה</div>
