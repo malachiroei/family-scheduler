@@ -1,9 +1,65 @@
 "use client";
 import React, { useEffect, useRef, useState } from "react";
-import { Bot, FileSpreadsheet, ImagePlus, Send, Sparkles, Trash2, X } from "lucide-react";
+import { Bot, FileSpreadsheet, ImagePlus, RotateCcw, Send, Sparkles, Trash2, X } from "lucide-react";
 import { childDisplayNames as fallbackChildDisplayNames } from "@/app/lib/familyMembers";
 
-type Msg = { role: "user" | "assistant"; content: string; image?: string; fileName?: string };
+type Msg = {
+  role: "user" | "assistant";
+  content: string;
+  image?: string;
+  fileName?: string;
+  /** Epoch ms when the message was created. */
+  ts?: number;
+  /** True when the message carried a screenshot; the image itself is never persisted. */
+  hasImage?: boolean;
+  /** True for failure replies; these are not sent back to the model as context. */
+  isError?: boolean;
+  /** Tool actions: events the agent saved to the schedule on this turn. */
+  actions?: AgentSavedEvent[];
+};
+
+const CHAT_HISTORY_STORAGE_KEY = "family-scheduler-agent-chat-history-v1";
+const CHAT_HISTORY_MAX_MESSAGES = 40;
+const CHAT_CONTEXT_MAX_MESSAGES = 6;
+const WELCOME_MESSAGE =
+  "היי! כתבו, העלו צילום מסך, או קובץ אקסל של משחקים ואני אשבץ בלו״ז אחרי שתאשרו מה שזיהיתי.";
+
+const trimHistory = (list: Msg[]): Msg[] => list.slice(-CHAT_HISTORY_MAX_MESSAGES);
+
+// The persisted copy drops heavy image data URLs and keeps only a flag.
+const toStoredMsg = (m: Msg): Msg => {
+  const { image, ...rest } = m;
+  return image ? { ...rest, hasImage: true } : rest;
+};
+
+const loadHistory = (): Msg[] => {
+  try {
+    const raw = window.localStorage.getItem(CHAT_HISTORY_STORAGE_KEY);
+    if (!raw) return [];
+    const parsed: unknown = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return trimHistory(
+      parsed.filter(
+        (m): m is Msg =>
+          Boolean(m) &&
+          typeof m === "object" &&
+          ((m as Msg).role === "user" || (m as Msg).role === "assistant") &&
+          typeof (m as Msg).content === "string",
+      ),
+    );
+  } catch {
+    return [];
+  }
+};
+
+const formatTime = (ts?: number) => {
+  if (!ts) return "";
+  try {
+    return new Date(ts).toLocaleTimeString("he-IL", { hour: "2-digit", minute: "2-digit" });
+  } catch {
+    return "";
+  }
+};
 type SpreadsheetAttach = { dataUrl: string; name: string; mime: string };
 
 const SPREADSHEET_RE = /\.(xlsx|xls|csv)$/i;
@@ -51,13 +107,9 @@ export default function AgentChat({
 }) {
   const CHILD_BUTTONS = childNames?.length ? childNames : fallbackChildDisplayNames;
   const [open, setOpen] = useState(false);
-  const [messages, setMessages] = useState<Msg[]>([
-    {
-      role: "assistant",
-      content:
-        "היי! כתבו, העלו צילום מסך, או קובץ אקסל של משחקים ואני אשבץ בלו״ז אחרי שתאשרו מה שזיהיתי.",
-    },
-  ]);
+  const [messages, setMessages] = useState<Msg[]>([]);
+  const [historyLoaded, setHistoryLoaded] = useState(false);
+  const [confirmClearHistory, setConfirmClearHistory] = useState(false);
   const [input, setInput] = useState("");
   const [image, setImage] = useState<string | null>(null); // data URL
   const [spreadsheet, setSpreadsheet] = useState<SpreadsheetAttach | null>(null);
@@ -68,9 +120,51 @@ export default function AgentChat({
   const [clearPick, setClearPick] = useState(false);
   const endRef = useRef<HTMLDivElement>(null);
 
+  // Restore the saved conversation once on the client.
   useEffect(() => {
+    setMessages(loadHistory());
+    setHistoryLoaded(true);
+  }, []);
+
+  // Persist the last N messages (without image payloads) whenever the conversation changes.
+  useEffect(() => {
+    if (!historyLoaded) return;
+    try {
+      window.localStorage.setItem(
+        CHAT_HISTORY_STORAGE_KEY,
+        JSON.stringify(trimHistory(messages).map(toStoredMsg)),
+      );
+    } catch {
+      // storage full / unavailable: keep working without persistence
+    }
+  }, [messages, historyLoaded]);
+
+  // Jump straight to the latest message when the chat opens (or history finishes loading).
+  useEffect(() => {
+    if (!open) return;
+    const id = requestAnimationFrame(() => endRef.current?.scrollIntoView({ behavior: "auto" }));
+    return () => cancelAnimationFrame(id);
+  }, [open, historyLoaded]);
+
+  // Smoothly follow new messages and the typing indicator.
+  useEffect(() => {
+    if (!open) return;
     endRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, busy, open]);
+
+  const addMessage = (m: Msg) => setMessages((prev) => [...prev, { ...m, ts: m.ts ?? Date.now() }]);
+
+  const clearHistory = () => {
+    setMessages([]);
+    setDraft(null);
+    setQuickReplies([]);
+    setConfirmClearHistory(false);
+    try {
+      window.localStorage.removeItem(CHAT_HISTORY_STORAGE_KEY);
+    } catch {
+      // ignore
+    }
+  };
 
   // Lock background scroll while the chat is open (prevents double scroll / jumping).
   useEffect(() => {
@@ -104,16 +198,17 @@ export default function AgentChat({
     if ((!text && !image && !spreadsheet) || busy) return;
     const sentImage = image;
     const sentFile = spreadsheet;
-    const history = messages.slice(-8).map((m) => ({ role: m.role, content: m.content }));
-    setMessages((prev) => [
-      ...prev,
-      {
-        role: "user",
-        content: text || (sentFile ? `קובץ: ${sentFile.name}` : "(צילום מסך)"),
-        image: sentImage ?? undefined,
-        fileName: sentFile?.name,
-      },
-    ]);
+    // Recent turns (failed replies excluded) so the model keeps multi-turn context.
+    const history = messages
+      .filter((m) => !m.isError)
+      .slice(-CHAT_CONTEXT_MAX_MESSAGES)
+      .map((m) => ({ role: m.role, content: m.content }));
+    addMessage({
+      role: "user",
+      content: text || (sentFile ? `קובץ: ${sentFile.name}` : "(צילום מסך)"),
+      image: sentImage ?? undefined,
+      fileName: sentFile?.name,
+    });
     setInput("");
     setImage(null);
     setSpreadsheet(null);
@@ -144,23 +239,28 @@ export default function AgentChat({
       }
       if (data?.success) {
         setQuickReplies([]);
-        setMessages((prev) => [...prev, { role: "assistant", content: `✅ ${data.message}` }]);
+        addMessage({
+          role: "assistant",
+          content: `✅ ${data.message}`,
+          actions: Array.isArray(data.events) ? data.events : undefined,
+        });
         setDraft(null);
         onSaved?.(Array.isArray(data.events) ? data.events : []);
         return;
       } else if (Array.isArray(data?.missing_fields)) {
         setDraft(data.draft ?? null);
         setQuickReplies(Array.isArray(data.quick_replies) ? data.quick_replies : []);
-        setMessages((prev) => [...prev, { role: "assistant", content: data.question || "חסר לי מידע נוסף." }]);
+        addMessage({ role: "assistant", content: data.question || "חסר לי מידע נוסף." });
       } else {
         const detail = data?.error || raw.replace(/<[^>]*>/g, " ").trim().slice(0, 200) || res.statusText || "אין פירוט";
-        setMessages((prev) => [...prev, { role: "assistant", content: `⚠️ משהו השתבש (${res.status}): ${detail}` }]);
+        addMessage({ role: "assistant", content: `⚠️ משהו השתבש (${res.status}): ${detail}`, isError: true });
       }
     } catch (e) {
-      setMessages((prev) => [
-        ...prev,
-        { role: "assistant", content: `⚠️ שגיאת רשת: ${e instanceof Error ? e.message : String(e)}` },
-      ]);
+      addMessage({
+        role: "assistant",
+        content: `⚠️ שגיאת רשת: ${e instanceof Error ? e.message : String(e)}`,
+        isError: true,
+      });
     } finally {
       setBusy(false);
     }
@@ -189,6 +289,16 @@ export default function AgentChat({
               <Sparkles size={16} /> סוכן הלו״ז
             </span>
             <div className="flex items-center gap-1">
+              <button
+                type="button"
+                onClick={() => setConfirmClearHistory((v) => !v)}
+                disabled={busy || messages.length === 0}
+                className="rounded-md bg-white/15 p-1 transition hover:bg-white/25 disabled:opacity-40"
+                aria-label="נקה היסטוריה"
+                title="נקה היסטוריה"
+              >
+                <RotateCcw size={16} />
+              </button>
               {onClearImported ? (
                 <button
                   type="button"
@@ -211,7 +321,34 @@ export default function AgentChat({
             </div>
           </div>
 
+          {confirmClearHistory && (
+            <div className="flex items-center justify-between gap-2 border-b border-red-200 bg-red-50 px-3 py-2">
+              <span className="text-xs font-semibold text-red-800">למחוק את כל היסטוריית השיחה?</span>
+              <div className="flex gap-2">
+                <button
+                  type="button"
+                  onClick={clearHistory}
+                  className="rounded-full bg-red-600 px-3 py-1 text-xs font-semibold text-white hover:bg-red-700"
+                >
+                  נקה היסטוריה
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setConfirmClearHistory(false)}
+                  className="rounded-full border border-slate-300 bg-white px-3 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-50"
+                >
+                  ביטול
+                </button>
+              </div>
+            </div>
+          )}
+
           <div className="flex-1 space-y-2 overflow-y-auto overscroll-contain bg-slate-50 p-3">
+            <div className="flex justify-end">
+              <div className="max-w-[85%] whitespace-pre-wrap break-words rounded-2xl rounded-tl-sm border border-slate-200 bg-white px-3 py-2 text-sm text-slate-800">
+                {WELCOME_MESSAGE}
+              </div>
+            </div>
             {messages.map((m, i) => (
               <div key={i} className={`flex ${m.role === "user" ? "justify-start" : "justify-end"}`}>
                 <div
@@ -225,12 +362,18 @@ export default function AgentChat({
                     // eslint-disable-next-line @next/next/no-img-element
                     <img src={m.image} alt="צילום מסך" className="mb-1 max-h-32 rounded-lg" />
                   )}
+                  {!m.image && m.hasImage && <div className="mb-1 text-xs opacity-90">🖼️ צילום מסך</div>}
                   {m.fileName && (
                     <div className="mb-1 flex items-center gap-1 text-xs opacity-90">
                       <FileSpreadsheet size={14} /> {m.fileName}
                     </div>
                   )}
                   {m.content}
+                  {m.ts ? (
+                    <div className={`mt-1 text-[10px] ${m.role === "user" ? "text-indigo-200" : "text-slate-400"}`}>
+                      {formatTime(m.ts)}
+                    </div>
+                  ) : null}
                 </div>
               </div>
             ))}
@@ -256,13 +399,10 @@ export default function AgentChat({
                     setClearPick(false);
                     void onClearImported(name).then((result) => {
                       if (!result) return;
-                      setMessages((prev) => [
-                        ...prev,
-                        {
-                          role: "assistant",
-                          content: `נמחקו ${result.deleted} משחקים מיובאים של ${name}. אפשר להעלות את קובץ האקסל מחדש.`,
-                        },
-                      ]);
+                      addMessage({
+                        role: "assistant",
+                        content: `נמחקו ${result.deleted} משחקים מיובאים של ${name}. אפשר להעלות את קובץ האקסל מחדש.`,
+                      });
                     });
                   }}
                   className="rounded-full border border-amber-300 bg-white px-3 py-1 text-sm font-semibold text-amber-900 hover:bg-amber-100 disabled:opacity-60"

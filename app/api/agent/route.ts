@@ -335,6 +335,7 @@ const buildPrompt = (text: string, draft: Draft, history: ChatTurn[], patterns: 
 טיוטה נוכחית: ${JSON.stringify(draft)}
 ${hist ? `היסטוריית שיחה:\n${hist}\n` : ""}קלט חדש מהמשתמש: ${text || "(ללא טקסט — ראה תמונה)"}
 
+אם הקלט החדש מפנה לאירוע קודם בשיחה (למשל "תוסיף עוד אחד כזה מחר", "אותו דבר גם ביום שלישי"), שכפל את האירוע האחרון שנרשם בהיסטוריית השיחה (כותרת, שעה, ילד) עם התאריך/היום החדש שביקשו.
 אם הקלט החדש הוא תיקון/השלמה (למשל "18:00" או "ביום חמישי") — עדכן את האירוע המתאים בטיוטה והחזר את הרשימה המלאה של האירועים (כולל אלה שלא השתנו).
 החזר JSON בלבד בפורמט:
 {"sender_or_group": string|null, "child_name": ${roster.memberKeys.map((k) => `"${k}"`).join("|")}|null, "events": [{"date": "YYYY-MM-DD"|null, "time": "HH:mm"|null, "title": string|null, "type": "dog|gym|sport|lesson|dance|other"|null, "keyword": string|null}]}`;
