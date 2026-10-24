@@ -14,6 +14,7 @@ import {
   type FamilyRoster,
 } from "@/app/lib/familyMembers";
 import { loadFamilyRoster } from "@/app/lib/familyRosterStore";
+import { recordAgentInteraction } from "@/app/lib/agentHistoryStore";
 import { parseFlexibleDate, weekdayIndexUtc } from "@/app/lib/scheduleDate";
 
 export const revalidate = 0;
@@ -844,11 +845,25 @@ export async function POST(request: NextRequest) {
       .slice(0, draft.events.length)
       .map((s) => `• ${s.title} — ${s.date.split("-").reverse().join("-")} ב-${s.time}`)
       .join("\n");
+    const successMessage = `נרשמו ${saved.length} אירועים עבור ${kidsLabel}${
+      childFromMemory ? " (שובץ אוטומטית לפי למידה מאושרת)" : ""
+    }:\n${lines}`;
+
+    // Remember this request so any device with an empty local chat can show the recent history.
+    // A request that needed follow-up answers is stored as one prompt (all user turns since the last save).
+    const lastSavedAt = history.map((h) => h.role === "assistant" && h.content.startsWith("✅")).lastIndexOf(true);
+    const promptParts = [
+      ...history.slice(lastSavedAt + 1).filter((h) => h.role === "user").map((h) => h.content),
+      text || (fileName ? `קובץ: ${fileName}` : "(צילום מסך)"),
+    ];
+    const recordedPrompt = promptParts.join(" · ");
+    after(async () => {
+      await recordAgentInteraction({ prompt: recordedPrompt, reply: `✅ ${successMessage}`, events: saved });
+    });
+
     return NextResponse.json({
       success: true,
-      message: `נרשמו ${saved.length} אירועים עבור ${kidsLabel}${
-        childFromMemory ? " (שובץ אוטומטית לפי למידה מאושרת)" : ""
-      }:\n${lines}`,
+      message: successMessage,
       events: saved,
       draft: emptyDraft(),
     });

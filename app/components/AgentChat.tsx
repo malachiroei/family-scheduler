@@ -16,6 +16,11 @@ type Msg = {
   isError?: boolean;
   /** Tool actions: events the agent saved to the schedule on this turn. */
   actions?: AgentSavedEvent[];
+  /**
+   * Set on messages seeded from the server that are not real past turns: "schedule" (rebuilt from events the
+   * agent saved earlier) or "example" (typical requests). They are never sent to the model as context.
+   */
+  source?: "schedule" | "example";
 };
 
 const CHAT_HISTORY_STORAGE_KEY = "family-scheduler-agent-chat-history-v1";
@@ -32,21 +37,20 @@ const toStoredMsg = (m: Msg): Msg => {
   return image ? { ...rest, hasImage: true } : rest;
 };
 
-const loadHistory = (): Msg[] => {
+const isValidMsg = (m: unknown): m is Msg =>
+  Boolean(m) &&
+  typeof m === "object" &&
+  ((m as Msg).role === "user" || (m as Msg).role === "assistant") &&
+  typeof (m as Msg).content === "string";
+
+/** Returns null when this device has never stored a history (so it can be hydrated from the server). */
+const loadHistory = (): Msg[] | null => {
   try {
     const raw = window.localStorage.getItem(CHAT_HISTORY_STORAGE_KEY);
-    if (!raw) return [];
+    if (raw === null) return null;
     const parsed: unknown = JSON.parse(raw);
     if (!Array.isArray(parsed)) return [];
-    return trimHistory(
-      parsed.filter(
-        (m): m is Msg =>
-          Boolean(m) &&
-          typeof m === "object" &&
-          ((m as Msg).role === "user" || (m as Msg).role === "assistant") &&
-          typeof (m as Msg).content === "string",
-      ),
-    );
+    return trimHistory(parsed.filter(isValidMsg));
   } catch {
     return [];
   }
@@ -120,15 +124,40 @@ export default function AgentChat({
   const [clearPick, setClearPick] = useState(false);
   const endRef = useRef<HTMLDivElement>(null);
 
-  // Restore the saved conversation once on the client.
+  // Restore the saved conversation once on the client. If this device has no stored history yet, hydrate it
+  // with the last 10 interactions from the server (recorded requests, rebuilt events, or example prompts).
   useEffect(() => {
-    setMessages(loadHistory());
-    setHistoryLoaded(true);
+    const stored = loadHistory();
+    if (stored !== null) {
+      setMessages(stored);
+      setHistoryLoaded(true);
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch("/api/agent/history", { cache: "no-store" });
+        const data = (await res.json()) as { ok?: boolean; messages?: unknown };
+        if (!cancelled && data?.ok && Array.isArray(data.messages)) {
+          const seeded = trimHistory(data.messages.filter(isValidMsg));
+          // Keep anything the user already typed while the request was in flight.
+          setMessages((prev) => (prev.length ? [...seeded, ...prev] : seeded));
+        }
+      } catch {
+        // offline / server error: start with the greeting only and retry on the next visit
+      } finally {
+        if (!cancelled) setHistoryLoaded(true);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   // Persist the last N messages (without image payloads) whenever the conversation changes.
+  // An empty list is never auto-saved: it would stop this device from hydrating from the server.
   useEffect(() => {
-    if (!historyLoaded) return;
+    if (!historyLoaded || messages.length === 0) return;
     try {
       window.localStorage.setItem(
         CHAT_HISTORY_STORAGE_KEY,
@@ -160,7 +189,8 @@ export default function AgentChat({
     setQuickReplies([]);
     setConfirmClearHistory(false);
     try {
-      window.localStorage.removeItem(CHAT_HISTORY_STORAGE_KEY);
+      // Store an explicit empty list so a cleared device is not re-hydrated from the server.
+      window.localStorage.setItem(CHAT_HISTORY_STORAGE_KEY, "[]");
     } catch {
       // ignore
     }
@@ -200,7 +230,7 @@ export default function AgentChat({
     const sentFile = spreadsheet;
     // Recent turns (failed replies excluded) so the model keeps multi-turn context.
     const history = messages
-      .filter((m) => !m.isError)
+      .filter((m) => !m.isError && !m.source)
       .slice(-CHAT_CONTEXT_MAX_MESSAGES)
       .map((m) => ({ role: m.role, content: m.content }));
     addMessage({
@@ -352,12 +382,19 @@ export default function AgentChat({
             {messages.map((m, i) => (
               <div key={i} className={`flex ${m.role === "user" ? "justify-start" : "justify-end"}`}>
                 <div
+                  onClick={m.source === "example" ? () => setInput(m.content) : undefined}
+                  title={m.source === "example" ? "לחצו כדי להשתמש בניסוח הזה" : undefined}
                   className={`max-w-[85%] whitespace-pre-wrap break-words rounded-2xl px-3 py-2 text-sm ${
                     m.role === "user"
                       ? "rounded-tr-sm bg-indigo-600 text-white"
                       : "rounded-tl-sm border border-slate-200 bg-white text-slate-800"
-                  }`}
+                  } ${m.source === "example" ? "cursor-pointer opacity-80 hover:opacity-100" : ""}`}
                 >
+                  {m.source && (
+                    <div className={`mb-1 text-[10px] ${m.role === "user" ? "text-indigo-200" : "text-slate-400"}`}>
+                      {m.source === "example" ? "דוגמה לבקשה (לחצו להעתקה)" : "שוחזר מהאירועים שנשמרו בלו״ז"}
+                    </div>
+                  )}
                   {m.image && (
                     // eslint-disable-next-line @next/next/no-img-element
                     <img src={m.image} alt="צילום מסך" className="mb-1 max-h-32 rounded-lg" />

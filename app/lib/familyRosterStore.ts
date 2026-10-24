@@ -44,7 +44,7 @@ const trySql = async (label: string, run: () => Promise<unknown>) => {
   }
 };
 
-const ensureSchedulerStateTable = async () => {
+export const ensureSchedulerStateTable = async () => {
   const { url } = getDatabaseConfig();
   if (!url) {
     return { ok: false as const, code: "MISSING_POSTGRES_ENV" as const };
