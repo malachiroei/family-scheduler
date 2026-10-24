@@ -720,24 +720,37 @@ export async function POST(request: NextRequest) {
 
     if (missing.length > 0) {
       const confirmOnly = missing.length === 1 && missing[0] === "child_name" && suggestedChild;
-      const quick = !missing.includes("child_name")
+      const askingOwner = missing.includes("child_name");
+      const isFixtures = draft.import_kind === "fixtures";
+      // Individual people: the client shows them as toggles (several can be picked) plus a confirm button.
+      const assigneeOptions: string[] = !askingOwner
+        ? []
+        : isFixtures
+          ? [...(roster.childDisplayNames.length ? roster.childDisplayNames : roster.memberDisplayNames)]
+          : isGirlsGroup(draft.sender_or_group)
+            ? [...roster.childDisplayNames, ...roster.memberDisplayNames.filter((n) => !roster.childDisplayNames.includes(n))]
+            : [...roster.memberDisplayNames];
+      // Joint choices that save for everyone in one tap ("רועי וסיון", "כולם"); the reply text names each person.
+      const assigneeCombos: string[] = [];
+      if (askingOwner && !isFixtures) {
+        if (roster.parents.length >= 2) assigneeCombos.push(`${roster.parents[0].name} ו${roster.parents[1].name}`);
+        if (isGirlsGroup(draft.sender_or_group)) {
+          assigneeCombos.push(...roster.familyPairOptions.map((pair) => pair.label.replace(" (ביחד)", "")));
+        }
+        assigneeCombos.push("כולם");
+      }
+      const quick: string[] = !askingOwner
         ? []
         : confirmOnly && suggestedChild
-          ? [
-              `כן, עבור ${childLabel(roster, suggestedChild)}`,
-              ...roster.memberKeys.filter((c) => c !== suggestedChild).map((c) => `עבור ${childLabel(roster, c)}`),
-            ]
-          : draft.import_kind === "fixtures"
-            ? [...(roster.childDisplayNames.length ? roster.childDisplayNames : roster.memberDisplayNames)]
-            : isGirlsGroup(draft.sender_or_group)
-            ? [...roster.childDisplayNames, ...roster.familyPairOptions.map((pair) => pair.label.replace(" (ביחד)", "")), ...roster.memberDisplayNames]
-            : [...roster.memberDisplayNames, "כולם"];
+          ? [`כן, עבור ${childLabel(roster, suggestedChild)}`, ...assigneeCombos]
+          : assigneeCombos;
       return NextResponse.json({
         success: false,
         missing_fields: missing,
         question: buildQuestion(draft, missing, suggestedChild, roster),
         draft,
         quick_replies: quick,
+        assignee_options: assigneeOptions,
       });
     }
 

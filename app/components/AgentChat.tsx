@@ -1,5 +1,5 @@
 "use client";
-import React, { useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import { Bot, ChevronDown, FileSpreadsheet, ImagePlus, RotateCcw, Send, Sparkles, Trash2, X } from "lucide-react";
 import { childDisplayNames as fallbackChildDisplayNames } from "@/app/lib/familyMembers";
 import { AGENT_EXAMPLE_PROMPTS } from "@/app/lib/agentExamples";
@@ -44,15 +44,40 @@ const isValidMsg = (m: unknown): m is Msg =>
   ((m as Msg).role === "user" || (m as Msg).role === "assistant") &&
   typeof (m as Msg).content === "string";
 
-const CHAT_HISTORY_CLEARED_KEY = "family-scheduler-agent-chat-history-cleared-v1";
+/** Identity of a message across devices; must match the server's key (role + ts + start of the text). */
+const msgKey = (m: Pick<Msg, "role" | "ts" | "content">) => `${m.role}|${m.ts ?? 0}|${m.content.slice(0, 200)}`;
 
-const wasHistoryClearedByUser = (): boolean => {
-  try {
-    return window.localStorage.getItem(CHAT_HISTORY_CLEARED_KEY) === "1";
-  } catch {
-    return false;
-  }
+/** What is sent to the shared server history (never image data). */
+const toServerMsg = (m: Msg) => ({
+  role: m.role,
+  content: m.content,
+  ts: m.ts,
+  ...(m.isError ? { isError: true } : {}),
+  ...(m.hasImage || m.image ? { hasImage: true } : {}),
+  ...(m.fileName ? { fileName: m.fileName } : {}),
+  ...(m.actions?.length ? { actions: m.actions } : {}),
+});
+
+/**
+ * Combines the server conversation with this device: everything the server has, plus messages not yet
+ * uploaded (pending) and rebuilt "schedule" placeholders. Local messages that are neither on the server nor
+ * pending were cleared/trimmed on another device and are dropped. Local copies win so images stay visible.
+ */
+const mergeWithServer = (local: Msg[], server: Msg[], pending: Map<string, Msg>): Msg[] => {
+  const localByKey = new Map(local.filter((m) => !m.source).map((m) => [msgKey(m), m] as const));
+  const out = new Map<string, Msg>();
+  for (const m of local) if (m.source === "schedule") out.set(`seed|${msgKey(m)}`, m);
+  for (const s of server) out.set(msgKey(s), localByKey.get(msgKey(s)) ?? s);
+  for (const [key, m] of pending) if (!out.has(key)) out.set(key, localByKey.get(key) ?? m);
+  return trimHistory([...out.values()].sort((a, b) => (a.ts ?? 0) - (b.ts ?? 0)));
 };
+
+const sameMessageList = (a: Msg[], b: Msg[]) =>
+  a.length === b.length && a.every((m, i) => m === b[i] || (msgKey(m) === msgKey(b[i]) && m.source === b[i].source));
+
+/** "רועי", "רועי וסיון", "רועי, סיון ועמית" — a reply the agent understands as several owners. */
+const joinNamesHebrew = (names: string[]) =>
+  names.length <= 1 ? (names[0] ?? "") : `${names.slice(0, -1).join(", ")} ו${names[names.length - 1]}`;
 
 const fallbackExampleMessages = (): Msg[] =>
   AGENT_EXAMPLE_PROMPTS.map((content) => ({ role: "user", content, source: "example" }));
@@ -152,6 +177,8 @@ type AgentResponse = {
   question?: string;
   missing_fields?: unknown;
   quick_replies?: string[];
+  /** Individual people the owner question can be answered with (several may be chosen). */
+  assignee_options?: string[];
   draft?: Draft;
   events?: AgentSavedEvent[];
 };
@@ -184,6 +211,9 @@ export default function AgentChat({
   const [spreadsheet, setSpreadsheet] = useState<SpreadsheetAttach | null>(null);
   const [draft, setDraft] = useState<Draft>(null);
   const [quickReplies, setQuickReplies] = useState<string[]>([]);
+  // Who the agent is asking to assign to: several can be toggled, then confirmed in one reply.
+  const [assigneeOptions, setAssigneeOptions] = useState<string[]>([]);
+  const [selectedAssignees, setSelectedAssignees] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
   const [dragging, setDragging] = useState(false);
   const [clearPick, setClearPick] = useState(false);
@@ -191,62 +221,132 @@ export default function AgentChat({
   // Manual expand/collapse choices per group key; groups without an entry use the default (see below).
   const [groupOverrides, setGroupOverrides] = useState<Record<string, boolean>>({});
 
-  // Restore the saved conversation once on the client. If this device has no stored history yet, hydrate it
-  // with the last 10 interactions from the server (recorded requests, rebuilt events, or example prompts).
+  // Messages created on this device that the server does not have yet (key -> message).
+  const pendingRef = useRef<Map<string, Msg>>(new Map());
+  const messagesRef = useRef<Msg[]>([]);
+  const flushingRef = useRef(false);
+  const pushTimerRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    messagesRef.current = messages;
+  }, [messages]);
+
+  // Upload messages the server has not seen yet. Failures keep them pending; the next sync retries.
+  const flushPending = useCallback(async () => {
+    if (flushingRef.current) return;
+    const batch = [...pendingRef.current.entries()];
+    if (batch.length === 0) return;
+    flushingRef.current = true;
+    try {
+      const res = await fetch("/api/agent/history", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ append: batch.map(([, m]) => toServerMsg(m)) }),
+      });
+      if (res.ok) {
+        for (const [key] of batch) pendingRef.current.delete(key);
+      } else {
+        console.warn("[AgentChat] history upload failed:", res.status);
+      }
+    } catch (error) {
+      console.warn("[AgentChat] history upload failed", error);
+    } finally {
+      flushingRef.current = false;
+    }
+  }, []);
+
+  const schedulePush = useCallback(() => {
+    if (pushTimerRef.current !== null) window.clearTimeout(pushTimerRef.current);
+    pushTimerRef.current = window.setTimeout(() => {
+      pushTimerRef.current = null;
+      void flushPending();
+    }, 300);
+  }, [flushPending]);
+
+  // Pull the shared conversation from the server and merge it with this device (see mergeWithServer).
+  const syncFromServer = useCallback(async () => {
+    await flushPending();
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 20000);
+    try {
+      const res = await fetch("/api/agent/history", { cache: "no-store", signal: controller.signal });
+      const data = (await res.json()) as { ok?: boolean; origin?: string; messages?: unknown };
+      if (!res.ok || !data?.ok) return;
+      const fetched = (Array.isArray(data.messages) ? data.messages.filter(isValidMsg) : []) as Msg[];
+      console.info("[AgentChat] /api/agent/history ->", data.origin, fetched.length, "messages");
+
+      if (data.origin === "chat" || data.origin === "empty") {
+        setMessages((prev) => {
+          const merged = mergeWithServer(prev, fetched, pendingRef.current);
+          return sameMessageList(prev, merged) ? prev : merged;
+        });
+        return;
+      }
+
+      // Server has no shared log yet (first use): keep this device's real messages and upload them so
+      // other devices get them; otherwise show the one-time seed (recorded requests / rebuilt / examples).
+      const localReal = messagesRef.current.filter((m) => !m.source);
+      if (localReal.length > 0) {
+        for (const m of localReal) {
+          const withTs = m.ts ? m : { ...m, ts: Date.now() };
+          pendingRef.current.set(msgKey(withTs), withTs);
+        }
+        void flushPending();
+        return;
+      }
+      setMessages((prev) => {
+        if (prev.some((m) => !m.source)) return prev; // the user typed while we were fetching
+        const next = fetched.length > 0 ? trimHistory(fetched) : fallbackExampleMessages();
+        return sameMessageList(prev, next) ? prev : next;
+      });
+    } catch (error) {
+      console.warn("[AgentChat] history sync failed", error);
+    } finally {
+      clearTimeout(timeout);
+    }
+  }, [flushPending]);
+
+  // Restore this device's cached conversation once; the server copy is merged in right after (below).
   useEffect(() => {
     const storedHistory = loadHistory();
     const hasRealHistory = Boolean(storedHistory?.some((m) => m.source !== "example"));
-    // Hydrate when there is nothing usable locally: no key, an empty list (e.g. saved by an earlier
-    // version/test), or only example prompts. The only exception is a history the user cleared on purpose.
-    if (hasRealHistory || wasHistoryClearedByUser()) {
-      console.info("[AgentChat] using local history:", storedHistory?.length ?? 0, "messages");
-      setMessages(storedHistory ?? []);
-      setHistoryLoaded(true);
-      return;
-    }
-
-    console.info("[AgentChat] local history is empty; seeding examples and fetching /api/agent/history");
-    // Never show a blank box: seed the fallback examples right away, then replace them if the server has more.
-    setMessages(fallbackExampleMessages());
+    console.info("[AgentChat] cached local history:", storedHistory?.length ?? 0, "messages");
+    // Never show a blank box: with no real history yet, seed the fallback examples until the server answers.
+    setMessages(hasRealHistory ? (storedHistory ?? []) : fallbackExampleMessages());
     setHistoryLoaded(true);
-
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 20000);
-    (async () => {
-      try {
-        const res = await fetch("/api/agent/history", { cache: "no-store", signal: controller.signal });
-        const data = (await res.json()) as { ok?: boolean; origin?: string; messages?: unknown };
-        const fetched = Array.isArray(data?.messages) ? trimHistory(data.messages.filter(isValidMsg)) : [];
-        console.info("[AgentChat] /api/agent/history ->", res.status, data?.origin, fetched.length, "messages");
-        if (res.ok && data?.ok && fetched.length > 0) {
-          // Keep anything the user already typed while the request was in flight.
-          setMessages((prev) => [...fetched, ...prev.filter((m) => !m.source)]);
-        }
-      } catch (error) {
-        console.warn("[AgentChat] history fetch failed; keeping fallback examples", error);
-      } finally {
-        clearTimeout(timeout);
-      }
-    })();
-    return () => {
-      clearTimeout(timeout);
-      controller.abort();
-    };
   }, []);
 
-  // Persist the last N messages (without image payloads) whenever the conversation changes.
-  // Example prompts are never saved, and an examples-only list is skipped, so a device keeps hydrating
-  // from the server until it has real history.
+  // Always read the latest shared conversation when the agent opens, then keep it fresh (mobile <-> desktop):
+  // poll while open and re-sync whenever the tab/app becomes visible again.
+  useEffect(() => {
+    if (!historyLoaded) return;
+    // Sync once in the background on load too, so a device that never opens the chat still caches it.
+    void syncFromServer();
+    if (!open) return;
+    const run = () => {
+      if (document.visibilityState === "hidden") return;
+      void syncFromServer();
+    };
+    const id = window.setInterval(run, 15000);
+    document.addEventListener("visibilitychange", run);
+    window.addEventListener("focus", run);
+    return () => {
+      window.clearInterval(id);
+      document.removeEventListener("visibilitychange", run);
+      window.removeEventListener("focus", run);
+    };
+  }, [open, historyLoaded, syncFromServer]);
+
+  // Cache the last N messages locally (without image payloads) for instant display next time.
+  // Example prompts are never cached.
   useEffect(() => {
     if (!historyLoaded) return;
     const toSave = messages.filter((m) => m.source !== "example");
-    if (toSave.length === 0) return;
     try {
       window.localStorage.setItem(
         CHAT_HISTORY_STORAGE_KEY,
         JSON.stringify(trimHistory(toSave).map(toStoredMsg)),
       );
-      window.localStorage.removeItem(CHAT_HISTORY_CLEARED_KEY);
     } catch {
       // storage full / unavailable: keep working without persistence
     }
@@ -265,20 +365,31 @@ export default function AgentChat({
     endRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, busy, open]);
 
-  const addMessage = (m: Msg) => setMessages((prev) => [...prev, { ...m, ts: m.ts ?? Date.now() }]);
+  // Adds a message to the chat and queues it for the shared server history (so other devices see it).
+  const addMessage = (m: Msg) => {
+    const msg: Msg = { ...m, ts: m.ts ?? Date.now() };
+    pendingRef.current.set(msgKey(msg), msg);
+    setMessages((prev) => [...prev, msg]);
+    schedulePush();
+  };
 
   const clearHistory = () => {
     setMessages([]);
     setDraft(null);
     setQuickReplies([]);
+    setAssigneeOptions([]);
+    setSelectedAssignees([]);
     setConfirmClearHistory(false);
+    pendingRef.current.clear();
     try {
-      // Remember the explicit clear so this device is not re-hydrated from the server afterwards.
       window.localStorage.setItem(CHAT_HISTORY_STORAGE_KEY, "[]");
-      window.localStorage.setItem(CHAT_HISTORY_CLEARED_KEY, "1");
     } catch {
       // ignore
     }
+    // Clear the shared copy too, otherwise the next sync would bring the old conversation back.
+    void fetch("/api/agent/history", { method: "DELETE" }).catch((error) => {
+      console.warn("[AgentChat] clearing the shared history failed", error);
+    });
   };
 
   // Lock background scroll while the chat is open (prevents double scroll / jumping).
@@ -327,6 +438,7 @@ export default function AgentChat({
     setInput("");
     setImage(null);
     setSpreadsheet(null);
+    setSelectedAssignees([]);
     // Quick replies stay visible until the server answers (and come back if the request fails),
     // so the question never loses its buttons.
     setBusy(true);
@@ -354,6 +466,8 @@ export default function AgentChat({
       }
       if (data?.success) {
         setQuickReplies([]);
+        setAssigneeOptions([]);
+        setSelectedAssignees([]);
         addMessage({
           role: "assistant",
           content: `✅ ${data.message}`,
@@ -365,6 +479,8 @@ export default function AgentChat({
       } else if (Array.isArray(data?.missing_fields)) {
         setDraft(data.draft ?? null);
         setQuickReplies(Array.isArray(data.quick_replies) ? data.quick_replies : []);
+        setAssigneeOptions(Array.isArray(data.assignee_options) ? data.assignee_options : []);
+        setSelectedAssignees([]);
         addMessage({ role: "assistant", content: data.question || "חסר לי מידע נוסף." });
       } else {
         const detail = data?.error || raw.replace(/<[^>]*>/g, " ").trim().slice(0, 200) || res.statusText || "אין פירוט";
@@ -573,6 +689,47 @@ export default function AgentChat({
                   {name}
                 </button>
               ))}
+            </div>
+          )}
+          {assigneeOptions.length > 0 && (
+            <div className="border-t border-slate-200 bg-white px-3 pt-2">
+              <div className="mb-1.5 text-[11px] font-semibold text-slate-500">
+                לבחירת כמה אנשים סמנו את כולם ולחצו &quot;אישור / המשך&quot;
+              </div>
+              <div className="flex flex-wrap items-center gap-2">
+                {assigneeOptions.map((name) => {
+                  const selected = selectedAssignees.includes(name);
+                  return (
+                    <button
+                      key={`assignee-${name}`}
+                      type="button"
+                      disabled={busy}
+                      aria-pressed={selected}
+                      onClick={() =>
+                        setSelectedAssignees((prev) =>
+                          prev.includes(name) ? prev.filter((n) => n !== name) : [...prev, name],
+                        )
+                      }
+                      className={`rounded-full border px-3 py-1 text-sm font-semibold transition disabled:opacity-60 ${
+                        selected
+                          ? "border-indigo-600 bg-indigo-600 text-white"
+                          : "border-indigo-300 bg-indigo-50 text-indigo-700 hover:bg-indigo-100"
+                      }`}
+                    >
+                      {selected ? "✓ " : ""}
+                      {name}
+                    </button>
+                  );
+                })}
+                <button
+                  type="button"
+                  disabled={busy || selectedAssignees.length === 0}
+                  onClick={() => void send(joinNamesHebrew(assigneeOptions.filter((n) => selectedAssignees.includes(n))))}
+                  className="rounded-full bg-emerald-600 px-4 py-1 text-sm font-bold text-white transition hover:bg-emerald-700 disabled:opacity-40"
+                >
+                  אישור / המשך{selectedAssignees.length > 1 ? ` (${selectedAssignees.length})` : ""}
+                </button>
+              </div>
             </div>
           )}
           {quickReplies.length > 0 && (
