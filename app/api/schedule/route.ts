@@ -4,6 +4,7 @@ import {
   buildMetadataFromIncoming,
   ensureScheduleExtraColumns,
   ensureScheduleMetadataColumn,
+  parseRecurrenceInterval,
   parseScheduleMetadata,
 } from "@/app/lib/scheduleTable";
 import { sendPushToAll, sendPushToParents } from "@/app/lib/push";
@@ -257,6 +258,12 @@ const sanitizeDbEvent = (event: unknown, roster: FamilyRoster = fallbackRoster) 
     : (typeof candidate.recurring_template_id === "string" && candidate.recurring_template_id.trim()
       ? candidate.recurring_template_id.trim()
       : undefined);
+  const recurrenceIntervalWeeks = isRecurring
+    ? parseRecurrenceInterval(candidate.recurrenceIntervalWeeks ?? candidate.recurrence_interval_weeks)
+    : null;
+  const recurrenceAnchorDate = recurrenceIntervalWeeks
+    ? (parseFlexibleDate(candidate.recurrenceAnchorDate ?? candidate.recurrence_anchor_date) || date || null)
+    : null;
   const completed = parseBooleanValue(candidate.completed);
   const sendNotification = parseBooleanValue(candidate.sendNotification ?? candidate.send_notification ?? true);
   const requireConfirmation = parseBooleanValue(
@@ -294,6 +301,8 @@ const sanitizeDbEvent = (event: unknown, roster: FamilyRoster = fallbackRoster) 
     type,
     isRecurring,
     recurringTemplateId: isRecurring ? recurringTemplateId : undefined,
+    recurrenceIntervalWeeks,
+    recurrenceAnchorDate,
     completed,
     sendNotification,
     requireConfirmation,
@@ -579,6 +588,8 @@ const upsertScheduleEvent = async (incoming: ReturnType<typeof sanitizeDbEvent>)
         type: meta.type,
         isRecurring: meta.isRecurring === true,
         recurringTemplateId: meta.recurringTemplateId?.trim() ? meta.recurringTemplateId.trim() : undefined,
+        recurrenceIntervalWeeks: meta.recurrenceIntervalWeeks ?? undefined,
+        recurrenceAnchorDate: meta.recurrenceAnchorDate ?? undefined,
         completed: meta.completed,
         sendNotification: meta.sendNotification,
         requireConfirmation: meta.needsAck ?? meta.requireConfirmation,
@@ -698,6 +709,8 @@ async function handleGet() {
         type: meta.type,
         isRecurring: meta.isRecurring === true,
         recurringTemplateId: meta.recurringTemplateId?.trim() ? meta.recurringTemplateId.trim() : undefined,
+        recurrenceIntervalWeeks: meta.recurrenceIntervalWeeks ?? undefined,
+        recurrenceAnchorDate: meta.recurrenceAnchorDate ?? undefined,
         completed: meta.completed,
         sendNotification: meta.sendNotification,
         requireConfirmation: meta.needsAck ?? meta.requireConfirmation,

@@ -11,6 +11,10 @@ export type ScheduleEventMetadata = {
   zoomLink?: string | null;
   isRecurring: boolean;
   recurringTemplateId?: string | null;
+  /** Recurrence step in weeks (2 = every other week). Null/absent means plain weekly. */
+  recurrenceIntervalWeeks?: number | null;
+  /** YYYY-MM-DD of the first occurrence; with the interval it fixes which weeks the task appears in. */
+  recurrenceAnchorDate?: string | null;
   completed: boolean;
   sendNotification: boolean;
   requireConfirmation: boolean;
@@ -35,6 +39,8 @@ const defaultMetadata = (): ScheduleEventMetadata => ({
   zoomLink: null,
   isRecurring: false,
   recurringTemplateId: null,
+  recurrenceIntervalWeeks: null,
+  recurrenceAnchorDate: null,
   completed: false,
   sendNotification: true,
   requireConfirmation: false,
@@ -46,6 +52,12 @@ const defaultMetadata = (): ScheduleEventMetadata => ({
   eventDate: null,
   source: null,
 });
+
+/** Accepts whole weeks 2..8; anything else (including 1) means plain weekly and is stored as null. */
+export const parseRecurrenceInterval = (raw: unknown): number | null => {
+  const n = Number(raw);
+  return Number.isInteger(n) && n >= 2 && n <= 8 ? n : null;
+};
 
 export const parseScheduleMetadata = (raw: unknown): ScheduleEventMetadata => {
   const base = defaultMetadata();
@@ -81,6 +93,12 @@ export const parseScheduleMetadata = (raw: unknown): ScheduleEventMetadata => {
     zoomLink: typeof o.zoomLink === "string" ? o.zoomLink : typeof o.zoom_link === "string" ? o.zoom_link : null,
     isRecurring,
     recurringTemplateId: isRecurring ? recurringTemplateIdRaw : null,
+    recurrenceIntervalWeeks: isRecurring
+      ? parseRecurrenceInterval(o.recurrenceIntervalWeeks ?? o.recurrence_interval_weeks)
+      : null,
+    recurrenceAnchorDate: isRecurring
+      ? parseFlexibleDate(o.recurrenceAnchorDate ?? o.recurrence_anchor_date)
+      : null,
     completed: parseMetadataBoolean(o.completed),
     sendNotification: (() => {
       const v = o.sendNotification ?? o.send_notification;
@@ -121,6 +139,8 @@ export const buildMetadataFromIncoming = (incoming: {
   zoomLink?: string;
   isRecurring: boolean;
   recurringTemplateId?: string;
+  recurrenceIntervalWeeks?: number | null;
+  recurrenceAnchorDate?: string | null;
   completed: boolean;
   sendNotification: boolean;
   requireConfirmation: boolean;
@@ -141,6 +161,8 @@ export const buildMetadataFromIncoming = (incoming: {
     zoomLink: incoming.zoomLink ?? null,
     isRecurring: recurring,
     recurringTemplateId: recurring ? (incoming.recurringTemplateId ?? null) : null,
+    recurrenceIntervalWeeks: recurring ? parseRecurrenceInterval(incoming.recurrenceIntervalWeeks) : null,
+    recurrenceAnchorDate: recurring ? (incoming.recurrenceAnchorDate ?? null) : null,
     completed: incoming.completed,
     sendNotification: incoming.sendNotification,
     requireConfirmation: incoming.requireConfirmation,

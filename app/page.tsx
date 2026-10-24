@@ -48,6 +48,10 @@ type SchedulerEvent = {
   type: EventType;
   isRecurring?: boolean;
   recurringTemplateId?: string;
+  /** 2 = every other week. Absent = weekly. Needs recurrenceAnchorDate. */
+  recurrenceIntervalWeeks?: number;
+  /** YYYY-MM-DD of the first occurrence of a bi-weekly (or longer interval) series. */
+  recurrenceAnchorDate?: string;
   completed?: boolean;
   sendNotification?: boolean;
   requireConfirmation?: boolean;
@@ -97,6 +101,8 @@ type RecurringTemplate = {
   zoomLink?: string;
   type: EventType;
   isRecurring?: boolean;
+  recurrenceIntervalWeeks?: number;
+  recurrenceAnchorDate?: string;
   sendNotification?: boolean;
   requireConfirmation?: boolean;
   reminderLeadMinutes?: ReminderLeadMinutes;
@@ -190,6 +196,8 @@ type ScheduleApiEvent = {
   type: EventType;
   isRecurring?: boolean;
   recurringTemplateId?: string;
+  recurrenceIntervalWeeks?: number;
+  recurrenceAnchorDate?: string;
   completed?: boolean;
   sendNotification?: boolean;
   requireConfirmation?: boolean;
@@ -1697,6 +1705,25 @@ const sortEvents = (events: SchedulerEvent[]) => {
   return [...events].sort((a, b) => score(a.time) - score(b.time));
 };
 
+/**
+ * Weekly templates appear every week. Templates with an interval (e.g. every 2 weeks) appear only in weeks whose
+ * distance from the anchor week is a multiple of the interval, and never before the anchor week.
+ */
+const isRecurringTemplateActiveInWeek = (
+  template: Pick<RecurringTemplate, 'recurrenceIntervalWeeks' | 'recurrenceAnchorDate'>,
+  weekStart: Date,
+): boolean => {
+  const interval = Number(template.recurrenceIntervalWeeks);
+  if (!Number.isInteger(interval) || interval < 2) return true;
+  const anchorKey = template.recurrenceAnchorDate?.trim();
+  if (!anchorKey || !/^\d{4}-\d{2}-\d{2}$/.test(anchorKey)) return true;
+  const anchorWeekStart = getWeekStart(new Date(`${anchorKey}T00:00:00`));
+  const weekMs = 7 * 24 * 60 * 60 * 1000;
+  // Math.round absorbs the 1-hour DST shift between local midnights.
+  const diffWeeks = Math.round((getWeekStart(weekStart).getTime() - anchorWeekStart.getTime()) / weekMs);
+  return diffWeeks >= 0 && diffWeeks % interval === 0;
+};
+
 type CreateWeekDaysOptions = {
   /** When true, only use templates from the caller (e.g. DB refetch). Skips merging built-in defaults like remote-learning — otherwise deleted recurring items would reappear after every refresh. */
   skipDefaultRecurringTemplates?: boolean;
@@ -1750,6 +1777,9 @@ const createWeekDays = (
     if (isBuiltinJohnnyEnabled() && isJohnnyScheduleTitle(String(template.title || ''))) {
       return;
     }
+    if (!isRecurringTemplateActiveInWeek(template, weekStart)) {
+      return;
+    }
     addEvent(template.dayIndex, {
       id: template.persistedRowId ?? `${template.templateId}-${toIsoDate(weekStart)}`,
       date: toEventDateKey(addDays(weekStart, template.dayIndex)),
@@ -1760,6 +1790,8 @@ const createWeekDays = (
       type: template.type,
       isRecurring: template.isRecurring,
       recurringTemplateId: template.templateId,
+      recurrenceIntervalWeeks: template.recurrenceIntervalWeeks,
+      recurrenceAnchorDate: template.recurrenceAnchorDate,
       sendNotification: template.sendNotification,
       requireConfirmation: template.requireConfirmation,
       reminderLeadMinutes: template.reminderLeadMinutes,
@@ -3235,6 +3267,8 @@ export default function FamilyScheduler() {
           zoomLink: event.zoomLink,
           type: event.type,
           isRecurring: true,
+          recurrenceIntervalWeeks: event.recurrenceIntervalWeeks,
+          recurrenceAnchorDate: event.recurrenceAnchorDate,
           sendNotification: event.sendNotification ?? true,
           requireConfirmation: Boolean(event.requireConfirmation),
           reminderLeadMinutes: sanitizeReminderLead(event.reminderLeadMinutes),
@@ -5444,8 +5478,11 @@ export default function FamilyScheduler() {
               ) : (
                 <ul className="space-y-2">
                   {visibleListEvents.map((ev) => {
-                    const childKey = normalizeChildKey(String(ev.child));
-                    const childName = childKey ? memberVisual(childKey).name : String(ev.child);
+                    const evChildKeys = getChildKeys(String(ev.child));
+                    const childKey = normalizeChildKey(String(ev.child)) ?? evChildKeys[0] ?? null;
+                    const childName = evChildKeys.length > 1
+                      ? evChildKeys.map((key) => memberVisual(key).name).join(' ו')
+                      : childKey ? memberVisual(childKey).name : String(ev.child);
                     const now = new Date();
                     const past = isEventStartInPast(ev, now);
                     const leagueBadge = fixtureLeagueBadge(`${ev.league || ''} ${ev.title || ''}`);
@@ -5492,7 +5529,13 @@ export default function FamilyScheduler() {
                           <div className="text-xs text-slate-600 mt-1 flex flex-wrap items-center gap-x-2 gap-y-0.5 justify-end">
                             <span className="font-semibold">
                               {upcomingListTab === 'recurring'
-                                ? `${dayNames[Number(ev.dayIndex)] ?? formatUpcomingListDayLabel(ev.date)} · כל שבוע`
+                                ? `${dayNames[Number(ev.dayIndex)] ?? formatUpcomingListDayLabel(ev.date)} · ${
+                                  Number(ev.recurrenceIntervalWeeks) === 2
+                                    ? 'כל שבועיים'
+                                    : Number(ev.recurrenceIntervalWeeks) > 2
+                                      ? `כל ${ev.recurrenceIntervalWeeks} שבועות`
+                                      : 'כל שבוע'
+                                }`
                                 : formatUpcomingListDayLabel(ev.date)}
                             </span>
                             <span>·</span>

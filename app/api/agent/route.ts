@@ -776,6 +776,16 @@ export async function POST(request: NextRequest) {
     // The only DB work on the critical path: INSERT(s), capped at 6s so we answer before Vercel's 504.
     const insertAll = (async () => {
       for (const r of rowsToInsert) {
+        // Idempotent: re-running the same request must not create a second identical event.
+        const duplicate = await sql`
+          SELECT 1 FROM schedule
+          WHERE title = ${r.title}
+            AND "date"::text = ${r.date}
+            AND metadata->>'time' = ${r.metadata.time}
+            AND metadata->>'child' = ${r.metadata.child}
+          LIMIT 1
+        `;
+        if (duplicate.rowCount > 0) continue;
         await sql`
           INSERT INTO schedule (id, title, "date", metadata)
           VALUES (${r.id}, ${r.title}, ${r.date}, ${sqlJson(r.metadata)})
