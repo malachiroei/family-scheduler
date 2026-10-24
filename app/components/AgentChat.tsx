@@ -2,6 +2,7 @@
 import React, { useEffect, useRef, useState } from "react";
 import { Bot, FileSpreadsheet, ImagePlus, RotateCcw, Send, Sparkles, Trash2, X } from "lucide-react";
 import { childDisplayNames as fallbackChildDisplayNames } from "@/app/lib/familyMembers";
+import { AGENT_EXAMPLE_PROMPTS } from "@/app/lib/agentExamples";
 
 type Msg = {
   role: "user" | "assistant";
@@ -43,7 +44,20 @@ const isValidMsg = (m: unknown): m is Msg =>
   ((m as Msg).role === "user" || (m as Msg).role === "assistant") &&
   typeof (m as Msg).content === "string";
 
-/** Returns null when this device has never stored a history (so it can be hydrated from the server). */
+const CHAT_HISTORY_CLEARED_KEY = "family-scheduler-agent-chat-history-cleared-v1";
+
+const wasHistoryClearedByUser = (): boolean => {
+  try {
+    return window.localStorage.getItem(CHAT_HISTORY_CLEARED_KEY) === "1";
+  } catch {
+    return false;
+  }
+};
+
+const fallbackExampleMessages = (): Msg[] =>
+  AGENT_EXAMPLE_PROMPTS.map((content) => ({ role: "user", content, source: "example" }));
+
+/** Returns null when this device has never stored a history. */
 const loadHistory = (): Msg[] | null => {
   try {
     const raw = window.localStorage.getItem(CHAT_HISTORY_STORAGE_KEY);
@@ -127,42 +141,59 @@ export default function AgentChat({
   // Restore the saved conversation once on the client. If this device has no stored history yet, hydrate it
   // with the last 10 interactions from the server (recorded requests, rebuilt events, or example prompts).
   useEffect(() => {
-    const stored = loadHistory();
-    if (stored !== null) {
-      setMessages(stored);
+    const storedHistory = loadHistory();
+    const hasRealHistory = Boolean(storedHistory?.some((m) => m.source !== "example"));
+    // Hydrate when there is nothing usable locally: no key, an empty list (e.g. saved by an earlier
+    // version/test), or only example prompts. The only exception is a history the user cleared on purpose.
+    if (hasRealHistory || wasHistoryClearedByUser()) {
+      console.info("[AgentChat] using local history:", storedHistory?.length ?? 0, "messages");
+      setMessages(storedHistory ?? []);
       setHistoryLoaded(true);
       return;
     }
-    let cancelled = false;
+
+    console.info("[AgentChat] local history is empty; seeding examples and fetching /api/agent/history");
+    // Never show a blank box: seed the fallback examples right away, then replace them if the server has more.
+    setMessages(fallbackExampleMessages());
+    setHistoryLoaded(true);
+
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 20000);
     (async () => {
       try {
-        const res = await fetch("/api/agent/history", { cache: "no-store" });
-        const data = (await res.json()) as { ok?: boolean; messages?: unknown };
-        if (!cancelled && data?.ok && Array.isArray(data.messages)) {
-          const seeded = trimHistory(data.messages.filter(isValidMsg));
+        const res = await fetch("/api/agent/history", { cache: "no-store", signal: controller.signal });
+        const data = (await res.json()) as { ok?: boolean; origin?: string; messages?: unknown };
+        const fetched = Array.isArray(data?.messages) ? trimHistory(data.messages.filter(isValidMsg)) : [];
+        console.info("[AgentChat] /api/agent/history ->", res.status, data?.origin, fetched.length, "messages");
+        if (res.ok && data?.ok && fetched.length > 0) {
           // Keep anything the user already typed while the request was in flight.
-          setMessages((prev) => (prev.length ? [...seeded, ...prev] : seeded));
+          setMessages((prev) => [...fetched, ...prev.filter((m) => !m.source)]);
         }
-      } catch {
-        // offline / server error: start with the greeting only and retry on the next visit
+      } catch (error) {
+        console.warn("[AgentChat] history fetch failed; keeping fallback examples", error);
       } finally {
-        if (!cancelled) setHistoryLoaded(true);
+        clearTimeout(timeout);
       }
     })();
     return () => {
-      cancelled = true;
+      clearTimeout(timeout);
+      controller.abort();
     };
   }, []);
 
   // Persist the last N messages (without image payloads) whenever the conversation changes.
-  // An empty list is never auto-saved: it would stop this device from hydrating from the server.
+  // Example prompts are never saved, and an examples-only list is skipped, so a device keeps hydrating
+  // from the server until it has real history.
   useEffect(() => {
-    if (!historyLoaded || messages.length === 0) return;
+    if (!historyLoaded) return;
+    const toSave = messages.filter((m) => m.source !== "example");
+    if (toSave.length === 0) return;
     try {
       window.localStorage.setItem(
         CHAT_HISTORY_STORAGE_KEY,
-        JSON.stringify(trimHistory(messages).map(toStoredMsg)),
+        JSON.stringify(trimHistory(toSave).map(toStoredMsg)),
       );
+      window.localStorage.removeItem(CHAT_HISTORY_CLEARED_KEY);
     } catch {
       // storage full / unavailable: keep working without persistence
     }
@@ -189,8 +220,9 @@ export default function AgentChat({
     setQuickReplies([]);
     setConfirmClearHistory(false);
     try {
-      // Store an explicit empty list so a cleared device is not re-hydrated from the server.
+      // Remember the explicit clear so this device is not re-hydrated from the server afterwards.
       window.localStorage.setItem(CHAT_HISTORY_STORAGE_KEY, "[]");
+      window.localStorage.setItem(CHAT_HISTORY_CLEARED_KEY, "1");
     } catch {
       // ignore
     }

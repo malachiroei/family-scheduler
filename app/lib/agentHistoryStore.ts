@@ -1,4 +1,5 @@
 import { sql, sqlJson } from "@/app/lib/db";
+import { AGENT_EXAMPLE_PROMPTS } from "@/app/lib/agentExamples";
 import { ensureSchedulerStateTable, loadFamilyRoster } from "@/app/lib/familyRosterStore";
 
 /** scheduler_state key holding the most recent agent interactions (shared by every device). */
@@ -177,21 +178,8 @@ const deriveFromSchedule = async (
 };
 
 /** Typical requests shown only when the family has no agent activity at all yet. */
-const EXAMPLE_PROMPTS = [
-  "ייבוא משחקי הליגה מקובץ אקסל",
-  "אימון כדורסל לעמית ביום שלישי ב-18:00",
-  "תגבור במתמטיקה לאלין ביום רביעי ב-16:30",
-  "משחק של רביד ביום שישי ב-10:00",
-  "הטיול של ג'וני בשבת בבוקר ב-08:00",
-  "תוסיף עוד אחד כזה מחר",
-  "אימון ריקוד לאלין ביום חמישי ב-17:00",
-  "שנה את האימון של עמית ל-19:00",
-  "צילום מסך של הודעת וואטסאפ עם לו״ז שבועי",
-  "ישיבת הורים ביום ראשון ב-20:00",
-];
-
 const exampleMessages = (): HydratedMessage[] =>
-  EXAMPLE_PROMPTS.map((content) => ({ role: "user", content, source: "example" }));
+  AGENT_EXAMPLE_PROMPTS.map((content) => ({ role: "user", content, source: "example" }));
 
 /** Last AGENT_HISTORY_LIMIT interactions: recorded ones, padded with rebuilt ones, else examples. */
 export const loadAgentHistory = async (): Promise<HydratedHistory> => {
