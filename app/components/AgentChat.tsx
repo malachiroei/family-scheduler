@@ -1,6 +1,6 @@
 "use client";
 import React, { useEffect, useRef, useState } from "react";
-import { Bot, FileSpreadsheet, ImagePlus, RotateCcw, Send, Sparkles, Trash2, X } from "lucide-react";
+import { Bot, ChevronDown, FileSpreadsheet, ImagePlus, RotateCcw, Send, Sparkles, Trash2, X } from "lucide-react";
 import { childDisplayNames as fallbackChildDisplayNames } from "@/app/lib/familyMembers";
 import { AGENT_EXAMPLE_PROMPTS } from "@/app/lib/agentExamples";
 
@@ -78,6 +78,57 @@ const formatTime = (ts?: number) => {
     return "";
   }
 };
+type MsgGroup = {
+  key: string;
+  label: string;
+  icon: string;
+  /** Short hint shown next to the count while the group is collapsed. */
+  hint?: string;
+  items: { msg: Msg; index: number }[];
+};
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+const startOfDay = (d: Date) => new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+
+/** Date bucket for a real conversation message. */
+const dateBucket = (ts: number | undefined, now: number): { key: string; label: string; icon: string } => {
+  if (!ts) return { key: "older", label: "ישן יותר", icon: "🗂️" };
+  const diffDays = Math.floor((startOfDay(new Date(now)) - startOfDay(new Date(ts))) / DAY_MS);
+  if (diffDays <= 0) return { key: "today", label: "היום", icon: "💬" };
+  if (diffDays < 7) return { key: "week", label: "השבוע", icon: "📅" };
+  if (diffDays <= 30) return { key: "month", label: "החודש האחרון", icon: "🗓️" };
+  return { key: "older", label: "ישן יותר", icon: "🗂️" };
+};
+
+/**
+ * Splits the history into accordion groups: events rebuilt from the schedule, example prompts, and real
+ * conversations by date (today / this week / last month / older). Order follows first appearance, so the
+ * newest conversation is always last.
+ */
+const groupMessages = (list: Msg[], now: number): MsgGroup[] => {
+  const groups: MsgGroup[] = [];
+  const byKey = new Map<string, MsgGroup>();
+  list.forEach((msg, index) => {
+    let meta: { key: string; label: string; icon: string; hint?: string };
+    if (msg.source === "schedule") {
+      meta = { key: "restored", label: "אירועים ששוחזרו מהלו״ז", icon: "📂", hint: "לחצו לצפייה" };
+    } else if (msg.source === "example") {
+      meta = { key: "examples", label: "דוגמאות לבקשות", icon: "💡", hint: "לחצו לצפייה" };
+    } else {
+      meta = dateBucket(msg.ts, now);
+    }
+    let group = byKey.get(meta.key);
+    if (!group) {
+      group = { ...meta, items: [] };
+      byKey.set(meta.key, group);
+      groups.push(group);
+    }
+    group.items.push({ msg, index });
+  });
+  return groups;
+};
+
 type SpreadsheetAttach = { dataUrl: string; name: string; mime: string };
 
 const SPREADSHEET_RE = /\.(xlsx|xls|csv)$/i;
@@ -137,6 +188,8 @@ export default function AgentChat({
   const [dragging, setDragging] = useState(false);
   const [clearPick, setClearPick] = useState(false);
   const endRef = useRef<HTMLDivElement>(null);
+  // Manual expand/collapse choices per group key; groups without an entry use the default (see below).
+  const [groupOverrides, setGroupOverrides] = useState<Record<string, boolean>>({});
 
   // Restore the saved conversation once on the client. If this device has no stored history yet, hydrate it
   // with the last 10 interactions from the server (recorded requests, rebuilt events, or example prompts).
@@ -328,6 +381,39 @@ export default function AgentChat({
     }
   };
 
+  const messageGroups = groupMessages(messages, Date.now());
+
+  const renderMessage = (m: Msg, i: number) => (
+    <div key={i} className={`flex ${m.role === "user" ? "justify-start" : "justify-end"}`}>
+      <div
+        onClick={m.source === "example" ? () => setInput(m.content) : undefined}
+        title={m.source === "example" ? "לחצו כדי להשתמש בניסוח הזה" : undefined}
+        className={`max-w-[85%] whitespace-pre-wrap break-words rounded-2xl px-3 py-2 text-sm ${
+          m.role === "user"
+            ? "rounded-tr-sm bg-indigo-600 text-white"
+            : "rounded-tl-sm border border-slate-200 bg-white text-slate-800"
+        } ${m.source === "example" ? "cursor-pointer opacity-80 hover:opacity-100" : ""}`}
+      >
+        {m.image && (
+          // eslint-disable-next-line @next/next/no-img-element
+          <img src={m.image} alt="צילום מסך" className="mb-1 max-h-32 rounded-lg" />
+        )}
+        {!m.image && m.hasImage && <div className="mb-1 text-xs opacity-90">🖼️ צילום מסך</div>}
+        {m.fileName && (
+          <div className="mb-1 flex items-center gap-1 text-xs opacity-90">
+            <FileSpreadsheet size={14} /> {m.fileName}
+          </div>
+        )}
+        {m.content}
+        {m.ts ? (
+          <div className={`mt-1 text-[10px] ${m.role === "user" ? "text-indigo-200" : "text-slate-400"}`}>
+            {formatTime(m.ts)}
+          </div>
+        ) : null}
+      </div>
+    </div>
+  );
+
   return (
     <div className="print:hidden fixed bottom-5 right-5 z-40" dir="rtl">
       {open && (
@@ -411,41 +497,49 @@ export default function AgentChat({
                 {WELCOME_MESSAGE}
               </div>
             </div>
-            {messages.map((m, i) => (
-              <div key={i} className={`flex ${m.role === "user" ? "justify-start" : "justify-end"}`}>
-                <div
-                  onClick={m.source === "example" ? () => setInput(m.content) : undefined}
-                  title={m.source === "example" ? "לחצו כדי להשתמש בניסוח הזה" : undefined}
-                  className={`max-w-[85%] whitespace-pre-wrap break-words rounded-2xl px-3 py-2 text-sm ${
-                    m.role === "user"
-                      ? "rounded-tr-sm bg-indigo-600 text-white"
-                      : "rounded-tl-sm border border-slate-200 bg-white text-slate-800"
-                  } ${m.source === "example" ? "cursor-pointer opacity-80 hover:opacity-100" : ""}`}
-                >
-                  {m.source && (
-                    <div className={`mb-1 text-[10px] ${m.role === "user" ? "text-indigo-200" : "text-slate-400"}`}>
-                      {m.source === "example" ? "דוגמה לבקשה (לחצו להעתקה)" : "שוחזר מהאירועים שנשמרו בלו״ז"}
+            {messageGroups.map((group, groupIndex) => {
+              // Default: only the newest group (and today's chat) is open; older folders stay collapsed.
+              // Events rebuilt from the schedule are not a conversation, so they always start collapsed.
+              const defaultOpen =
+                group.key !== "restored" && (groupIndex === messageGroups.length - 1 || group.key === "today");
+              const isOpen = groupOverrides[group.key] ?? defaultOpen;
+              return (
+                <section key={group.key} className="rounded-xl border border-slate-200 bg-white/70">
+                  <button
+                    type="button"
+                    onClick={() => setGroupOverrides((prev) => ({ ...prev, [group.key]: !isOpen }))}
+                    aria-expanded={isOpen}
+                    className="flex w-full items-center gap-2 rounded-xl px-3 py-2 text-right transition hover:bg-slate-100"
+                  >
+                    <ChevronDown
+                      size={16}
+                      className={`shrink-0 text-slate-500 transition-transform duration-200 ${isOpen ? "rotate-0" : "rotate-90"}`}
+                    />
+                    <span className="min-w-0 flex-1 truncate text-xs font-bold text-slate-700">
+                      {group.icon} {group.label}
+                      {!isOpen && group.hint ? (
+                        <span className="mr-1 font-normal text-slate-400">({group.hint})</span>
+                      ) : null}
+                    </span>
+                    <span className="shrink-0 rounded-full bg-indigo-100 px-2 py-0.5 text-[11px] font-bold text-indigo-700">
+                      {group.items.length}
+                    </span>
+                  </button>
+                  <div
+                    className={`grid transition-[grid-template-rows,visibility] duration-200 ease-out ${
+                      isOpen ? "visible grid-rows-[1fr]" : "invisible grid-rows-[0fr]"
+                    }`}
+                    aria-hidden={!isOpen}
+                  >
+                    <div className="min-h-0 overflow-hidden">
+                      <div className="space-y-2 px-2 pb-2 pt-1">
+                        {group.items.map(({ msg: m, index }) => renderMessage(m, index))}
+                      </div>
                     </div>
-                  )}
-                  {m.image && (
-                    // eslint-disable-next-line @next/next/no-img-element
-                    <img src={m.image} alt="צילום מסך" className="mb-1 max-h-32 rounded-lg" />
-                  )}
-                  {!m.image && m.hasImage && <div className="mb-1 text-xs opacity-90">🖼️ צילום מסך</div>}
-                  {m.fileName && (
-                    <div className="mb-1 flex items-center gap-1 text-xs opacity-90">
-                      <FileSpreadsheet size={14} /> {m.fileName}
-                    </div>
-                  )}
-                  {m.content}
-                  {m.ts ? (
-                    <div className={`mt-1 text-[10px] ${m.role === "user" ? "text-indigo-200" : "text-slate-400"}`}>
-                      {formatTime(m.ts)}
-                    </div>
-                  ) : null}
-                </div>
-              </div>
-            ))}
+                  </div>
+                </section>
+              );
+            })}
             {busy && (
               <div className="flex justify-end">
                 <div className="flex items-center gap-1 rounded-2xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-500">
