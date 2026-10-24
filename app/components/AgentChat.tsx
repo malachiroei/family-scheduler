@@ -20,7 +20,7 @@ type Msg = {
 
 const CHAT_HISTORY_STORAGE_KEY = "family-scheduler-agent-chat-history-v1";
 const CHAT_HISTORY_MAX_MESSAGES = 40;
-const CHAT_CONTEXT_MAX_MESSAGES = 6;
+const CHAT_CONTEXT_MAX_MESSAGES = 10;
 const WELCOME_MESSAGE =
   "היי! כתבו, העלו צילום מסך, או קובץ אקסל של משחקים ואני אשבץ בלו״ז אחרי שתאשרו מה שזיהיתי.";
 

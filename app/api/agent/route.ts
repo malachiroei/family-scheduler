@@ -302,6 +302,9 @@ const matchPatterns = (patterns: Pattern[], sender: string | null, haystacks: Ar
 
 /* ---------- LLM ---------- */
 
+// Number of recent conversation turns included in the model prompt (keep in sync with the client).
+const MAX_CONTEXT_TURNS = 10;
+
 const buildPrompt = (text: string, draft: Draft, history: ChatTurn[], patterns: Pattern[], roster: FamilyRoster) => {
   const now = israelNow();
   const learned = patterns.length
@@ -311,7 +314,7 @@ const buildPrompt = (text: string, draft: Draft, history: ChatTurn[], patterns: 
         .map((p) => `"${p.keyword}"${p.sender_or_group ? ` מ-"${p.sender_or_group}"` : ""} => ${childLabel(roster, p.child_name) || p.child_name}`)
         .join("; ") || "אין"
     : "אין";
-  const hist = history.slice(-8).map((h) => `${h.role === "user" ? "משתמש" : "סוכן"}: ${h.content}`).join("\n");
+  const hist = history.slice(-MAX_CONTEXT_TURNS).map((h) => `${h.role === "user" ? "משתמש" : "סוכן"}: ${h.content}`).join("\n");
   return `אתה סוכן לו"ז משפחתי. חלץ את כל האירועים מהקלט (טקסט ו/או צילום מסך, לרוב הודעת וואטסאפ) ומזג עם הטיוטה הקיימת.
 היום: ${now.iso} (${now.weekday}), אזור זמן Asia/Jerusalem.
 
