@@ -75,7 +75,7 @@ const mergeWithServer = (local: Msg[], server: Msg[], pending: Map<string, Msg>)
 const sameMessageList = (a: Msg[], b: Msg[]) =>
   a.length === b.length && a.every((m, i) => m === b[i] || (msgKey(m) === msgKey(b[i]) && m.source === b[i].source));
 
-/** "רועי", "רועי וסיון", "רועי, סיון ועמית" — a reply the agent understands as several owners. */
+/** "דנה", "דנה ויוסי" — a reply the agent understands as several owners. */
 const joinNamesHebrew = (names: string[]) =>
   names.length <= 1 ? (names[0] ?? "") : `${names.slice(0, -1).join(", ")} ו${names[names.length - 1]}`;
 

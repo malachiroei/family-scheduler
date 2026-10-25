@@ -1,6 +1,7 @@
 import { sql, sqlJson } from "@/app/lib/db";
 import { AGENT_EXAMPLE_PROMPTS } from "@/app/lib/agentExamples";
-import { ensureSchedulerStateTable } from "@/app/lib/familyRosterStore";
+import { fallbackRoster } from "@/app/lib/familyMembers";
+import { ensureSchedulerStateTable, loadFamilyRoster, peekFamilyRoster } from "@/app/lib/familyRosterStore";
 
 /** scheduler_state key holding the most recent agent interactions (shared by every device). */
 export const AGENT_HISTORY_STATE_KEY = "agent_chat_history";
@@ -192,8 +193,82 @@ export const recordAgentInteraction = async (entry: {
 const exampleMessages = (): HydratedMessage[] =>
   AGENT_EXAMPLE_PROMPTS.map((content) => ({ role: "user", content, source: "example" }));
 
-/** Shared conversation log, or a light fallback. Never scans `schedule` here — that starves the calendar. */
+const formatDate = (date: string) => date.split("-").reverse().join("-");
+
+/**
+ * Rebuild summary cards from this environment's `public.schedule` (current DATABASE / SUPABASE URL).
+ * Used only when the shared chat log is empty — not on calendar page load.
+ */
+const deriveFromSchedule = async (
+  excludeIds: Set<string>,
+  limit: number,
+): Promise<HydratedMessage[]> => {
+  if (limit <= 0) return [];
+  let roster = peekFamilyRoster() ?? fallbackRoster;
+  try {
+    roster = await loadFamilyRoster();
+  } catch {
+    // keep fallback / cache
+  }
+  const result = await sql`
+    SELECT id, title, "date", metadata
+    FROM schedule
+    ORDER BY "date" DESC
+    LIMIT 80
+  `;
+
+  type Group = { key: string; rows: AgentHistoryEvent[]; league: string; fixtures: boolean };
+  const groups: Group[] = [];
+  const byKey = new Map<string, Group>();
+  for (const raw of result.rows as Array<Record<string, unknown>>) {
+    const id = asString(raw.id);
+    if (!id || excludeIds.has(id)) continue;
+    const meta = (raw.metadata && typeof raw.metadata === "object" ? raw.metadata : {}) as Record<string, unknown>;
+    const child = asString(meta.child) || "";
+    const event: AgentHistoryEvent = {
+      id,
+      title: asString(raw.title),
+      date: String(raw.date ?? "").slice(0, 10),
+      time: asString(meta.time) || "",
+      child,
+      type: asString(meta.type) || "other",
+    };
+    const fixtures = meta.source === "fixtures";
+    const league = asString(meta.league);
+    const key = fixtures ? `fixtures|${child}|${league}` : `one|${id}`;
+    let group = byKey.get(key);
+    if (!group) {
+      if (groups.length >= limit) continue;
+      group = { key, rows: [], league, fixtures };
+      byKey.set(key, group);
+      groups.push(group);
+    }
+    group.rows.push(event);
+  }
+
+  return groups.reverse().map((group): HydratedMessage => {
+    const first = group.rows[0];
+    const who = first.child ? roster.labelForMemberKey(first.child) : "";
+    if (group.fixtures) {
+      return {
+        role: "assistant",
+        source: "schedule",
+        content: `✅ יובאו ${group.rows.length} משחקים${group.league ? ` (${group.league})` : ""}${who ? ` עבור ${who}` : ""}`,
+        actions: group.rows,
+      };
+    }
+    return {
+      role: "assistant",
+      source: "schedule",
+      content: `✅ נרשם: ${first.title} — ${formatDate(first.date)}${first.time ? ` ב-${first.time}` : ""}${who ? ` עבור ${who}` : ""}`,
+      actions: group.rows,
+    };
+  });
+};
+
+/** Shared conversation, reconstructed events from this DB, or generic examples. */
 export const loadAgentHistory = async (): Promise<HydratedHistory> => {
+  let stored: StoredInteraction[] = [];
   try {
     const payload = await readPayload();
     if (payload.messages.length > 0) {
@@ -202,15 +277,28 @@ export const loadAgentHistory = async (): Promise<HydratedHistory> => {
     if (payload.clearedAt) {
       return { origin: "empty", messages: [] };
     }
-    if (payload.entries.length > 0) {
-      const recorded: HydratedMessage[] = payload.entries.flatMap((s): HydratedMessage[] => [
-        { role: "user", content: s.prompt, ts: s.ts || undefined },
-        { role: "assistant", content: s.reply, ts: s.ts || undefined, actions: s.events.length ? s.events : undefined },
-      ]);
-      return { origin: "history", messages: recorded };
-    }
+    stored = payload.entries;
   } catch (error) {
     console.error("[agent-history] read failed", error);
+  }
+
+  const recorded: HydratedMessage[] = stored.flatMap((s): HydratedMessage[] => [
+    { role: "user", content: s.prompt, ts: s.ts || undefined },
+    { role: "assistant", content: s.reply, ts: s.ts || undefined, actions: s.events.length ? s.events : undefined },
+  ]);
+
+  let derived: HydratedMessage[] = [];
+  if (recorded.length < AGENT_HISTORY_LIMIT) {
+    try {
+      const knownIds = new Set(stored.flatMap((s) => s.events.map((e) => e.id)));
+      derived = await deriveFromSchedule(knownIds, AGENT_HISTORY_LIMIT - recorded.length);
+    } catch (error) {
+      console.error("[agent-history] schedule reconstruct failed", error);
+    }
+  }
+
+  if (recorded.length || derived.length) {
+    return { origin: recorded.length ? "history" : "schedule", messages: [...derived, ...recorded] };
   }
   return { origin: "example", messages: exampleMessages() };
 };
