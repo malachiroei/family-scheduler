@@ -51,7 +51,7 @@ function getPostgres() {
       idle_timeout: 5,
       connect_timeout: 5,
       prepare: false,
-      connection: { statement_timeout: "8000" },
+      connection: { statement_timeout: 8000 },
       ...(needsSsl ? { ssl: { rejectUnauthorized: false } } : {}),
     });
     globalForPg.__familySchedulerPg = pg;
