@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { sql } from "@/app/lib/db";
 import { ensurePushTables } from "@/app/lib/push";
 import { type FamilyRoster } from "@/app/lib/familyMembers";
-import { loadFamilyRoster } from "@/app/lib/familyRosterStore";
+import { loadFamilyRoster, peekFamilyRoster } from "@/app/lib/familyRosterStore";
 
 type AllowedUser = string;
 
@@ -26,9 +26,6 @@ const ensurePresenceTable = async () => {
       user_name TEXT PRIMARY KEY,
       last_seen TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )
-  `;
-  await sql`
-    GRANT SELECT, INSERT, UPDATE, DELETE ON public.app_presence TO anon, authenticated, service_role
   `;
   presenceTableReady = true;
 };
@@ -59,7 +56,7 @@ export async function GET() {
   try {
     await ensurePushTables();
     await ensurePresenceTable();
-    const roster = await loadFamilyRoster();
+    const roster = peekFamilyRoster() ?? (await loadFamilyRoster());
     const allowedUsers = roster.pushUserNames;
 
     const subscriptions = await sql<SubscriptionUserRow>`

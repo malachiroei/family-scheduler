@@ -1,7 +1,7 @@
 import { sql } from "@/app/lib/db";
 import { ensureScheduleMetadataColumn, parseScheduleMetadata } from "@/app/lib/scheduleTable";
 import { fallbackRoster, type FamilyRoster } from "@/app/lib/familyMembers";
-import { loadFamilyRoster } from "@/app/lib/familyRosterStore";
+import { loadFamilyRoster, peekFamilyRoster } from "@/app/lib/familyRosterStore";
 import webpush from "web-push";
 
 type PushPayload = {
@@ -171,17 +171,13 @@ const ensurePushTablesUncached = async (): Promise<void> => {
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )
   `;
-  await sql`
-    GRANT SELECT, INSERT, UPDATE, DELETE ON public.push_subscriptions TO anon, authenticated, service_role
-  `;
-
   await sql`ALTER TABLE push_subscriptions ADD COLUMN IF NOT EXISTS user_name TEXT`;
   await sql`ALTER TABLE push_subscriptions ADD COLUMN IF NOT EXISTS receive_all BOOLEAN NOT NULL DEFAULT FALSE`;
   await sql`ALTER TABLE push_subscriptions ADD COLUMN IF NOT EXISTS watch_children TEXT`;
   await sql`ALTER TABLE push_subscriptions ADD COLUMN IF NOT EXISTS reminder_lead_minutes INT NOT NULL DEFAULT 10`;
 
-  const roster = await loadFamilyRoster();
-  for (const userName of roster.pushUserNames) {
+  const roster = peekFamilyRoster();
+  for (const userName of roster?.pushUserNames ?? []) {
     try {
       const mojibake = Buffer.from(userName, "utf8").toString("latin1");
       if (mojibake !== userName) {
@@ -202,9 +198,6 @@ const ensurePushTablesUncached = async (): Promise<void> => {
       dispatch_key TEXT PRIMARY KEY,
       sent_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )
-  `;
-  await sql`
-    GRANT SELECT, INSERT, UPDATE, DELETE ON public.push_reminder_dispatches TO anon, authenticated, service_role
   `;
 };
 

@@ -9,7 +9,7 @@ import {
 } from "@/app/lib/scheduleTable";
 import { sendPushToAll, sendPushToParents } from "@/app/lib/push";
 import { fallbackRoster, type FamilyRoster } from "@/app/lib/familyMembers";
-import { loadFamilyRoster } from "@/app/lib/familyRosterStore";
+import { loadFamilyRoster, peekFamilyRoster } from "@/app/lib/familyRosterStore";
 import { parseFlexibleDate, weekdayIndexUtc } from "@/app/lib/scheduleDate";
 
 export const dynamic = 'force-dynamic';
@@ -682,12 +682,8 @@ async function handleGet() {
     const rows = result.rows;
     debugScheduleLog("Events found in DB:", rows);
 
-    let roster: FamilyRoster = fallbackRoster;
-    try {
-      roster = await loadFamilyRoster();
-    } catch (error) {
-      console.error("[API] GET /api/schedule roster fallback", error);
-    }
+    // Never wait on scheduler_state here — that table can block for a minute and starves the calendar.
+    const roster: FamilyRoster = peekFamilyRoster() ?? fallbackRoster;
 
     const events = rows.map((row) => {
       const r = row as { id: string; title: string; date: unknown; metadata: unknown };

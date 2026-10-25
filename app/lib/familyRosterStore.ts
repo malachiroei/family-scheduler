@@ -122,6 +122,9 @@ export const readStoredFamilyRoster = async (): Promise<StoredFamilyMember[] | n
   }
 };
 
+/** In-memory roster only — never touches the database. */
+export const peekFamilyRoster = (): FamilyRoster | null => rosterCache?.roster ?? null;
+
 export const loadFamilyRoster = async (): Promise<FamilyRoster> => {
   try {
     if (rosterCache && Date.now() - rosterCache.at < ROSTER_CACHE_MS) {

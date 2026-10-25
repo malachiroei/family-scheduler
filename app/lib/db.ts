@@ -47,10 +47,11 @@ function getPostgres() {
       console.log(`[db] env=${source} (unparseable URL)`);
     }
     pg = postgres(connectionUrl, {
-      max: 5,
-      idle_timeout: 2,
-      connect_timeout: 10,
+      max: 1,
+      idle_timeout: 5,
+      connect_timeout: 5,
       prepare: false,
+      connection: { statement_timeout: "8000" },
       ...(needsSsl ? { ssl: { rejectUnauthorized: false } } : {}),
     });
     globalForPg.__familySchedulerPg = pg;
