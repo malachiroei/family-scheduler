@@ -2,6 +2,7 @@ import { sql, sqlJson } from "@/app/lib/db";
 import { AGENT_EXAMPLE_PROMPTS } from "@/app/lib/agentExamples";
 import { fallbackRoster } from "@/app/lib/familyMembers";
 import { ensureSchedulerStateTable, loadFamilyRoster, peekFamilyRoster } from "@/app/lib/familyRosterStore";
+import { readStoredThumbnail } from "@/app/lib/imageThumbnail";
 
 /** scheduler_state key holding the most recent agent interactions (shared by every device). */
 export const AGENT_HISTORY_STATE_KEY = "agent_chat_history";
@@ -31,6 +32,8 @@ export type HydratedMessage = {
   isError?: boolean;
   hasImage?: boolean;
   fileName?: string;
+  /** Small WebP/JPEG data URL (~10–25KB). Full screenshots are never stored. */
+  thumbnailUrl?: string;
   actions?: AgentHistoryEvent[];
   /** Set for messages that are not real past turns: "schedule" (rebuilt from saved events) or "example". */
   source?: "schedule" | "example";
@@ -55,6 +58,7 @@ export type StoredChatMessage = {
   isError?: boolean;
   hasImage?: boolean;
   fileName?: string;
+  thumbnailUrl?: string;
   actions?: AgentHistoryEvent[];
 };
 
@@ -81,13 +85,15 @@ const sanitizeChatMessage = (raw: unknown): StoredChatMessage | null => {
         type: asString(e?.type),
       }))
     : undefined;
+  const thumbnailUrl = readStoredThumbnail(m);
   return {
     role: m.role,
     content: m.content.slice(0, CHAT_CONTENT_MAX),
     ts: typeof m.ts === "number" && Number.isFinite(m.ts) ? m.ts : Date.now(),
     ...(m.isError === true ? { isError: true } : {}),
-    ...(m.hasImage === true ? { hasImage: true } : {}),
+    ...(m.hasImage === true || thumbnailUrl ? { hasImage: true } : {}),
     ...(typeof m.fileName === "string" && m.fileName ? { fileName: m.fileName.slice(0, 200) } : {}),
+    ...(thumbnailUrl ? { thumbnailUrl } : {}),
     ...(actions && actions.length ? { actions } : {}),
   };
 };

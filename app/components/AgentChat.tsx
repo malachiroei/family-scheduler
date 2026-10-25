@@ -3,6 +3,7 @@ import React, { useCallback, useEffect, useRef, useState } from "react";
 import { Bot, ChevronDown, FileSpreadsheet, History, ImagePlus, RotateCcw, Send, Sparkles, Trash2, X } from "lucide-react";
 import { childDisplayNames as fallbackChildDisplayNames } from "@/app/lib/familyMembers";
 import { AGENT_EXAMPLE_PROMPTS } from "@/app/lib/agentExamples";
+import { createImageThumbnail } from "@/app/lib/imageThumbnail";
 
 type Msg = {
   role: "user" | "assistant";
@@ -11,8 +12,10 @@ type Msg = {
   fileName?: string;
   /** Epoch ms when the message was created. */
   ts?: number;
-  /** True when the message carried a screenshot; the image itself is never persisted. */
+  /** True when the message carried a screenshot. */
   hasImage?: boolean;
+  /** Compressed preview persisted in local + server history (~10–25KB). */
+  thumbnailUrl?: string;
   /** True for failure replies; these are not sent back to the model as context. */
   isError?: boolean;
   /** Tool actions: events the agent saved to the schedule on this turn. */
@@ -32,10 +35,12 @@ const WELCOME_MESSAGE =
 
 const trimHistory = (list: Msg[]): Msg[] => list.slice(-CHAT_HISTORY_MAX_MESSAGES);
 
-// The persisted copy drops heavy image data URLs and keeps only a flag.
+// Persist a tiny thumbnail; drop the full screenshot so localStorage and the server stay small.
 const toStoredMsg = (m: Msg): Msg => {
   const { image, ...rest } = m;
-  return image ? { ...rest, hasImage: true } : rest;
+  return image || rest.thumbnailUrl
+    ? { ...rest, hasImage: true, ...(rest.thumbnailUrl ? { thumbnailUrl: rest.thumbnailUrl } : {}) }
+    : rest;
 };
 
 const isValidMsg = (m: unknown): m is Msg =>
@@ -47,14 +52,15 @@ const isValidMsg = (m: unknown): m is Msg =>
 /** Identity of a message across devices; must match the server's key (role + ts + start of the text). */
 const msgKey = (m: Pick<Msg, "role" | "ts" | "content">) => `${m.role}|${m.ts ?? 0}|${m.content.slice(0, 200)}`;
 
-/** What is sent to the shared server history (never image data). */
+/** What is sent to the shared server history (thumbnail only — never the full screenshot). */
 const toServerMsg = (m: Msg) => ({
   role: m.role,
   content: m.content,
   ts: m.ts,
   ...(m.isError ? { isError: true } : {}),
-  ...(m.hasImage || m.image ? { hasImage: true } : {}),
+  ...(m.hasImage || m.image || m.thumbnailUrl ? { hasImage: true } : {}),
   ...(m.fileName ? { fileName: m.fileName } : {}),
+  ...(m.thumbnailUrl ? { thumbnailUrl: m.thumbnailUrl } : {}),
   ...(m.actions?.length ? { actions: m.actions } : {}),
 });
 
@@ -226,6 +232,7 @@ export default function AgentChat({
   const [dragging, setDragging] = useState(false);
   const [clearPick, setClearPick] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
+  const [imagePreview, setImagePreview] = useState<string | null>(null);
   const endRef = useRef<HTMLDivElement>(null);
   // Expand/collapse choices in the history drawer; groups without an entry use the default.
   const [groupOverrides, setGroupOverrides] = useState<Record<string, boolean>>({});
@@ -409,6 +416,15 @@ export default function AgentChat({
     };
   }, [open]);
 
+  useEffect(() => {
+    if (!imagePreview) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setImagePreview(null);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [imagePreview]);
+
   const attach = async (file: File | undefined | null) => {
     if (!file) return;
     if (file.type.startsWith("image/")) {
@@ -436,11 +452,14 @@ export default function AgentChat({
       .filter((m) => !m.isError && !m.source)
       .slice(-CHAT_CONTEXT_MAX_MESSAGES)
       .map((m) => ({ role: m.role, content: m.content }));
+    const thumbnailUrl = sentImage ? await createImageThumbnail(sentImage) : undefined;
     addMessage({
       role: "user",
       content: text || (sentFile ? `קובץ: ${sentFile.name}` : "(צילום מסך)"),
       image: sentImage ?? undefined,
       fileName: sentFile?.name,
+      ...(sentImage ? { hasImage: true } : {}),
+      ...(thumbnailUrl ? { thumbnailUrl } : {}),
     });
     setInput("");
     setImage(null);
@@ -520,6 +539,9 @@ export default function AgentChat({
 
   const renderMessage = (m: Msg, i: number, opts?: { inHistory?: boolean }) => {
     const copyable = Boolean(opts?.inHistory && (m.role === "user" || m.source === "example") && m.content.trim());
+    const thumbSrc = m.thumbnailUrl || m.image;
+    const previewSrc = m.image || m.thumbnailUrl;
+    const screenshotOnly = m.content.trim() === "(צילום מסך)";
     return (
     <div key={i} className={`flex ${m.role === "user" ? "justify-start" : "justify-end"}`}>
       <div
@@ -531,17 +553,31 @@ export default function AgentChat({
             : "rounded-tl-sm border border-slate-200 bg-white text-slate-800"
         } ${copyable ? "cursor-pointer opacity-90 hover:opacity-100" : ""}`}
       >
-        {m.image && (
-          // eslint-disable-next-line @next/next/no-img-element
-          <img src={m.image} alt="צילום מסך" className="mb-1 max-h-32 rounded-lg" />
-        )}
-        {!m.image && m.hasImage && <div className="mb-1 text-xs opacity-90">🖼️ צילום מסך</div>}
+        {thumbSrc ? (
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              if (previewSrc) setImagePreview(previewSrc);
+            }}
+            className={`mb-1 block overflow-hidden rounded-lg p-0 ${
+              m.role === "user" ? "border border-white/30" : "border border-slate-200"
+            }`}
+            aria-label="הצג צילום מסך"
+            title="לחצו להגדלה"
+          >
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img src={thumbSrc} alt="צילום מסך" className="max-h-36 max-w-[180px] object-cover" />
+          </button>
+        ) : m.hasImage || screenshotOnly ? (
+          <div className="mb-1 text-xs opacity-90">(צילום מסך)</div>
+        ) : null}
         {m.fileName && (
           <div className="mb-1 flex items-center gap-1 text-xs opacity-90">
             <FileSpreadsheet size={14} /> {m.fileName}
           </div>
         )}
-        {m.content}
+        {!screenshotOnly ? m.content : null}
         {m.ts ? (
           <div className={`mt-1 text-[10px] ${m.role === "user" ? "text-indigo-200" : "text-slate-400"}`}>
             {formatTime(m.ts)}
@@ -892,6 +928,32 @@ export default function AgentChat({
         <Sparkles size={24} />
       </button>
       )}
+
+      {imagePreview ? (
+        <div
+          className="fixed inset-0 z-[80] flex items-center justify-center bg-black/70 p-4"
+          role="dialog"
+          aria-modal="true"
+          aria-label="תצוגת צילום מסך"
+          onClick={() => setImagePreview(null)}
+        >
+          <button
+            type="button"
+            className="absolute left-4 top-4 rounded-full bg-white/15 p-2 text-white hover:bg-white/25"
+            aria-label="סגור תצוגה"
+            onClick={() => setImagePreview(null)}
+          >
+            <X size={18} />
+          </button>
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img
+            src={imagePreview}
+            alt="צילום מסך"
+            className="max-h-[85vh] max-w-[90vw] rounded-xl border border-white/20 object-contain shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
+          />
+        </div>
+      ) : null}
     </div>
   );
 }
