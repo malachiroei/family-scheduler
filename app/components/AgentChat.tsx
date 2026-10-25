@@ -1,6 +1,6 @@
 "use client";
 import React, { useCallback, useEffect, useRef, useState } from "react";
-import { Bot, ChevronDown, FileSpreadsheet, ImagePlus, RotateCcw, Send, Sparkles, Trash2, X } from "lucide-react";
+import { Bot, ChevronDown, FileSpreadsheet, History, ImagePlus, RotateCcw, Send, Sparkles, Trash2, X } from "lucide-react";
 import { childDisplayNames as fallbackChildDisplayNames } from "@/app/lib/familyMembers";
 import { AGENT_EXAMPLE_PROMPTS } from "@/app/lib/agentExamples";
 
@@ -122,9 +122,17 @@ const dateBucket = (ts: number | undefined, now: number): { key: string; label: 
   const diffDays = Math.floor((startOfDay(new Date(now)) - startOfDay(new Date(ts))) / DAY_MS);
   if (diffDays <= 0) return { key: "today", label: "היום", icon: "💬" };
   if (diffDays < 7) return { key: "week", label: "השבוע", icon: "📅" };
-  if (diffDays <= 30) return { key: "month", label: "החודש האחרון", icon: "🗓️" };
-  return { key: "older", label: "ישן יותר", icon: "🗂️" };
+  return { key: "older", label: "מוקדם יותר", icon: "🗂️" };
 };
+
+const HISTORY_GROUP_ORDER = ["today", "week", "older", "restored", "examples"];
+
+const sortHistoryGroups = (groups: MsgGroup[]) =>
+  [...groups].sort(
+    (a, b) =>
+      (HISTORY_GROUP_ORDER.indexOf(a.key) === -1 ? 99 : HISTORY_GROUP_ORDER.indexOf(a.key)) -
+      (HISTORY_GROUP_ORDER.indexOf(b.key) === -1 ? 99 : HISTORY_GROUP_ORDER.indexOf(b.key)),
+  );
 
 /**
  * Splits the history into accordion groups: events rebuilt from the schedule, example prompts, and real
@@ -217,8 +225,9 @@ export default function AgentChat({
   const [busy, setBusy] = useState(false);
   const [dragging, setDragging] = useState(false);
   const [clearPick, setClearPick] = useState(false);
+  const [historyOpen, setHistoryOpen] = useState(false);
   const endRef = useRef<HTMLDivElement>(null);
-  // Manual expand/collapse choices per group key; groups without an entry use the default (see below).
+  // Expand/collapse choices in the history drawer; groups without an entry use the default.
   const [groupOverrides, setGroupOverrides] = useState<Record<string, boolean>>({});
 
   // Messages created on this device that the server does not have yet (key -> message).
@@ -380,6 +389,7 @@ export default function AgentChat({
     setAssigneeOptions([]);
     setSelectedAssignees([]);
     setConfirmClearHistory(false);
+    setHistoryOpen(false);
     pendingRef.current.clear();
     try {
       window.localStorage.setItem(CHAT_HISTORY_STORAGE_KEY, "[]");
@@ -438,6 +448,7 @@ export default function AgentChat({
     setInput("");
     setImage(null);
     setSpreadsheet(null);
+    setHistoryOpen(false);
     setSelectedAssignees([]);
     // Quick replies stay visible until the server answers (and come back if the request fails),
     // so the question never loses its buttons.
@@ -497,18 +508,31 @@ export default function AgentChat({
     }
   };
 
-  const messageGroups = groupMessages(messages, Date.now());
+  const now = Date.now();
+  const historyGroups = sortHistoryGroups(groupMessages(messages, now));
+  const realMessages = messages.filter((m) => !m.source);
+  const latestRealTs = realMessages.reduce((max, m) => Math.max(max, m.ts ?? 0), 0);
+  const activeDay = latestRealTs ? startOfDay(new Date(latestRealTs)) : startOfDay(new Date(now));
+  const activeMessages = realMessages.filter((m) => startOfDay(new Date(m.ts ?? 0)) === activeDay);
 
-  const renderMessage = (m: Msg, i: number) => (
+  const applyHistoryPrompt = (m: Msg) => {
+    if (!m.content.trim()) return;
+    setInput(m.content);
+    setHistoryOpen(false);
+  };
+
+  const renderMessage = (m: Msg, i: number, opts?: { inHistory?: boolean }) => {
+    const copyable = Boolean(opts?.inHistory && (m.role === "user" || m.source === "example") && m.content.trim());
+    return (
     <div key={i} className={`flex ${m.role === "user" ? "justify-start" : "justify-end"}`}>
       <div
-        onClick={m.source === "example" ? () => setInput(m.content) : undefined}
-        title={m.source === "example" ? "לחצו כדי להשתמש בניסוח הזה" : undefined}
+        onClick={copyable ? () => applyHistoryPrompt(m) : undefined}
+        title={copyable ? "לחצו כדי להעתיק את הבקשה לשורת ההקלדה" : undefined}
         className={`max-w-[85%] whitespace-pre-wrap break-words rounded-2xl px-3 py-2 text-sm ${
           m.role === "user"
             ? "rounded-tr-sm bg-indigo-600 text-white"
             : "rounded-tl-sm border border-slate-200 bg-white text-slate-800"
-        } ${m.source === "example" ? "cursor-pointer opacity-80 hover:opacity-100" : ""}`}
+        } ${copyable ? "cursor-pointer opacity-90 hover:opacity-100" : ""}`}
       >
         {m.image && (
           // eslint-disable-next-line @next/next/no-img-element
@@ -528,7 +552,8 @@ export default function AgentChat({
         ) : null}
       </div>
     </div>
-  );
+    );
+  };
 
   return (
     <div className="print:hidden fixed bottom-5 right-5 z-40" dir="rtl">
@@ -555,7 +580,25 @@ export default function AgentChat({
             <div className="flex items-center gap-1">
               <button
                 type="button"
-                onClick={() => setConfirmClearHistory((v) => !v)}
+                onClick={() => {
+                  setHistoryOpen((v) => !v);
+                  setConfirmClearHistory(false);
+                }}
+                aria-pressed={historyOpen}
+                className={`rounded-md p-1 transition ${
+                  historyOpen ? "bg-white/30" : "bg-white/15 hover:bg-white/25"
+                }`}
+                aria-label="היסטוריית שיחות"
+                title="היסטוריית שיחות"
+              >
+                <History size={16} />
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setConfirmClearHistory((v) => !v);
+                  setHistoryOpen(false);
+                }}
                 disabled={busy || messages.length === 0}
                 className="rounded-md bg-white/15 p-1 transition hover:bg-white/25 disabled:opacity-40"
                 aria-label="נקה היסטוריה"
@@ -576,7 +619,10 @@ export default function AgentChat({
               ) : null}
               <button
                 type="button"
-                onClick={() => setOpen(false)}
+                onClick={() => {
+                  setOpen(false);
+                  setHistoryOpen(false);
+                }}
                 className="rounded-md bg-white/15 p-1 transition hover:bg-white/25"
                 aria-label="סגור"
               >
@@ -607,55 +653,14 @@ export default function AgentChat({
             </div>
           )}
 
-          <div className="flex-1 space-y-2 overflow-y-auto overscroll-contain bg-slate-50 p-3">
+          <div className="relative min-h-0 flex-1">
+          <div className="h-full space-y-2 overflow-y-auto overscroll-contain bg-slate-50 p-3">
             <div className="flex justify-end">
               <div className="max-w-[85%] whitespace-pre-wrap break-words rounded-2xl rounded-tl-sm border border-slate-200 bg-white px-3 py-2 text-sm text-slate-800">
                 {WELCOME_MESSAGE}
               </div>
             </div>
-            {messageGroups.map((group, groupIndex) => {
-              // Default: only the newest group (and today's chat) is open; older folders stay collapsed.
-              // Events rebuilt from the schedule are not a conversation, so they always start collapsed.
-              const defaultOpen =
-                group.key !== "restored" && (groupIndex === messageGroups.length - 1 || group.key === "today");
-              const isOpen = groupOverrides[group.key] ?? defaultOpen;
-              return (
-                <section key={group.key} className="rounded-xl border border-slate-200 bg-white/70">
-                  <button
-                    type="button"
-                    onClick={() => setGroupOverrides((prev) => ({ ...prev, [group.key]: !isOpen }))}
-                    aria-expanded={isOpen}
-                    className="flex w-full items-center gap-2 rounded-xl px-3 py-2 text-right transition hover:bg-slate-100"
-                  >
-                    <ChevronDown
-                      size={16}
-                      className={`shrink-0 text-slate-500 transition-transform duration-200 ${isOpen ? "rotate-0" : "rotate-90"}`}
-                    />
-                    <span className="min-w-0 flex-1 truncate text-xs font-bold text-slate-700">
-                      {group.icon} {group.label}
-                      {!isOpen && group.hint ? (
-                        <span className="mr-1 font-normal text-slate-400">({group.hint})</span>
-                      ) : null}
-                    </span>
-                    <span className="shrink-0 rounded-full bg-indigo-100 px-2 py-0.5 text-[11px] font-bold text-indigo-700">
-                      {group.items.length}
-                    </span>
-                  </button>
-                  <div
-                    className={`grid transition-[grid-template-rows,visibility] duration-200 ease-out ${
-                      isOpen ? "visible grid-rows-[1fr]" : "invisible grid-rows-[0fr]"
-                    }`}
-                    aria-hidden={!isOpen}
-                  >
-                    <div className="min-h-0 overflow-hidden">
-                      <div className="space-y-2 px-2 pb-2 pt-1">
-                        {group.items.map(({ msg: m, index }) => renderMessage(m, index))}
-                      </div>
-                    </div>
-                  </div>
-                </section>
-              );
-            })}
+            {activeMessages.map((m, index) => renderMessage(m, index))}
             {busy && (
               <div className="flex justify-end">
                 <div className="flex items-center gap-1 rounded-2xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-500">
@@ -664,6 +669,75 @@ export default function AgentChat({
               </div>
             )}
             <div ref={endRef} />
+          </div>
+          {historyOpen ? (
+            <div className="absolute inset-0 z-10 flex translate-x-0 flex-col bg-slate-50 shadow-[inset_0_0_0_1px_rgba(15,23,42,0.06)] transition-transform duration-200 ease-out">
+              <div className="flex items-center justify-between border-b border-slate-200 bg-white px-3 py-2">
+                <span className="flex items-center gap-1.5 text-xs font-bold text-slate-700">
+                  <History size={14} className="text-indigo-600" />
+                  היסטוריית שיחות
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setHistoryOpen(false)}
+                  className="rounded-md p-1 text-slate-500 transition hover:bg-slate-100 hover:text-slate-800"
+                  aria-label="סגור היסטוריה"
+                  title="סגור היסטוריה"
+                >
+                  <X size={14} />
+                </button>
+              </div>
+              <div className="flex-1 space-y-2 overflow-y-auto overscroll-contain p-3">
+                {historyGroups.length === 0 ? (
+                  <p className="px-2 py-6 text-center text-xs text-slate-500">אין עדיין היסטוריית שיחות.</p>
+                ) : (
+                  historyGroups.map((group) => {
+                    const preferredOpen = historyGroups.some((g) => g.key === "today")
+                      ? "today"
+                      : historyGroups[0]?.key;
+                    const defaultOpen = group.key === preferredOpen;
+                    const isOpen = groupOverrides[group.key] ?? defaultOpen;
+                    return (
+                      <section key={group.key} className="rounded-xl border border-slate-200 bg-white/70">
+                        <button
+                          type="button"
+                          onClick={() => setGroupOverrides((prev) => ({ ...prev, [group.key]: !isOpen }))}
+                          aria-expanded={isOpen}
+                          className="flex w-full items-center gap-2 rounded-xl px-3 py-2 text-right transition hover:bg-slate-100"
+                        >
+                          <ChevronDown
+                            size={16}
+                            className={`shrink-0 text-slate-500 transition-transform duration-200 ${isOpen ? "rotate-0" : "rotate-90"}`}
+                          />
+                          <span className="min-w-0 flex-1 truncate text-xs font-bold text-slate-700">
+                            {group.icon} {group.label}
+                            {!isOpen && group.hint ? (
+                              <span className="mr-1 font-normal text-slate-400">({group.hint})</span>
+                            ) : null}
+                          </span>
+                          <span className="shrink-0 rounded-full bg-indigo-100 px-2 py-0.5 text-[11px] font-bold text-indigo-700">
+                            {group.items.length}
+                          </span>
+                        </button>
+                        <div
+                          className={`grid transition-[grid-template-rows,visibility] duration-200 ease-out ${
+                            isOpen ? "visible grid-rows-[1fr]" : "invisible grid-rows-[0fr]"
+                          }`}
+                          aria-hidden={!isOpen}
+                        >
+                          <div className="min-h-0 overflow-hidden">
+                            <div className="space-y-2 px-2 pb-2 pt-1">
+                              {group.items.map(({ msg: m, index }) => renderMessage(m, index, { inHistory: true }))}
+                            </div>
+                          </div>
+                        </div>
+                      </section>
+                    );
+                  })
+                )}
+              </div>
+            </div>
+          ) : null}
           </div>
 
           {clearPick && onClearImported && (
