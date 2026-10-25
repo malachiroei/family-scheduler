@@ -1,5 +1,4 @@
 import { getDatabaseConfig, sql, sqlJson } from "@/app/lib/db";
-import { applySchedulerStateAccess } from "@/app/lib/schedulerStateAccess";
 import {
   APP_BRANDING_STATE_KEY,
   mergeAppBranding,
@@ -62,7 +61,6 @@ export const ensureSchedulerStateTable = async () => {
       )
     `,
   );
-  await applySchedulerStateAccess();
   const readable = await trySql("probe table", () => sql`SELECT 1 FROM scheduler_state LIMIT 0`);
   if (!readable) {
     return {

@@ -14,8 +14,9 @@ const trySql = async (label: string, run: () => Promise<unknown>) => {
 };
 
 /**
- * Grants + RLS for public.scheduler_state.
- * Policies stay permissive so the Next.js app (and Data API roles) can read/write.
+ * One-off grants + RLS for public.scheduler_state.
+ * Do not call this from request handlers: concurrent GRANT/ALTER/CREATE POLICY
+ * locks the catalog and starves /api/schedule (DB timeout).
  */
 export const applySchedulerStateAccess = async () => {
   await trySql("grant postgres", () => sql`GRANT ALL ON TABLE public.scheduler_state TO postgres`);

@@ -325,13 +325,10 @@ export default function AgentChat({
     setHistoryLoaded(true);
   }, []);
 
-  // Always read the latest shared conversation when the agent opens, then keep it fresh (mobile <-> desktop):
-  // poll while open and re-sync whenever the tab/app becomes visible again.
+  // Sync the shared conversation only while the agent is open (not on every page load).
   useEffect(() => {
-    if (!historyLoaded) return;
-    // Sync once in the background on load too, so a device that never opens the chat still caches it.
+    if (!historyLoaded || !open) return;
     void syncFromServer();
-    if (!open) return;
     const run = () => {
       if (document.visibilityState === "hidden") return;
       void syncFromServer();
@@ -509,7 +506,7 @@ export default function AgentChat({
   };
 
   const now = Date.now();
-  const historyGroups = sortHistoryGroups(groupMessages(messages, now));
+  const historyGroups = historyOpen ? sortHistoryGroups(groupMessages(messages, now)) : [];
   const realMessages = messages.filter((m) => !m.source);
   const latestRealTs = realMessages.reduce((max, m) => Math.max(max, m.ts ?? 0), 0);
   const activeDay = latestRealTs ? startOfDay(new Date(latestRealTs)) : startOfDay(new Date(now));
