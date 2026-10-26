@@ -11,7 +11,10 @@ import {
   fallbackRoster,
   FAMILY_ROSTER_STATE_KEY,
   hydrateStoredMembers,
+  isPlaceholderMemberName,
+  runtimeEnvFamilyMemberNames,
   serializeFamilyMembers,
+  specForName,
   type FamilyMember,
   type FamilyRoster,
   type StoredFamilyMember,
@@ -73,6 +76,27 @@ export const ensureSchedulerStateTable = async () => {
   return { ok: true as const };
 };
 
+const coerceStoredMember = (item: unknown): StoredFamilyMember | null => {
+  if (typeof item === "string") {
+    const name = item.trim();
+    if (!name) return null;
+    const spec = specForName(name);
+    return { name, role: spec.role, key: spec.key };
+  }
+  if (!item || typeof item !== "object") return null;
+  const row = item as Record<string, unknown>;
+  const nameRaw = [row.name, row.label, row.displayName, row.title].find(
+    (value) => typeof value === "string" && value.trim(),
+  );
+  const name = typeof nameRaw === "string" ? nameRaw.trim() : "";
+  if (!name) return null;
+  const spec = specForName(name);
+  const role = row.role === "parent" || row.role === "child" ? row.role : spec.role;
+  const key = typeof row.key === "string" && row.key.trim() ? row.key.trim() : spec.key;
+  const color = typeof row.color === "string" ? row.color : undefined;
+  return { name, role, key, color };
+};
+
 const parseStoredMembers = (raw: unknown): StoredFamilyMember[] => {
   let payload: unknown = raw;
   if (typeof raw === "string") {
@@ -82,42 +106,85 @@ const parseStoredMembers = (raw: unknown): StoredFamilyMember[] => {
       return [];
     }
   }
-  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+  if (Array.isArray(payload)) {
+    return payload.map(coerceStoredMember).filter((item): item is StoredFamilyMember => Boolean(item));
+  }
+  if (!payload || typeof payload !== "object") {
     return [];
   }
-  const members = (payload as StoredPayload).members;
-  if (!Array.isArray(members)) {
-    return [];
+  const obj = payload as Record<string, unknown> & StoredPayload;
+  const buckets: unknown[] = [];
+  for (const key of ["members", "family", "family_members", "roster"]) {
+    if (Array.isArray(obj[key])) buckets.push(...(obj[key] as unknown[]));
   }
-  return members.filter(
-    (item): item is StoredFamilyMember =>
-      Boolean(item) &&
-      typeof item === "object" &&
-      typeof (item as StoredFamilyMember).name === "string" &&
-      ((item as StoredFamilyMember).role === "child" || (item as StoredFamilyMember).role === "parent"),
-  );
+  if (Array.isArray(obj.children)) {
+    for (const child of obj.children) {
+      buckets.push(typeof child === "string" ? child : { ...(child as object), role: "child" });
+    }
+  }
+  if (Array.isArray(obj.parents)) {
+    for (const parent of obj.parents) {
+      buckets.push(typeof parent === "string" ? parent : { ...(parent as object), role: "parent" });
+    }
+  }
+  return buckets.map(coerceStoredMember).filter((item): item is StoredFamilyMember => Boolean(item));
+};
+
+const readRosterRow = async (): Promise<StoredFamilyMember[] | null> => {
+  const result = await sql`
+    SELECT payload
+    FROM scheduler_state
+    WHERE state_key = ${FAMILY_ROSTER_STATE_KEY}
+    LIMIT 1
+  `;
+  const row = result.rows[0] as { payload?: unknown } | undefined;
+  if (!row?.payload) {
+    return null;
+  }
+  const members = parseStoredMembers(row.payload);
+  return members.length ? members : null;
 };
 
 export const readStoredFamilyRoster = async (): Promise<StoredFamilyMember[] | null> => {
-  const tableStatus = await ensureSchedulerStateTable();
-  if (!tableStatus.ok) {
-    return null;
-  }
   try {
-    const result = await sql`
-      SELECT payload
-      FROM scheduler_state
-      WHERE state_key = ${FAMILY_ROSTER_STATE_KEY}
-      LIMIT 1
-    `;
-    const row = result.rows[0] as { payload?: unknown } | undefined;
-    if (!row?.payload) {
+    return await readRosterRow();
+  } catch (firstError) {
+    const tableStatus = await ensureSchedulerStateTable();
+    if (!tableStatus.ok) {
+      console.error("[family-roster] failed to read scheduler_state", firstError);
       return null;
     }
-    const members = parseStoredMembers(row.payload);
+    try {
+      return await readRosterRow();
+    } catch (error) {
+      console.error("[family-roster] failed to read scheduler_state", error);
+      return null;
+    }
+  }
+};
+
+/** When settings were never saved, recover real names already stored on this instance's events. */
+const inferMembersFromSchedule = async (): Promise<StoredFamilyMember[] | null> => {
+  try {
+    const result = await sql`
+      SELECT DISTINCT metadata->>'child' AS child
+      FROM schedule
+      WHERE COALESCE(metadata->>'child', '') <> ''
+      LIMIT 24
+    `;
+    const seen = new Set<string>();
+    const members: StoredFamilyMember[] = [];
+    for (const raw of result.rows as Array<{ child?: unknown }>) {
+      const name = typeof raw.child === "string" ? raw.child.trim() : "";
+      if (!name || isPlaceholderMemberName(name)) continue;
+      const spec = specForName(name);
+      if (seen.has(spec.key) || isPlaceholderMemberName(spec.key)) continue;
+      seen.add(spec.key);
+      members.push({ name, role: spec.role, key: spec.key });
+    }
     return members.length ? members : null;
   } catch (error) {
-    console.error("[family-roster] failed to read scheduler_state", error);
+    console.warn("[family-roster] schedule infer failed", error);
     return null;
   }
 };
@@ -131,11 +198,26 @@ export const loadFamilyRoster = async (): Promise<FamilyRoster> => {
       return rosterCache.roster;
     }
     const stored = await readStoredFamilyRoster();
-    const roster = stored?.length
-      ? createFamilyRoster(hydrateStoredMembers(stored), "db")
-      : fallbackRoster;
-    rosterCache = { roster, at: Date.now() };
-    return roster;
+    const storedHasRealNames = Boolean(stored?.some((member) => !isPlaceholderMemberName(member.name)));
+    if (stored?.length && storedHasRealNames) {
+      const roster = createFamilyRoster(hydrateStoredMembers(stored), "db");
+      rosterCache = { roster, at: Date.now() };
+      return roster;
+    }
+    const envNames = runtimeEnvFamilyMemberNames().filter((name) => !isPlaceholderMemberName(name));
+    if (envNames.length) {
+      const roster = createFamilyRoster(hydrateStoredMembers(envNames.map((name) => ({ name, role: specForName(name).role }))), "env");
+      rosterCache = { roster, at: Date.now() };
+      return roster;
+    }
+    const inferred = await inferMembersFromSchedule();
+    if (inferred?.length) {
+      const roster = createFamilyRoster(hydrateStoredMembers(inferred), "schedule");
+      rosterCache = { roster, at: Date.now() };
+      return roster;
+    }
+    rosterCache = { roster: fallbackRoster, at: Date.now() };
+    return fallbackRoster;
   } catch (error) {
     console.error("[family-roster] load failed; using fallback", error);
     return fallbackRoster;

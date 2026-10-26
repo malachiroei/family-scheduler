@@ -18,7 +18,10 @@ import { recordAgentInteraction } from "@/app/lib/agentHistoryStore";
 import { parseFlexibleDate, weekdayIndexUtc } from "@/app/lib/scheduleDate";
 
 export const revalidate = 0;
-export const maxDuration = 30;
+export const maxDuration = 60;
+
+const GEMINI_MODELS = ["gemini-2.0-flash", "gemini-1.5-flash"] as const;
+const GEMINI_TIMEOUT_MS = 18_000;
 
 type Child = string;
 const childLabel = (roster: FamilyRoster, key: string | null | undefined) =>
@@ -379,33 +382,58 @@ const callGemini = async (prompt: string, img: { data: string; mime: string } | 
   const parts: Array<Record<string, unknown>> = [{ text: prompt }];
   if (img) parts.push({ inlineData: { mimeType: img.mime, data: img.data } });
   let lastErr = "";
-  for (const model of ["gemini-2.5-flash", "gemini-2.0-flash"]) {
-    const res = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${key}`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          contents: [{ role: "user", parts }],
-          generationConfig: { temperature: 0, responseMimeType: "application/json" },
-        }),
-      },
-    );
-    if (res.ok) {
-      const data = await res.json();
-      return String(
-        data?.candidates?.[0]?.content?.parts?.map((p: { text?: string }) => p?.text || "").join("") ?? "",
+  for (const model of GEMINI_MODELS) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), GEMINI_TIMEOUT_MS);
+    try {
+      const res = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${key}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          signal: controller.signal,
+          body: JSON.stringify({
+            contents: [{ role: "user", parts }],
+            generationConfig: {
+              temperature: 0,
+              responseMimeType: "application/json",
+              maxOutputTokens: 2048,
+            },
+          }),
+        },
       );
+      if (res.ok) {
+        const data = await res.json();
+        return String(
+          data?.candidates?.[0]?.content?.parts?.map((p: { text?: string }) => p?.text || "").join("") ?? "",
+        );
+      }
+      const errBody = await res.text();
+      lastErr = `Gemini ${model} ${res.status}: ${errBody}`;
+      console.error(`[agent] Gemini error (model=${model}, status=${res.status}):`, errBody);
+    } catch (error) {
+      lastErr = `Gemini ${model} ${error instanceof Error ? error.message : String(error)}`;
+      console.error(`[agent] Gemini request failed (model=${model}):`, error);
+    } finally {
+      clearTimeout(timer);
     }
-    const errBody = await res.text();
-    lastErr = `Gemini ${model} ${res.status}: ${errBody}`;
-    console.error(`[agent] Gemini error (model=${model}, status=${res.status}):`, errBody);
   }
   throw new Error(lastErr);
 };
 
 const runModel = async (prompt: string, img: { data: string; mime: string } | null) => {
-  const out = (await callOpenAI(prompt, img)) ?? (await callGemini(prompt, img));
+  // Screenshots go to Gemini Flash first — OpenAI vision regularly exceeds Vercel's limit.
+  if (img) {
+    const gemini = await callGemini(prompt, img).catch((error) => {
+      console.error("[agent] Gemini OCR failed, trying OpenAI", error);
+      return null;
+    });
+    if (gemini) {
+      const parsed = extractJsonObject(gemini);
+      if (parsed) return parsed;
+    }
+  }
+  const out = (await callOpenAI(prompt, img)) ?? (img ? null : await callGemini(prompt, img));
   if (out === null) throw new Error("Missing OPENAI_API_KEY / GEMINI_API_KEY");
   return extractJsonObject(out);
 };

@@ -15,8 +15,12 @@ import {
   createFamilyRoster,
   escapeRegExp,
   fallbackRoster,
+  hydrateStoredMembers,
   isOriginalHouseholdEnabled,
+  isPlaceholderMemberName,
+  specForName,
   type FamilyRoster,
+  type FamilyRosterSource,
   type StoredFamilyMember,
 } from '@/app/lib/familyMembers';
 
@@ -641,7 +645,7 @@ const coerceBaseChildKey = (value: string): BaseChildKey => {
     .replace(/[\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, '')
     .replace(/\u00a0/g, ' ')
     .trim();
-  return normalizeChildKey(cleaned) ?? defaultChildKeyValue();
+  return normalizeChildKey(cleaned) ?? cleaned ?? defaultChildKeyValue();
 };
 
 const normalizeAiEventForImport = (ev: AiEvent, scheduleFullText = ''): AiEvent => {
@@ -1989,8 +1993,13 @@ export default function FamilyScheduler() {
           setBranding(mergeAppBranding(payload.branding));
         }
         if (response.ok && Array.isArray(payload?.members) && payload.members.length) {
-          const source = payload.source === 'db' || payload.source === 'env' ? payload.source : 'default';
-          applyRoster(createFamilyRoster(payload.members, source));
+          const members = hydrateStoredMembers(payload.members);
+          const source: FamilyRosterSource =
+            members.some((member) => !isPlaceholderMemberName(member.name)) &&
+            (payload.source === 'db' || payload.source === 'env' || payload.source === 'schedule')
+              ? payload.source
+              : 'default';
+          applyRoster(createFamilyRoster(members, source));
         }
       } catch {
         // Missing/empty family_roster stays on the default household silently.
@@ -2000,6 +2009,28 @@ export default function FamilyScheduler() {
       cancelled = true;
     };
   }, [applyRoster]);
+
+  // If settings still have placeholders, surface real names already present on this instance's events.
+  useEffect(() => {
+    if (roster.source !== 'default') return;
+    const extras: StoredFamilyMember[] = [];
+    const seen = new Set(roster.members.map((member) => member.key));
+    for (const days of Object.values(weeksData)) {
+      for (const day of days) {
+        for (const event of day.events) {
+          const name = String(event.child ?? '').trim();
+          if (!name || isPlaceholderMemberName(name)) continue;
+          const spec = specForName(name);
+          if (seen.has(spec.key) || roster.resolveMemberKey(name)) continue;
+          seen.add(spec.key);
+          extras.push({ name, role: spec.role, key: spec.key });
+        }
+      }
+    }
+    if (!extras.length) return;
+    const kept = roster.serialize().filter((member) => !isPlaceholderMemberName(member.name));
+    applyRoster(createFamilyRoster(hydrateStoredMembers([...kept, ...extras]), 'schedule'));
+  }, [applyRoster, roster, weeksData]);
 
   useEffect(() => {
     document.title = branding.app_title;
@@ -2031,7 +2062,10 @@ export default function FamilyScheduler() {
     if (!response.ok || payload?.ok === false) {
       throw new Error(String(payload?.error || 'שמירת בני המשפחה נכשלה'));
     }
-    const next = createFamilyRoster(Array.isArray(payload?.members) ? payload.members : [], 'db');
+    const next = createFamilyRoster(
+      hydrateStoredMembers(Array.isArray(payload?.members) ? payload.members : []),
+      'db',
+    );
     applyRoster(next);
     setShowFamilyEditor(false);
     setApiError('');

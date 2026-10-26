@@ -35,6 +35,39 @@ const encodeCanvas = (canvas: HTMLCanvasElement, mime: "image/webp" | "image/jpe
  * Compress a pasted/uploaded image to a ~10–25KB WebP/JPEG data URL (max 240px wide).
  * Returns undefined when canvas encoding is unavailable or the result is still too large.
  */
+export const AGENT_IMAGE_MAX_EDGE = 1280;
+export const AGENT_IMAGE_QUALITY = 0.8;
+
+/**
+ * Downscale a screenshot before POST /api/agent (max 1280×1280 JPEG @ 0.8) so OCR stays under the
+ * serverless time limit. Falls back to the original data URL if canvas encoding fails.
+ */
+export const prepareAgentImage = async (source: string): Promise<{ dataUrl: string; mime: string }> => {
+  const fallbackMime = source.match(/^data:([^;]+);/)?.[1] || "image/jpeg";
+  if (typeof document === "undefined" || !source.startsWith("data:image/")) {
+    return { dataUrl: source, mime: fallbackMime };
+  }
+  try {
+    const img = await loadImage(source);
+    const scale = Math.min(1, AGENT_IMAGE_MAX_EDGE / Math.max(img.width, img.height, 1));
+    const width = Math.max(1, Math.round(img.width * scale));
+    const height = Math.max(1, Math.round(img.height * scale));
+    const canvas = document.createElement("canvas");
+    canvas.width = width;
+    canvas.height = height;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return { dataUrl: source, mime: fallbackMime };
+    ctx.drawImage(img, 0, 0, width, height);
+    const dataUrl = encodeCanvas(canvas, "image/jpeg", AGENT_IMAGE_QUALITY);
+    if (dataUrl.startsWith("data:image/jpeg")) {
+      return { dataUrl, mime: "image/jpeg" };
+    }
+  } catch {
+    // keep the original
+  }
+  return { dataUrl: source, mime: fallbackMime };
+};
+
 export const createImageThumbnail = async (source: string): Promise<string | undefined> => {
   if (typeof document === "undefined" || !source.startsWith("data:image/")) return undefined;
   try {

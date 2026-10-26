@@ -689,10 +689,10 @@ async function handleGet() {
       const r = row as { id: string; title: string; date: unknown; metadata: unknown };
       const meta = parseScheduleMetadata(r.metadata);
       const normalizedDate = parseFlexibleDate(r.date) || parseFlexibleDate(meta.eventDate) || "";
-      const rawChild = meta.child.trim().toLowerCase();
-      const normalizedChild = roster.isAllowedScheduleChild(rawChild)
-        ? roster.resolveMemberKey(rawChild) ?? rawChild
-        : roster.defaultChildKey;
+      const rawChild = meta.child.trim();
+      // Keep names that this instance actually stored (אריאל, אלון, …). Only remap when the
+      // current roster recognizes the value — never collapse unknown people to "ילד 1".
+      const normalizedChild = roster.resolveMemberKey(rawChild) || rawChild || roster.defaultChildKey;
 
       return {
         id: r.id,

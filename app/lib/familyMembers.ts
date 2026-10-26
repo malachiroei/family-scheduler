@@ -1,7 +1,7 @@
 /**
  * Configurable family roster.
  * Priority: DB (`scheduler_state` / family_roster) → NEXT_PUBLIC_FAMILY_MEMBERS →
- * original household (when NEXT_PUBLIC_ENABLE_BUILTIN_JOHNNY is on) → generic placeholders.
+ * names found on `schedule` rows → original household (when enabled) → generic placeholders.
  */
 
 import { isOriginalHouseholdEnabled } from "./deployment";
@@ -9,7 +9,7 @@ import { isOriginalHouseholdEnabled } from "./deployment";
 export { isOriginalHouseholdEnabled };
 
 export type FamilyRole = "child" | "parent";
-export type FamilyRosterSource = "db" | "env" | "default";
+export type FamilyRosterSource = "db" | "env" | "schedule" | "default";
 
 export type FamilyMember = {
   key: string;
@@ -104,6 +104,15 @@ export const parseNameList = (raw: string | undefined | null): string[] =>
     .split(/[,،]+/)
     .map((value) => value.trim())
     .filter(Boolean);
+
+/** Built-in placeholder labels / keys — never treat these as a family's real names. */
+export const isPlaceholderMemberName = (value: string | null | undefined): boolean => {
+  const trimmed = (value ?? "").trim();
+  if (!trimmed) return true;
+  return /^(ילד|הורה)\s*\d+$/u.test(trimmed) || /^(child|parent)\d+$/i.test(trimmed);
+};
+
+export const runtimeEnvFamilyMemberNames = (): string[] => parseNameList(process.env.NEXT_PUBLIC_FAMILY_MEMBERS);
 
 const slugifyUnknown = (name: string): string => {
   const slug = [...name]
@@ -336,8 +345,13 @@ export const createFamilyRoster = (
     ...familyPairOptions.flatMap((pair) => [pair.key, `${pair.keys[1]}_${pair.keys[0]}`]),
   ];
 
+  const aliasesOf = (member: FamilyMember) =>
+    (member.aliases && member.aliases.length ? member.aliases : [member.name, member.key, member.pushName]).filter(
+      Boolean,
+    );
+
   const childLabelMap: Record<string, string> = Object.fromEntries([
-    ...members.flatMap((member) => member.aliases.map((alias) => [alias, member.name] as const)),
+    ...members.flatMap((member) => aliasesOf(member).map((alias) => [alias, member.name] as const)),
     ...familyPairOptions.map(
       (pair) => [pair.key, `${pair.keys.map((key) => byKey.get(key)?.name ?? key).join(" ו")}`] as const,
     ),
@@ -359,7 +373,9 @@ export const createFamilyRoster = (
 
   const getMemberKeysFromChildField = (child: string): string[] => {
     const keys = parseMemberKeysFromChildField(child);
-    return keys.length ? keys : [defaultChildKey];
+    if (keys.length) return keys;
+    const trimmed = child.trim();
+    return trimmed ? [trimmed] : [defaultChildKey];
   };
 
   const isAllowedScheduleChild = (value: string): boolean => {

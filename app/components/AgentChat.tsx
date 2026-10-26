@@ -3,7 +3,7 @@ import React, { useCallback, useEffect, useRef, useState } from "react";
 import { Bot, ChevronDown, FileSpreadsheet, History, ImagePlus, RotateCcw, Send, Sparkles, Trash2, X } from "lucide-react";
 import { childDisplayNames as fallbackChildDisplayNames } from "@/app/lib/familyMembers";
 import { AGENT_EXAMPLE_PROMPTS } from "@/app/lib/agentExamples";
-import { createImageThumbnail } from "@/app/lib/imageThumbnail";
+import { createImageThumbnail, prepareAgentImage } from "@/app/lib/imageThumbnail";
 
 type Msg = {
   role: "user" | "assistant";
@@ -452,7 +452,9 @@ export default function AgentChat({
       .filter((m) => !m.isError && !m.source)
       .slice(-CHAT_CONTEXT_MAX_MESSAGES)
       .map((m) => ({ role: m.role, content: m.content }));
-    const thumbnailUrl = sentImage ? await createImageThumbnail(sentImage) : undefined;
+    const [thumbnailUrl, agentImage] = sentImage
+      ? await Promise.all([createImageThumbnail(sentImage), prepareAgentImage(sentImage)])
+      : [undefined, null];
     addMessage({
       role: "user",
       content: text || (sentFile ? `קובץ: ${sentFile.name}` : "(צילום מסך)"),
@@ -477,8 +479,8 @@ export default function AgentChat({
           text,
           history,
           draft,
-          imageBase64: sentImage ?? undefined,
-          imageMimeType: sentImage?.match(/^data:([^;]+);/)?.[1],
+          imageBase64: agentImage?.dataUrl ?? undefined,
+          imageMimeType: agentImage?.mime,
           fileBase64: sentFile?.dataUrl,
           fileName: sentFile?.name,
           fileMimeType: sentFile?.mime,
