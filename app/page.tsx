@@ -12,6 +12,7 @@ import { normalizeMetadataTime, parseMetadataBoolean } from '@/app/lib/scheduleT
 import { parseFlexibleDate } from '@/app/lib/scheduleDate';
 import { fixtureLeagueBadge } from '@/app/lib/fixtureLeague';
 import {
+  canonicalHebrewName,
   createFamilyRoster,
   escapeRegExp,
   fallbackRoster,
@@ -1461,12 +1462,14 @@ const formatSchedulePersistenceError = (error: unknown): string => {
 
 const getChildKeys = (key: ChildKey): BaseChildKey[] => getMemberKeysFromChildField(key);
 
-const memberVisual = (key: string) =>
-  baseChildrenConfigValue()[key] ?? {
-    name: labelForMemberKey(key) || key,
-    color: 'bg-slate-400',
-    iconColor: 'text-slate-500',
+const memberVisual = (key: string) => {
+  const base = baseChildrenConfigValue()[key];
+  return {
+    name: labelForMemberKey(key),
+    color: base?.color ?? 'bg-slate-400',
+    iconColor: base?.iconColor ?? 'text-slate-500',
   };
+};
 
 const remoteLearningTemplates: RecurringTemplate[] = [
   {
@@ -2020,10 +2023,23 @@ export default function FamilyScheduler() {
         for (const event of day.events) {
           const name = String(event.child ?? '').trim();
           if (!name || isPlaceholderMemberName(name)) continue;
+          const parts = name.split(/[_+]+/).filter(Boolean);
+          const knownParts = parts.length > 1 ? parts.filter((part) => canonicalHebrewName(part)) : [];
+          if (knownParts.length > 1 && knownParts.length === parts.length) {
+            const key = knownParts.map((part) => specForName(part).key).join('_');
+            if (seen.has(key) || roster.resolveMemberKey(name)) continue;
+            seen.add(key);
+            extras.push({
+              name: knownParts.map((part) => canonicalHebrewName(part) ?? part).join(' ו'),
+              role: specForName(knownParts[0]).role,
+              key,
+            });
+            continue;
+          }
           const spec = specForName(name);
           if (seen.has(spec.key) || roster.resolveMemberKey(name)) continue;
           seen.add(spec.key);
-          extras.push({ name, role: spec.role, key: spec.key });
+          extras.push({ name: canonicalHebrewName(name) ?? name, role: spec.role, key: spec.key });
         }
       }
     }

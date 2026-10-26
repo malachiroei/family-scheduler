@@ -4,5 +4,10 @@
       "path": "/api/notifications/check",
       "schedule": "0 7 * * *"
     }
-  ]
+  ],
+  "functions": {
+    "app/api/agent/route.ts": {
+      "maxDuration": 60
+    }
+  }
 }

@@ -21,7 +21,7 @@ import { applyGeminiKeyToProcessEnv, resolveGeminiApiKey, resolveOpenAIApiKey } 
 export const revalidate = 0;
 export const maxDuration = 60;
 
-const GEMINI_MODELS = ["gemini-3.8-flash", "gemini-2.5-flash"] as const;
+const GEMINI_MODELS = ["gemini-3.8-flash"] as const;
 const GEMINI_TIMEOUT_MS = 28_000;
 const GEMINI_SAFETY = [
   { category: "HARM_CATEGORY_HARASSMENT", threshold: "BLOCK_NONE" },
@@ -470,20 +470,13 @@ const callGemini = async (prompt: string, img: { data: string; mime: string } | 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), GEMINI_TIMEOUT_MS);
   try {
-    let lastErr = "";
-    for (const model of GEMINI_MODELS) {
-      try {
-        return await callGeminiRest(key, model, parts, controller.signal);
-      } catch (error) {
-        lastErr = error instanceof Error ? error.message : String(error);
-        const aborted = /aborted|AbortError|The operation was aborted/i.test(lastErr);
-        const gone = /404|no longer available|NOT_FOUND/i.test(lastErr);
-        console.error(`[agent] Gemini ${model} failed:`, lastErr);
-        if (aborted) throw new Error("קריאת הצילום לקחה יותר מדי זמן. נסי שוב.");
-        if (!gone) throw error;
-      }
-    }
-    throw new Error(lastErr || "Gemini request failed");
+    return await callGeminiRest(key, GEMINI_MODELS[0], parts, controller.signal);
+  } catch (error) {
+    const lastErr = error instanceof Error ? error.message : String(error);
+    const aborted = /aborted|AbortError|The operation was aborted/i.test(lastErr);
+    console.error(`[agent] Gemini ${GEMINI_MODELS[0]} failed:`, lastErr);
+    if (aborted) throw new Error("קריאת הצילום לקחה יותר מדי זמן. נסי שוב.");
+    throw error instanceof Error ? error : new Error(lastErr || "Gemini request failed");
   } finally {
     clearTimeout(timer);
   }
@@ -864,11 +857,34 @@ export async function POST(request: NextRequest) {
     const saved: Array<{ id: string; title: string; date: string; time: string; child: Child; type: EventType }> = [];
     const rowsToInsert: Array<{ id: string; title: string; date: string; metadata: ReturnType<typeof buildMetadataFromIncoming> }> = [];
     const kids: Child[] = multiKids ?? [child];
+    const timeMinutes = (value: string) => {
+      const m = String(value ?? "").trim().match(/^(\d{1,2}):(\d{2})/);
+      return m ? Number(m[1]) * 60 + Number(m[2]) : null;
+    };
+    const isGameLike = (title: string) => /משחק/.test(title) || /\bgame\b/i.test(title);
     for (const kid of kids) for (const e of draft.events) {
       const date = e.date as string;
       const time = e.time as string;
       const type: EventType = e.type ?? (roster.isParentMemberKey(kid) ? "other" : "sport");
       const title = e.title ?? e.keyword ?? TYPE_LABEL[type];
+      if (isGameLike(title)) {
+        const existing = await sql`
+          SELECT title, metadata
+          FROM schedule
+          WHERE "date"::text = ${date}
+        `;
+        const newMins = timeMinutes(time);
+        const kidKeys = roster.getMemberKeysFromChildField(kid);
+        const alreadyHaveGame = (existing.rows as Array<{ title?: string; metadata?: Record<string, unknown> }>).some((row) => {
+          if (!isGameLike(String(row.title ?? ""))) return false;
+          const meta = row.metadata && typeof row.metadata === "object" ? row.metadata : {};
+          const oldMins = timeMinutes(String(meta.time ?? ""));
+          if (newMins == null || oldMins == null || Math.abs(newMins - oldMins) > 45) return false;
+          const oldKeys = roster.getMemberKeysFromChildField(String(meta.child ?? ""));
+          return kidKeys.some((key) => oldKeys.includes(key));
+        });
+        if (alreadyHaveGame) continue;
+      }
       const id = crypto.randomUUID();
       const metadata = buildMetadataFromIncoming({
         dayIndex: dayIndexOf(date),
@@ -889,6 +905,15 @@ export async function POST(request: NextRequest) {
       });
       rowsToInsert.push({ id, title, date, metadata });
       saved.push({ id, title, date, time, child: kid, type });
+    }
+
+    if (saved.length === 0) {
+      return NextResponse.json({
+        success: true,
+        message: "המשחקים האלה כבר מופיעים בלו״ז באותו יום ושעה — לא נוספה כפילות.",
+        events: [],
+        draft: emptyDraft(),
+      });
     }
 
     // The only DB work on the critical path: INSERT(s), capped at 6s so we answer before Vercel's 504.

@@ -35,11 +35,11 @@ const encodeCanvas = (canvas: HTMLCanvasElement, mime: "image/webp" | "image/jpe
  * Compress a pasted/uploaded image to a ~10–25KB WebP/JPEG data URL (max 240px wide).
  * Returns undefined when canvas encoding is unavailable or the result is still too large.
  */
-export const AGENT_IMAGE_MAX_EDGE = 1280;
-export const AGENT_IMAGE_QUALITY = 0.8;
+export const AGENT_IMAGE_MAX_EDGE = 1000;
+export const AGENT_IMAGE_QUALITY = 0.75;
 
 /**
- * Downscale a screenshot before POST /api/agent (max 1280×1280 JPEG @ 0.8) so OCR stays under the
+ * Downscale a screenshot before POST /api/agent (max 1000×1000 JPEG @ 0.75) so OCR stays under the
  * serverless time limit. Falls back to the original data URL if canvas encoding fails.
  */
 export const prepareAgentImage = async (source: string): Promise<{ dataUrl: string; mime: string }> => {

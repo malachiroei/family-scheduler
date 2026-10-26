@@ -7,6 +7,7 @@ import {
   type AppBranding,
 } from "@/app/lib/appBranding";
 import {
+  canonicalHebrewName,
   createFamilyRoster,
   fallbackRoster,
   FAMILY_ROSTER_STATE_KEY,
@@ -177,10 +178,23 @@ const inferMembersFromSchedule = async (): Promise<StoredFamilyMember[] | null> 
     for (const raw of result.rows as Array<{ child?: unknown }>) {
       const name = typeof raw.child === "string" ? raw.child.trim() : "";
       if (!name || isPlaceholderMemberName(name)) continue;
+      const parts = name.split(/[_+]+/).filter(Boolean);
+      const knownParts = parts.length > 1 ? parts.filter((part) => canonicalHebrewName(part)) : [];
+      if (knownParts.length > 1 && knownParts.length === parts.length) {
+        const key = knownParts.map((part) => specForName(part).key).join("_");
+        if (seen.has(key) || isPlaceholderMemberName(key)) continue;
+        seen.add(key);
+        members.push({
+          name: knownParts.map((part) => canonicalHebrewName(part) ?? part).join(" ו"),
+          role: specForName(knownParts[0]).role,
+          key,
+        });
+        continue;
+      }
       const spec = specForName(name);
       if (seen.has(spec.key) || isPlaceholderMemberName(spec.key)) continue;
       seen.add(spec.key);
-      members.push({ name, role: spec.role, key: spec.key });
+      members.push({ name: canonicalHebrewName(name) ?? name, role: spec.role, key: spec.key });
     }
     return members.length ? members : null;
   } catch (error) {
@@ -200,8 +214,16 @@ export const loadFamilyRoster = async (): Promise<FamilyRoster> => {
     const stored = await readStoredFamilyRoster();
     const storedHasRealNames = Boolean(stored?.some((member) => !isPlaceholderMemberName(member.name)));
     if (stored?.length && storedHasRealNames) {
-      const roster = createFamilyRoster(hydrateStoredMembers(stored), "db");
+      const members = hydrateStoredMembers(stored);
+      const roster = createFamilyRoster(members, "db");
       rosterCache = { roster, at: Date.now() };
+      if (stored.some((member) => /^[a-z][a-z0-9_]*$/i.test(member.name.trim()))) {
+        try {
+          await saveFamilyRoster(serializeFamilyMembers(members));
+        } catch (error) {
+          console.warn("[family-roster] hebrew name cleanup save skipped", error);
+        }
+      }
       return roster;
     }
     const envNames = runtimeEnvFamilyMemberNames().filter((name) => !isPlaceholderMemberName(name));

@@ -136,6 +136,32 @@ export const specForName = (name: string): KnownSpec => {
   return { key: slugifyUnknown(name), role: "child", aliases: [name, lower] };
 };
 
+const HEBREW_NAME_RE = /[\u0590-\u05FF]/;
+const looksLikeId = (value: string) => /^[a-z][a-z0-9_]*$/i.test(value.trim());
+
+/** Canonical Hebrew label for a known member key/alias (amit → עמית). */
+export const canonicalHebrewName = (keyOrName: string): string | null => {
+  const trimmed = keyOrName.trim();
+  if (!trimmed) return null;
+  if (HEBREW_NAME_RE.test(trimmed) && KNOWN_BY_NAME[trimmed]) return trimmed;
+  const spec = specForName(trimmed);
+  const hebrew = Object.entries(KNOWN_BY_NAME).find(
+    ([label, known]) => known.key === spec.key && HEBREW_NAME_RE.test(label),
+  );
+  return hebrew?.[0] ?? null;
+};
+
+/** Filter chips / cards: never show raw ids like amit or roi_sivan. */
+export const displayNameForMemberKey = (key: string): string => {
+  const trimmed = key.trim();
+  if (!trimmed) return trimmed;
+  const parts = trimmed.split(/[_+]+/).filter(Boolean);
+  if (parts.length > 1) {
+    return parts.map((part) => canonicalHebrewName(part) ?? part).join(" ו");
+  }
+  return canonicalHebrewName(trimmed) ?? trimmed;
+};
+
 const uniqueNames = (names: string[]) => {
   const seen = new Set<string>();
   const out: string[] = [];
@@ -173,7 +199,13 @@ export const hydrateMember = (item: StoredFamilyMember, index: number, usedKeys?
     }
     usedKeys.add(key);
   }
-  const displayName = key === "sivan" ? "סיון" : name;
+  const mappedName =
+    canonicalHebrewName(key) ??
+    canonicalHebrewName(name) ??
+    (looksLikeId(name) ? displayNameForMemberKey(name) : null) ??
+    (looksLikeId(key) ? displayNameForMemberKey(key) : null);
+  const displayName =
+    mappedName && !looksLikeId(mappedName) ? mappedName : key === "sivan" ? "סיון" : name;
   const pushName = spec.pushName ?? displayName;
   const genericKeyAliases =
     key === "child1"
@@ -334,6 +366,15 @@ export const createFamilyRoster = (
   for (const pair of familyPairOptions) {
     pairByKey.set(`${pair.keys[1]}_${pair.keys[0]}`, pair);
   }
+  for (let i = 0; i < parents.length; i += 1) {
+    for (let j = i + 1; j < parents.length; j += 1) {
+      const a = parents[i];
+      const b = parents[j];
+      const pair = { key: `${a.key}_${b.key}`, label: `${a.name} ו${b.name}`, keys: [a.key, b.key] };
+      pairByKey.set(pair.key, pair);
+      pairByKey.set(`${b.key}_${a.key}`, pair);
+    }
+  }
 
   const childFormOptions = [
     ...members.map((member) => ({ key: member.key, label: member.name })),
@@ -388,9 +429,16 @@ export const createFamilyRoster = (
   };
 
   const labelForMemberKey = (key: string): string => {
-    const pair = pairByKey.get(key);
-    if (pair) return pair.keys.map((part) => byKey.get(part)?.name ?? part).join(" ו");
-    return byKey.get(key)?.name ?? childLabelMap[key] ?? key;
+    const pair = pairByKey.get(key) ?? pairByKey.get(key.trim().toLowerCase());
+    if (pair) {
+      return pair.keys.map((part) => {
+        const stored = byKey.get(part)?.name;
+        return stored && HEBREW_NAME_RE.test(stored) ? stored : displayNameForMemberKey(part);
+      }).join(" ו");
+    }
+    const stored = byKey.get(key)?.name ?? childLabelMap[key];
+    if (stored && HEBREW_NAME_RE.test(stored) && !looksLikeId(stored)) return stored;
+    return displayNameForMemberKey(key);
   };
 
   const memberDisplayNames = members.map((member) => member.name);
