@@ -21,7 +21,7 @@ import { applyGeminiKeyToProcessEnv, resolveGeminiApiKey, resolveOpenAIApiKey } 
 export const revalidate = 0;
 export const maxDuration = 60;
 
-const GEMINI_MODELS = ["gemini-2.0-flash"] as const;
+const GEMINI_MODELS = ["gemini-3.8-flash", "gemini-2.5-flash"] as const;
 const GEMINI_TIMEOUT_MS = 12_000;
 const GEMINI_SAFETY = [
   { category: "HARM_CATEGORY_HARASSMENT", threshold: "BLOCK_NONE" },
@@ -483,11 +483,21 @@ const callGemini = async (prompt: string, img: { data: string; mime: string } | 
     ? { inlineData: { mimeType: img.mime || "image/jpeg", data: img.data.replace(/\s+/g, "") } }
     : null;
   const parts = imagePart ? [imagePart, { text: prompt }] : [{ text: prompt }];
-  const model = GEMINI_MODELS[0];
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), GEMINI_TIMEOUT_MS);
   try {
-    return await callGeminiRest(key, model, parts, controller.signal);
+    let lastErr = "";
+    for (const model of GEMINI_MODELS) {
+      try {
+        return await callGeminiRest(key, model, parts, controller.signal);
+      } catch (error) {
+        lastErr = error instanceof Error ? error.message : String(error);
+        const gone = /404|no longer available|NOT_FOUND/i.test(lastErr);
+        console.error(`[agent] Gemini ${model} failed:`, lastErr);
+        if (!gone) throw error;
+      }
+    }
+    throw new Error(lastErr || "Gemini request failed");
   } finally {
     clearTimeout(timer);
   }

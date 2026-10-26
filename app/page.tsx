@@ -180,8 +180,8 @@ function toApiUrl(path: string): string {
 }
 
 const SCHEDULER_STORAGE_KEY = 'family-scheduler-state-v1';
-const PRIMARY_GEMINI_MODEL = 'gemini-1.5-flash';
-const FALLBACK_GEMINI_MODEL = 'gemini-1.5-flash';
+const PRIMARY_GEMINI_MODEL = 'gemini-3.8-flash';
+const FALLBACK_GEMINI_MODEL = 'gemini-2.5-flash';
 
 type PersistedStatePayload = {
   weekStart?: string;

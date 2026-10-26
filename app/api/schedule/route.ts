@@ -32,13 +32,14 @@ debugScheduleLog("DB URL source:", dbConfig.source);
 debugScheduleLog("Saving to DB:", activeDatabaseUrl ? activeDatabaseUrl.substring(0, 15) + "..." : "(missing)");
 debugScheduleLog("Current ENV keys:", Object.keys(process.env));
 
-const allowedModels = ["gemini-1.5-flash", "gemini-2.0-flash"] as const;
+const allowedModels = ["gemini-3.8-flash", "gemini-2.5-flash", "gemini-1.5-flash", "gemini-2.0-flash"] as const;
 type SupportedModel = (typeof allowedModels)[number];
-const defaultModel: SupportedModel = "gemini-1.5-flash";
-const defaultFallbackModel: SupportedModel = "gemini-1.5-flash";
+const defaultModel: SupportedModel = "gemini-3.8-flash";
+const defaultFallbackModel: SupportedModel = "gemini-2.5-flash";
 const modelAliasMap: Record<string, SupportedModel> = {
-  "gemini-1.5-flash-latest": "gemini-1.5-flash",
-  "gemini-2.0-flash-exp": "gemini-2.0-flash",
+  "gemini-1.5-flash-latest": "gemini-3.8-flash",
+  "gemini-2.0-flash": "gemini-3.8-flash",
+  "gemini-2.0-flash-exp": "gemini-3.8-flash",
 };
 const allowedTypes = ["dog", "gym", "sport", "lesson", "dance"] as const;
 
