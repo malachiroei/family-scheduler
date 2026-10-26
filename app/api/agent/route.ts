@@ -22,8 +22,14 @@ import { GoogleGenAI } from "@google/genai";
 export const revalidate = 0;
 export const maxDuration = 60;
 
-const GEMINI_MODELS = ["gemini-2.0-flash", "gemini-1.5-flash"] as const;
-const GEMINI_TIMEOUT_MS = 18_000;
+const GEMINI_MODELS = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash-latest", "gemini-1.5-flash"] as const;
+const GEMINI_TIMEOUT_MS = 25_000;
+const GEMINI_SAFETY = [
+  { category: "HARM_CATEGORY_HARASSMENT", threshold: "BLOCK_NONE" },
+  { category: "HARM_CATEGORY_HATE_SPEECH", threshold: "BLOCK_NONE" },
+  { category: "HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold: "BLOCK_NONE" },
+  { category: "HARM_CATEGORY_DANGEROUS_CONTENT", threshold: "BLOCK_NONE" },
+];
 
 type Child = string;
 const childLabel = (roster: FamilyRoster, key: string | null | undefined) =>
@@ -329,7 +335,8 @@ const buildPrompt = (text: string, draft: Draft, history: ChatTurn[], patterns: 
 - sender_or_group = שם קבוצת הוואטסאפ / כותרת השיחה / שם איש הקשר שמופיע בראש צילום המסך (או מוזכר בטקסט), בדיוק כפי שהוא כתוב. אם אין - null.
 - הבחנה בין פנייה לשיוך: פנייה מנומסת לנמען השיחה, כמו "היי רועי", "רועי רשמתי", "שלום סיון", היא רק פנייה לנמען ואינה אומרת שהאירוע שייך לו! אל תקבע child_name על סמך פנייה/ברכה כזו. child_name נקבע רק כשברור שהאירוע עצמו מיועד לאותו אדם (למשל "אימון לרביד", "תרשום לרועי פגישה").
 - שלילה מוחלטת של הסקת בעלים מביטויי אישור/ברכה: "רועי רשמתי", "היי רועי", "שלום סיון", "תודה רועי" — אלה לעולם אינם אומרים שהאירוע שייך לאדם. אל תסיק מהם child_name.
-- כלל ברזל: תספורת / וטרינר / בדיקה / טיפול / חיסון, כל אירוע של הכלב, וכל מקרה ש"ג'וני"/"גוני" מופיע בשם איש הקשר או השיחה (למשל "מירב גוני ספרית") — לעולם child_name: null, גם אם כתוב "רועי רשמתי". כותרת האירוע יכולה להיות פשוט "תספורת". לאירועי כלב type="dog". אירועים משפחתיים כלליים — גם הם null.
+- כלל ברזל: תספורת / וטרינר / חיסון לכלב, כל אירוע של הכלב, וכל מקרה ש"ג'וני"/"גוני" מופיע בשם איש הקשר או השיחה (למשל "מירב גוני ספרית") — לעולם child_name: null, גם אם כתוב "רועי רשמתי". כותרת האירוע יכולה להיות פשוט "תספורת". לאירועי כלב type="dog".
+- כרטיסיית תור מקופת חולים / מכבי / כללית / מאוחדת / "תור במרפאה" היא שיבוץ ליומן (לא ייעוץ רפואי). חלץ תאריך (גם 28/10/26), שעה, ושם המטופל אם כתוב על הכרטיס. אם השם הוא בן משפחה — זה child_name. כותרת: "תור במרפאה" (או שם הרופא/מכון אם כתוב), type="other".
 - child_name = בן משפחה אחד לכל ההודעה: ${roster.members.map((m) => `${m.key} (${m.name})`).join(", ")} — רק אם מוזכר במפורש בקלט החדש או בטיוטה. אחרת null. אל תנחש ואל תסיק לפי סוג הפעילות או לפי הדפוסים (ההחלטה בצד השרת).
 - סוגים: dog, gym, sport, lesson, dance. בחר את הקרוב ביותר (כדורסל/כדורגל = sport).
 - בחן תמיד קודם כל את החלק העליון ביותר של צילום המסך (שם קבוצת הוואטסאפ, שם השולח או כותרת השיחה) — הוא נותן את ההקשר לכל האירועים בצילום.
@@ -348,14 +355,49 @@ ${hist ? `היסטוריית שיחה:\n${hist}\n` : ""}קלט חדש מהמשת
 };
 
 const extractJsonObject = (t: string) => {
-  const s = t.indexOf("{");
-  const e = t.lastIndexOf("}");
-  if (s === -1 || e <= s) return null;
-  try {
-    return JSON.parse(t.slice(s, e + 1));
-  } catch {
-    return null;
+  if (!t) return null;
+  const cleaned = t.replace(/```(?:json)?/gi, "").trim();
+  const s = cleaned.indexOf("{");
+  const e = cleaned.lastIndexOf("}");
+  if (s !== -1 && e > s) {
+    try {
+      return JSON.parse(cleaned.slice(s, e + 1));
+    } catch {
+      // try the array form below
+    }
   }
+  const as = cleaned.indexOf("[");
+  const ae = cleaned.lastIndexOf("]");
+  if (as !== -1 && ae > as) {
+    try {
+      const arr = JSON.parse(cleaned.slice(as, ae + 1));
+      if (Array.isArray(arr)) return { events: arr, child_name: null, sender_or_group: null };
+    } catch {
+      return null;
+    }
+  }
+  return null;
+};
+
+const textFromGeminiPayload = (data: unknown): string => {
+  if (!data || typeof data !== "object") return "";
+  const obj = data as Record<string, unknown>;
+  if (typeof obj.text === "string" && obj.text.trim()) return obj.text;
+  const candidates = Array.isArray(obj.candidates) ? obj.candidates : [];
+  const parts: string[] = [];
+  for (const candidate of candidates) {
+    const content = candidate && typeof candidate === "object" ? (candidate as Record<string, unknown>).content : null;
+    const list =
+      content && typeof content === "object" && Array.isArray((content as Record<string, unknown>).parts)
+        ? ((content as Record<string, unknown>).parts as unknown[])
+        : [];
+    for (const part of list) {
+      if (part && typeof part === "object" && typeof (part as { text?: unknown }).text === "string") {
+        parts.push(String((part as { text: string }).text));
+      }
+    }
+  }
+  return parts.join("").trim();
 };
 
 const callOpenAI = async (prompt: string, img: { data: string; mime: string } | null) => {
@@ -389,11 +431,54 @@ const getGoogleGenAI = () => {
   }
 };
 
+const callGeminiRest = async (
+  key: string,
+  model: string,
+  parts: Array<{ text?: string; inlineData?: { mimeType: string; data: string } }>,
+  signal: AbortSignal,
+) => {
+  const res = await fetch(
+    `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${key}`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      signal,
+      body: JSON.stringify({
+        contents: [{ role: "user", parts }],
+        generationConfig: {
+          temperature: 0,
+          responseMimeType: "application/json",
+          maxOutputTokens: 2048,
+        },
+        safetySettings: GEMINI_SAFETY,
+      }),
+    },
+  );
+  const raw = await res.text();
+  if (!res.ok) {
+    throw new Error(`Gemini ${model} ${res.status}: ${raw.slice(0, 400)}`);
+  }
+  let data: unknown = null;
+  try {
+    data = raw ? JSON.parse(raw) : null;
+  } catch {
+    throw new Error(`Gemini ${model} non-JSON body`);
+  }
+  const text = textFromGeminiPayload(data);
+  if (!text) {
+    const feedback = data && typeof data === "object" ? (data as Record<string, unknown>).promptFeedback : null;
+    throw new Error(`Gemini ${model} empty body ${feedback ? JSON.stringify(feedback).slice(0, 200) : ""}`.trim());
+  }
+  return text;
+};
+
 const callGemini = async (prompt: string, img: { data: string; mime: string } | null) => {
   const key = applyGeminiKeyToProcessEnv();
   if (!key) return null;
-  const parts: Array<{ text?: string; inlineData?: { mimeType: string; data: string } }> = [{ text: prompt }];
-  if (img) parts.push({ inlineData: { mimeType: img.mime || "image/jpeg", data: img.data } });
+  const imagePart = img
+    ? { inlineData: { mimeType: img.mime || "image/jpeg", data: img.data.replace(/\s+/g, "") } }
+    : null;
+  const parts = imagePart ? [imagePart, { text: prompt }] : [{ text: prompt }];
   let lastErr = "";
   const ai = getGoogleGenAI();
   for (const model of GEMINI_MODELS) {
@@ -401,46 +486,27 @@ const callGemini = async (prompt: string, img: { data: string; mime: string } | 
     const timer = setTimeout(() => controller.abort(), GEMINI_TIMEOUT_MS);
     try {
       if (ai) {
-        const response = await ai.models.generateContent({
-          model,
-          contents: [{ role: "user", parts }],
-          config: {
-            temperature: 0,
-            responseMimeType: "application/json",
-            maxOutputTokens: 2048,
-            abortSignal: controller.signal,
-          },
-        });
-        const text = String(response.text ?? "").trim();
-        if (text) return text;
-        lastErr = `Gemini ${model} empty response`;
-        continue;
-      }
-      const res = await fetch(
-        `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${key}`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          signal: controller.signal,
-          body: JSON.stringify({
-            contents: [{ role: "user", parts }],
-            generationConfig: {
+        try {
+          const response = await ai.models.generateContent({
+            model,
+            contents: parts,
+            config: {
               temperature: 0,
               responseMimeType: "application/json",
               maxOutputTokens: 2048,
+              abortSignal: controller.signal,
+              safetySettings: GEMINI_SAFETY,
             },
-          }),
-        },
-      );
-      if (res.ok) {
-        const data = await res.json();
-        return String(
-          data?.candidates?.[0]?.content?.parts?.map((p: { text?: string }) => p?.text || "").join("") ?? "",
-        );
+          });
+          const text = textFromGeminiPayload(response) || String(response.text ?? "").trim();
+          if (text) return text;
+          console.warn("[agent] Gemini SDK empty", model, response.promptFeedback ?? response.candidates?.[0]);
+        } catch (sdkError) {
+          lastErr = `Gemini SDK ${model} ${sdkError instanceof Error ? sdkError.message : String(sdkError)}`;
+          console.error("[agent] Gemini SDK failed, trying REST", lastErr);
+        }
       }
-      const errBody = await res.text();
-      lastErr = `Gemini ${model} ${res.status}: ${errBody}`;
-      console.error(`[agent] Gemini error (model=${model}, status=${res.status}):`, errBody);
+      return await callGeminiRest(key, model, parts, controller.signal);
     } catch (error) {
       lastErr = `Gemini ${model} ${error instanceof Error ? error.message : String(error)}`;
       console.error(`[agent] Gemini request failed (model=${model}):`, error);
@@ -451,30 +517,47 @@ const callGemini = async (prompt: string, img: { data: string; mime: string } | 
   throw new Error(lastErr || "Gemini request failed");
 };
 
-const runModel = async (prompt: string, img: { data: string; mime: string } | null) => {
+const compactOcrPrompt = (fullPrompt: string, roster: FamilyRoster) =>
+  `${fullPrompt}
+
+החזר JSON תקין בלבד. אם זו כרטיסיית תור אחת — events באורך 1, עם date/time/title. child_name אם כתוב שם מ: ${roster.memberDisplayNames.join(", ")}.`;
+
+const runModel = async (prompt: string, img: { data: string; mime: string } | null, roster: FamilyRoster) => {
   const hasGemini = Boolean(resolveGeminiApiKey());
   const hasOpenAI = Boolean(resolveOpenAIApiKey());
   if (!hasGemini && !hasOpenAI) {
     throw new Error("Missing GEMINI_API_KEY / NEXT_PUBLIC_GEMINI_API_KEY");
   }
+  const tryParse = async (raw: string | null) => {
+    if (!raw) return null;
+    return extractJsonObject(raw);
+  };
   // Screenshots go to Gemini Flash first — OpenAI vision regularly exceeds Vercel's limit.
   if (img && hasGemini) {
-    const gemini = await callGemini(prompt, img).catch((error) => {
-      console.error("[agent] Gemini OCR failed, trying OpenAI", error);
+    const first = await callGemini(prompt, img).catch((error) => {
+      console.error("[agent] Gemini OCR failed", error);
       return null;
     });
-    if (gemini) {
-      const parsed = extractJsonObject(gemini);
-      if (parsed) return parsed;
+    const parsed = await tryParse(first);
+    if (parsed) return parsed;
+    if (first) {
+      const retry = await callGemini(compactOcrPrompt(prompt, roster), img).catch((error) => {
+        console.error("[agent] Gemini OCR retry failed", error);
+        return null;
+      });
+      const parsedRetry = await tryParse(retry);
+      if (parsedRetry) return parsedRetry;
     }
   }
   if (hasOpenAI) {
     const out = await callOpenAI(prompt, img);
-    if (out) return extractJsonObject(out);
+    const parsed = await tryParse(out);
+    if (parsed) return parsed;
   }
   if (hasGemini && !img) {
     const out = await callGemini(prompt, img);
-    if (out) return extractJsonObject(out);
+    const parsed = await tryParse(out);
+    if (parsed) return parsed;
   }
   throw new Error(
     hasGemini
@@ -500,16 +583,23 @@ const CONFIRM_YES_RE = /^(כן|בטח|אישור|סבבה|אוקיי|אוקי|ok
 /** Dog (Johnny) and general family events must never be auto-assigned: always ask who it is for. */
 const GENERAL_EVENT_RE =
   /ג['׳’]?וני|וטרינר|כלב|חיסון|תספורת|ספרי?ת|מספרה|בדיקה|טיפול|כל המשפחה|ארוחת משפחה|אירוע משפחתי|משפחתי/;
+const CLINIC_APPT_RE = /תור|מרפאה|מכבי|כללית|מאוחדת|רופא|רופאת|קופ["׳']?ח/;
+const isClinicAppointment = (e: DraftEvent, text: string, sender: string | null) =>
+  CLINIC_APPT_RE.test(`${e.title ?? ""} ${e.keyword ?? ""} ${text} ${sender ?? ""}`);
 /**
  * Iron rule: haircut / vet / check-up / treatment events, anything about Johnny (including when "גוני/ג'וני"
  * is only the sender or chat name, e.g. "מירב גוני ספרית"), and general family events are NEVER assigned
  * automatically, whatever else the message says ("רועי רשמתי", "היי רועי", ...).
  */
-const isGeneralEvent = (e: DraftEvent, text: string, sender: string | null) =>
-  e.type === "dog" ||
-  GENERAL_EVENT_RE.test(`${e.title ?? ""} ${e.keyword ?? ""}`) ||
-  GENERAL_EVENT_RE.test(sender ?? "") ||
-  GENERAL_EVENT_RE.test(text);
+const isGeneralEvent = (e: DraftEvent, text: string, sender: string | null) => {
+  if (isClinicAppointment(e, text, sender)) return false;
+  return (
+    e.type === "dog" ||
+    GENERAL_EVENT_RE.test(`${e.title ?? ""} ${e.keyword ?? ""}`) ||
+    GENERAL_EVENT_RE.test(sender ?? "") ||
+    GENERAL_EVENT_RE.test(text)
+  );
+};
 
 /**
  * A name is only an owner when it appears outside greetings / acknowledgements such as
@@ -709,7 +799,7 @@ export async function POST(request: NextRequest) {
       draft = { ...previousDraft };
     } else {
       const prompt = buildPrompt(text, previousDraft, history, patterns, roster);
-      const parsed = (await runModel(prompt, imageBase64 ? { data: imageBase64, mime: imageMime } : null)) as
+      const parsed = (await runModel(prompt, imageBase64 ? { data: imageBase64, mime: imageMime } : null, roster)) as
         | Record<string, unknown>
         | null;
       const fromModel = sanitizeDraft(parsed, roster);
