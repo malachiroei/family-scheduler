@@ -29,7 +29,7 @@ const GEMINI_SAFETY = [
   { category: "HARM_CATEGORY_HATE_SPEECH", threshold: "BLOCK_NONE" },
   { category: "HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold: "BLOCK_NONE" },
   { category: "HARM_CATEGORY_DANGEROUS_CONTENT", threshold: "BLOCK_NONE" },
-];
+] as const;
 
 type Child = string;
 const childLabel = (roster: FamilyRoster, key: string | null | undefined) =>
@@ -495,7 +495,7 @@ const callGemini = async (prompt: string, img: { data: string; mime: string } | 
               responseMimeType: "application/json",
               maxOutputTokens: 2048,
               abortSignal: controller.signal,
-              safetySettings: GEMINI_SAFETY,
+              safetySettings: GEMINI_SAFETY as never,
             },
           });
           const text = textFromGeminiPayload(response) || String(response.text ?? "").trim();
