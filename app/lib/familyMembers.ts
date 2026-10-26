@@ -137,28 +137,43 @@ export const specForName = (name: string): KnownSpec => {
 };
 
 const HEBREW_NAME_RE = /[\u0590-\u05FF]/;
-const looksLikeId = (value: string) => /^[a-z][a-z0-9_]*$/i.test(value.trim());
 
-/** Canonical Hebrew label for a known member key/alias (amit → עמית). */
-export const canonicalHebrewName = (keyOrName: string): string | null => {
-  const trimmed = keyOrName.trim();
-  if (!trimmed) return null;
-  if (HEBREW_NAME_RE.test(trimmed) && KNOWN_BY_NAME[trimmed]) return trimmed;
-  const spec = specForName(trimmed);
-  const hebrew = Object.entries(KNOWN_BY_NAME).find(
-    ([label, known]) => known.key === spec.key && HEBREW_NAME_RE.test(label),
-  );
-  return hebrew?.[0] ?? null;
+/** Original-household English keys only. Never includes child1 / ילד 1. */
+const ENGLISH_ID_TO_HEBREW: Record<string, string> = {
+  amit: "עמית",
+  alin: "אלין",
+  ravid: "רביד",
+  roi: "רועי",
+  roei: "רועי",
+  roey: "רועי",
+  sivan: "סיון",
+  sivon: "סיון",
 };
 
-/** Filter chips / cards: never show raw ids like amit or roi_sivan. */
+export const looksLikeMemberId = (value: string) => /^[a-z][a-z0-9_]*$/i.test(value.trim());
+
+const isRealDisplayName = (value: string | null | undefined): value is string => {
+  const trimmed = (value ?? "").trim();
+  return Boolean(trimmed) && !isPlaceholderMemberName(trimmed) && !looksLikeMemberId(trimmed);
+};
+
+/** amit → עמית. Hebrew / unknown names are returned as-is; placeholders are never invented. */
+export const canonicalHebrewName = (keyOrName: string): string | null => {
+  const trimmed = keyOrName.trim();
+  if (!trimmed || isPlaceholderMemberName(trimmed)) return null;
+  if (HEBREW_NAME_RE.test(trimmed)) return trimmed;
+  const parts = trimmed.split(/[_+]+/).filter(Boolean);
+  if (parts.length > 1) {
+    const mapped = parts.map((part) => ENGLISH_ID_TO_HEBREW[part.toLowerCase()] ?? null);
+    return mapped.every(Boolean) ? mapped.join(" ו") : null;
+  }
+  return ENGLISH_ID_TO_HEBREW[trimmed.toLowerCase()] ?? null;
+};
+
+/** Filter chips / cards: translate known English IDs only; keep אריאל / אלון / any Hebrew. */
 export const displayNameForMemberKey = (key: string): string => {
   const trimmed = key.trim();
   if (!trimmed) return trimmed;
-  const parts = trimmed.split(/[_+]+/).filter(Boolean);
-  if (parts.length > 1) {
-    return parts.map((part) => canonicalHebrewName(part) ?? part).join(" ו");
-  }
   return canonicalHebrewName(trimmed) ?? trimmed;
 };
 
@@ -199,22 +214,23 @@ export const hydrateMember = (item: StoredFamilyMember, index: number, usedKeys?
     }
     usedKeys.add(key);
   }
-  const mappedName =
-    canonicalHebrewName(key) ??
-    canonicalHebrewName(name) ??
-    (looksLikeId(name) ? displayNameForMemberKey(name) : null) ??
-    (looksLikeId(key) ? displayNameForMemberKey(key) : null);
-  const displayName =
-    mappedName && !looksLikeId(mappedName) ? mappedName : key === "sivan" ? "סיון" : name;
+  // Custom roster names (אריאל, אלון, …) win. Only rewrite known English IDs.
+  // Never map leftover keys like child1 → "ילד 1" over a real stored name.
+  const translated = canonicalHebrewName(name) ?? canonicalHebrewName(key);
+  const displayName = isRealDisplayName(name)
+    ? name
+    : translated && isRealDisplayName(translated)
+      ? translated
+      : name;
   const pushName = spec.pushName ?? displayName;
   const genericKeyAliases =
-    key === "child1"
+    isPlaceholderMemberName(displayName) && key === "child1"
       ? ["ילד 1", "child1"]
-      : key === "child2"
+      : isPlaceholderMemberName(displayName) && key === "child2"
         ? ["ילד 2", "child2"]
-        : key === "parent1"
+        : isPlaceholderMemberName(displayName) && key === "parent1"
           ? ["הורה 1", "parent1"]
-          : key === "parent2"
+          : isPlaceholderMemberName(displayName) && key === "parent2"
             ? ["הורה 2", "parent2"]
             : [];
   const aliases = Array.from(
@@ -422,6 +438,8 @@ export const createFamilyRoster = (
   const isAllowedScheduleChild = (value: string): boolean => {
     const trimmed = value.trim();
     if (!trimmed) return false;
+    // Custom Hebrew names (אריאל, אלון, …) are valid even before the roster lists them.
+    if (!looksLikeMemberId(trimmed) && !isPlaceholderMemberName(trimmed)) return true;
     if (allowedScheduleChildKeys.includes(trimmed)) return true;
     if (resolveMemberKey(trimmed)) return true;
     const keys = parseMemberKeysFromChildField(trimmed);
@@ -431,14 +449,21 @@ export const createFamilyRoster = (
   const labelForMemberKey = (key: string): string => {
     const pair = pairByKey.get(key) ?? pairByKey.get(key.trim().toLowerCase());
     if (pair) {
-      return pair.keys.map((part) => {
-        const stored = byKey.get(part)?.name;
-        return stored && HEBREW_NAME_RE.test(stored) ? stored : displayNameForMemberKey(part);
-      }).join(" ו");
+      return pair.keys
+        .map((part) => {
+          const stored = byKey.get(part)?.name;
+          return isRealDisplayName(stored) ? stored : displayNameForMemberKey(part);
+        })
+        .join(" ו");
     }
-    const stored = byKey.get(key)?.name ?? childLabelMap[key];
-    if (stored && HEBREW_NAME_RE.test(stored) && !looksLikeId(stored)) return stored;
-    return displayNameForMemberKey(key);
+    const member = byKey.get(key) ?? getMemberByAnyName(key);
+    if (isRealDisplayName(member?.name)) return member.name;
+    if (isRealDisplayName(key)) return key;
+    const translated = canonicalHebrewName(key);
+    if (isRealDisplayName(translated)) return translated;
+    const mapped = childLabelMap[key];
+    if (isRealDisplayName(mapped)) return mapped;
+    return member?.name || key;
   };
 
   const memberDisplayNames = members.map((member) => member.name);

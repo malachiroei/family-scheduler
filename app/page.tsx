@@ -19,6 +19,7 @@ import {
   hydrateStoredMembers,
   isOriginalHouseholdEnabled,
   isPlaceholderMemberName,
+  looksLikeMemberId,
   specForName,
   type FamilyRoster,
   type FamilyRosterSource,
@@ -2015,23 +2016,27 @@ export default function FamilyScheduler() {
 
   // If settings still have placeholders, surface real names already present on this instance's events.
   useEffect(() => {
-    if (roster.source !== 'default') return;
+    const rosterIsPlaceholder = roster.members.every((member) => isPlaceholderMemberName(member.name));
+    if (roster.source !== 'default' && !rosterIsPlaceholder) return;
     const extras: StoredFamilyMember[] = [];
-    const seen = new Set(roster.members.map((member) => member.key));
+    const seen = new Set(roster.members.filter((member) => !isPlaceholderMemberName(member.name)).map((member) => member.key));
     for (const days of Object.values(weeksData)) {
       for (const day of days) {
         for (const event of day.events) {
           const name = String(event.child ?? '').trim();
           if (!name || isPlaceholderMemberName(name)) continue;
           const parts = name.split(/[_+]+/).filter(Boolean);
-          const knownParts = parts.length > 1 ? parts.filter((part) => canonicalHebrewName(part)) : [];
-          if (knownParts.length > 1 && knownParts.length === parts.length) {
-            const key = knownParts.map((part) => specForName(part).key).join('_');
+          const englishParts =
+            parts.length > 1 && parts.every((part) => looksLikeMemberId(part) && canonicalHebrewName(part))
+              ? parts
+              : [];
+          if (englishParts.length > 1) {
+            const key = englishParts.map((part) => specForName(part).key).join('_');
             if (seen.has(key) || roster.resolveMemberKey(name)) continue;
             seen.add(key);
             extras.push({
-              name: knownParts.map((part) => canonicalHebrewName(part) ?? part).join(' ו'),
-              role: specForName(knownParts[0]).role,
+              name: englishParts.map((part) => canonicalHebrewName(part) ?? part).join(' ו'),
+              role: specForName(englishParts[0]).role,
               key,
             });
             continue;
@@ -2039,7 +2044,11 @@ export default function FamilyScheduler() {
           const spec = specForName(name);
           if (seen.has(spec.key) || roster.resolveMemberKey(name)) continue;
           seen.add(spec.key);
-          extras.push({ name: canonicalHebrewName(name) ?? name, role: spec.role, key: spec.key });
+          extras.push({
+            name: looksLikeMemberId(name) ? canonicalHebrewName(name) ?? name : name,
+            role: spec.role,
+            key: spec.key,
+          });
         }
       }
     }

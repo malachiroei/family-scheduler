@@ -8,7 +8,7 @@ import {
   parseScheduleMetadata,
 } from "@/app/lib/scheduleTable";
 import { sendPushToAll, sendPushToParents } from "@/app/lib/push";
-import { fallbackRoster, type FamilyRoster } from "@/app/lib/familyMembers";
+import { fallbackRoster, isPlaceholderMemberName, looksLikeMemberId, type FamilyRoster } from "@/app/lib/familyMembers";
 import { loadFamilyRoster, peekFamilyRoster } from "@/app/lib/familyRosterStore";
 import { parseFlexibleDate, weekdayIndexUtc } from "@/app/lib/scheduleDate";
 import { resolveGeminiApiKey } from "@/app/lib/llmKeys";
@@ -242,7 +242,8 @@ const sanitizeDbEvent = (event: unknown, roster: FamilyRoster = fallbackRoster) 
       : (typeof candidate.eventTime === "string" ? candidate.eventTime.trim() : ""));
   const time = normalizeClock(timeRaw);
 
-  const child = typeof candidate.child === "string" ? candidate.child.trim().toLowerCase() : "";
+  const childRaw = typeof candidate.child === "string" ? candidate.child.trim() : "";
+  const child = looksLikeMemberId(childRaw) ? childRaw.toLowerCase() : childRaw;
   const title = typeof candidate.title === "string"
     ? candidate.title.trim()
     : (typeof candidate.text === "string" ? candidate.text.trim() : "");
@@ -570,11 +571,12 @@ const upsertScheduleEvent = async (incoming: ReturnType<typeof sanitizeDbEvent>)
 
     const meta = parseScheduleMetadata(saved.metadata);
     const savedDate = parseFlexibleDate(saved.date) || parseFlexibleDate(meta.eventDate) || incoming.date;
-    const savedChildRaw = meta.child.trim().toLowerCase();
+    const savedChildRaw = meta.child.trim();
     const rosterForSaved = await loadFamilyRoster();
-    const savedChild = rosterForSaved.isAllowedScheduleChild(savedChildRaw)
-      ? rosterForSaved.resolveMemberKey(savedChildRaw) ?? savedChildRaw
-      : rosterForSaved.defaultChildKey;
+    const savedChild =
+      savedChildRaw && !looksLikeMemberId(savedChildRaw) && !isPlaceholderMemberName(savedChildRaw)
+        ? savedChildRaw
+        : rosterForSaved.resolveMemberKey(savedChildRaw) || savedChildRaw || rosterForSaved.defaultChildKey;
 
     return {
       ok: true as const,
@@ -692,9 +694,11 @@ async function handleGet() {
       const meta = parseScheduleMetadata(r.metadata);
       const normalizedDate = parseFlexibleDate(r.date) || parseFlexibleDate(meta.eventDate) || "";
       const rawChild = meta.child.trim();
-      // Keep names that this instance actually stored (אריאל, אלון, …). Only remap when the
-      // current roster recognizes the value — never collapse unknown people to "ילד 1".
-      const normalizedChild = roster.resolveMemberKey(rawChild) || rawChild || roster.defaultChildKey;
+      // Keep Hebrew / custom assignees (אריאל, אלון) exactly. Only resolve known English IDs.
+      const normalizedChild =
+        rawChild && !looksLikeMemberId(rawChild) && !isPlaceholderMemberName(rawChild)
+          ? rawChild
+          : roster.resolveMemberKey(rawChild) || rawChild || roster.defaultChildKey;
 
       return {
         id: r.id,

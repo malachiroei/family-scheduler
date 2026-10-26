@@ -13,6 +13,7 @@ import {
   FAMILY_ROSTER_STATE_KEY,
   hydrateStoredMembers,
   isPlaceholderMemberName,
+  looksLikeMemberId,
   runtimeEnvFamilyMemberNames,
   serializeFamilyMembers,
   specForName,
@@ -179,14 +180,17 @@ const inferMembersFromSchedule = async (): Promise<StoredFamilyMember[] | null> 
       const name = typeof raw.child === "string" ? raw.child.trim() : "";
       if (!name || isPlaceholderMemberName(name)) continue;
       const parts = name.split(/[_+]+/).filter(Boolean);
-      const knownParts = parts.length > 1 ? parts.filter((part) => canonicalHebrewName(part)) : [];
-      if (knownParts.length > 1 && knownParts.length === parts.length) {
-        const key = knownParts.map((part) => specForName(part).key).join("_");
+      const englishParts =
+        parts.length > 1 && parts.every((part) => looksLikeMemberId(part) && canonicalHebrewName(part))
+          ? parts
+          : [];
+      if (englishParts.length > 1) {
+        const key = englishParts.map((part) => specForName(part).key).join("_");
         if (seen.has(key) || isPlaceholderMemberName(key)) continue;
         seen.add(key);
         members.push({
-          name: knownParts.map((part) => canonicalHebrewName(part) ?? part).join(" ו"),
-          role: specForName(knownParts[0]).role,
+          name: englishParts.map((part) => canonicalHebrewName(part) ?? part).join(" ו"),
+          role: specForName(englishParts[0]).role,
           key,
         });
         continue;
@@ -194,7 +198,11 @@ const inferMembersFromSchedule = async (): Promise<StoredFamilyMember[] | null> 
       const spec = specForName(name);
       if (seen.has(spec.key) || isPlaceholderMemberName(spec.key)) continue;
       seen.add(spec.key);
-      members.push({ name: canonicalHebrewName(name) ?? name, role: spec.role, key: spec.key });
+      members.push({
+        name: looksLikeMemberId(name) ? canonicalHebrewName(name) ?? name : name,
+        role: spec.role,
+        key: spec.key,
+      });
     }
     return members.length ? members : null;
   } catch (error) {
@@ -217,9 +225,13 @@ export const loadFamilyRoster = async (): Promise<FamilyRoster> => {
       const members = hydrateStoredMembers(stored);
       const roster = createFamilyRoster(members, "db");
       rosterCache = { roster, at: Date.now() };
-      if (stored.some((member) => /^[a-z][a-z0-9_]*$/i.test(member.name.trim()))) {
+      const shouldRewriteEnglishIds = stored.some(
+        (member) => looksLikeMemberId(member.name) && Boolean(canonicalHebrewName(member.name)),
+      );
+      const rewritten = serializeFamilyMembers(members);
+      if (shouldRewriteEnglishIds && rewritten.some((member) => !isPlaceholderMemberName(member.name))) {
         try {
-          await saveFamilyRoster(serializeFamilyMembers(members));
+          await saveFamilyRoster(rewritten);
         } catch (error) {
           console.warn("[family-roster] hebrew name cleanup save skipped", error);
         }
@@ -234,8 +246,14 @@ export const loadFamilyRoster = async (): Promise<FamilyRoster> => {
     }
     const inferred = await inferMembersFromSchedule();
     if (inferred?.length) {
-      const roster = createFamilyRoster(hydrateStoredMembers(inferred), "schedule");
+      const members = hydrateStoredMembers(inferred);
+      const roster = createFamilyRoster(members, "schedule");
       rosterCache = { roster, at: Date.now() };
+      try {
+        await saveFamilyRoster(serializeFamilyMembers(members));
+      } catch (error) {
+        console.warn("[family-roster] schedule restore save skipped", error);
+      }
       return roster;
     }
     rosterCache = { roster: fallbackRoster, at: Date.now() };
