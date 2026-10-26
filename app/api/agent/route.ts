@@ -22,7 +22,7 @@ export const revalidate = 0;
 export const maxDuration = 60;
 
 const GEMINI_MODELS = ["gemini-3.8-flash", "gemini-2.5-flash"] as const;
-const GEMINI_TIMEOUT_MS = 12_000;
+const GEMINI_TIMEOUT_MS = 28_000;
 const GEMINI_SAFETY = [
   { category: "HARM_CATEGORY_HARASSMENT", threshold: "BLOCK_NONE" },
   { category: "HARM_CATEGORY_HATE_SPEECH", threshold: "BLOCK_NONE" },
@@ -353,22 +353,6 @@ ${hist ? `היסטוריית שיחה:\n${hist}\n` : ""}קלט חדש מהמשת
 {"sender_or_group": string|null, "child_name": ${roster.memberKeys.map((k) => `"${k}"`).join("|")}|null, "events": [{"date": "YYYY-MM-DD"|null, "time": "HH:mm"|null, "title": string|null, "type": "dog|gym|sport|lesson|dance|other"|null, "keyword": string|null}]}`;
 };
 
-/** Short vision prompt: read whatever is in the screenshot, do not assume a specific person. */
-const buildImagePrompt = (text: string, roster: FamilyRoster) => {
-  const now = israelNow();
-  const people = roster.members.map((m) => `${m.name}=${m.key}`).join(", ");
-  return `קראי את צילום המסך וחלצי את האירועים שכתובים בו בלבד. אל תמציאי פרטים שלא נראים.
-היום: ${now.iso} (${now.weekday}), Asia/Jerusalem.
-כל כרטיס / הודעה / שורת יומן = אירוע נפרד.
-date=YYYY-MM-DD (28/10/26 → 2026-10-28). time=HH:mm שעת התחלה.
-title=הכותרת שכתובה (תור במרפאה, אימון, שיעור...).
-אם כתוב על הכרטיס שם מאלה, זה הבעלים: ${people}. שימי את המפתח ב-child_name ואת השם ב-keyword.
-type: מרפאה/תור/רופא=other, אימון/משחק=sport, שיעור=lesson, כלב=dog.
-${text ? `הערת המשתמש: ${text}` : ""}
-החזירי JSON בלבד:
-{"sender_or_group": string|null, "child_name": string|null, "events":[{"date":"YYYY-MM-DD"|null,"time":"HH:mm"|null,"title":string|null,"type":"dog|gym|sport|lesson|dance|other"|null,"keyword":string|null}]}`;
-};
-
 const extractJsonObject = (t: string) => {
   if (!t) return null;
   const cleaned = t.replace(/```(?:json)?/gi, "").trim();
@@ -492,8 +476,10 @@ const callGemini = async (prompt: string, img: { data: string; mime: string } | 
         return await callGeminiRest(key, model, parts, controller.signal);
       } catch (error) {
         lastErr = error instanceof Error ? error.message : String(error);
+        const aborted = /aborted|AbortError|The operation was aborted/i.test(lastErr);
         const gone = /404|no longer available|NOT_FOUND/i.test(lastErr);
         console.error(`[agent] Gemini ${model} failed:`, lastErr);
+        if (aborted) throw new Error("קריאת הצילום לקחה יותר מדי זמן. נסי שוב.");
         if (!gone) throw error;
       }
     }
@@ -695,8 +681,8 @@ export async function POST(request: NextRequest) {
     const multiKids: Child[] | null =
       replyKids && replyKids.length > 1 ? replyKids : mentionedKids.length > 1 ? mentionedKids : null;
 
-    // Fast path (owner reply / screenshot OCR) skips learned-pattern DB work.
-    const patterns = replyChild || imageBase64 ? [] : await loadPatterns();
+    // Fast path (owner reply) needs no learned patterns: skip that DB work entirely.
+    const patterns = replyChild ? [] : await loadPatterns();
 
     let draft: Draft;
     if (spreadsheetUploaded) {
@@ -758,45 +744,26 @@ export async function POST(request: NextRequest) {
     ) {
       draft = { ...previousDraft };
     } else {
-      const prompt = imageBase64
-        ? buildImagePrompt(text, roster)
-        : buildPrompt(text, previousDraft, history, patterns, roster);
+      const prompt = buildPrompt(text, previousDraft, history, patterns, roster);
       const parsed = (await runModel(prompt, imageBase64 ? { data: imageBase64, mime: imageMime } : null)) as
         | Record<string, unknown>
         | null;
       const fromModel = sanitizeDraft(parsed, roster);
       // Never infer an owner from a greeting/acknowledgement ("היי רועי", "רועי רשמתי", "תודה רועי").
-      // For screenshots, trust the name the model read on the card.
+      // For screenshots the model may set child_name from a name written on the card.
       const verifiedModelChild =
         fromModel.child_name && !imageBase64 && !isExplicitOwnerMention(text, fromModel.child_name, roster)
           ? null
           : fromModel.child_name;
-      const ownerFromCard = imageBase64
-        ? [...new Set(
-            [fromModel.child_name, fromModel.sender_or_group, ...fromModel.events.flatMap((e) => [e.keyword, e.title])]
-              .map((value) => normalizeChild(value, roster))
-              .filter((value): value is Child => Boolean(value)),
-          )]
-        : [];
-      draft = imageBase64
-        ? {
-            events: fromModel.events,
-            child_name: verifiedModelChild ?? (ownerFromCard.length === 1 ? ownerFromCard[0] : null),
-            sender_or_group: fromModel.sender_or_group,
-            needs_confirm: false,
-            import_kind: null,
-            league: null,
-            team: null,
-          }
-        : {
-            events: fromModel.events.length > 0 ? fromModel.events : previousDraft.events,
-            child_name: verifiedModelChild ?? previousDraft.child_name,
-            sender_or_group: fromModel.sender_or_group ?? previousDraft.sender_or_group,
-            needs_confirm: previousDraft.needs_confirm === true,
-            import_kind: previousDraft.import_kind,
-            league: previousDraft.league,
-            team: previousDraft.team,
-          };
+      draft = {
+        events: fromModel.events.length > 0 ? fromModel.events : previousDraft.events,
+        child_name: verifiedModelChild ?? previousDraft.child_name,
+        sender_or_group: fromModel.sender_or_group ?? previousDraft.sender_or_group,
+        needs_confirm: previousDraft.needs_confirm === true,
+        import_kind: previousDraft.import_kind,
+        league: previousDraft.league,
+        team: previousDraft.team,
+      };
     }
 
     if (multiKids) draft.child_name = multiKids[0];
