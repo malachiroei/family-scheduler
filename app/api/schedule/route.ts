@@ -11,6 +11,7 @@ import { sendPushToAll, sendPushToParents } from "@/app/lib/push";
 import { fallbackRoster, type FamilyRoster } from "@/app/lib/familyMembers";
 import { loadFamilyRoster, peekFamilyRoster } from "@/app/lib/familyRosterStore";
 import { parseFlexibleDate, weekdayIndexUtc } from "@/app/lib/scheduleDate";
+import { resolveGeminiApiKey } from "@/app/lib/llmKeys";
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
@@ -1228,7 +1229,7 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: "Text or image is required" }, { status: 400 });
     }
 
-    const apiKey = process.env.GEMINI_API_KEY || process.env.NEXT_PUBLIC_GEMINI_API_KEY;
+    const apiKey = resolveGeminiApiKey();
     if (!apiKey) {
       return NextResponse.json(
         { error: "Missing GEMINI_API_KEY (or NEXT_PUBLIC_GEMINI_API_KEY) on server" },

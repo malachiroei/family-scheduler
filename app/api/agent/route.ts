@@ -16,6 +16,8 @@ import {
 import { loadFamilyRoster } from "@/app/lib/familyRosterStore";
 import { recordAgentInteraction } from "@/app/lib/agentHistoryStore";
 import { parseFlexibleDate, weekdayIndexUtc } from "@/app/lib/scheduleDate";
+import { applyGeminiKeyToProcessEnv, resolveGeminiApiKey, resolveOpenAIApiKey } from "@/app/lib/llmKeys";
+import { GoogleGenAI } from "@google/genai";
 
 export const revalidate = 0;
 export const maxDuration = 60;
@@ -357,7 +359,7 @@ const extractJsonObject = (t: string) => {
 };
 
 const callOpenAI = async (prompt: string, img: { data: string; mime: string } | null) => {
-  const key = process.env.OPENAI_API_KEY;
+  const key = resolveOpenAIApiKey();
   if (!key) return null;
   const content: Array<Record<string, unknown>> = [{ type: "text", text: prompt }];
   if (img) content.push({ type: "image_url", image_url: { url: `data:${img.mime};base64,${img.data}` } });
@@ -376,16 +378,44 @@ const callOpenAI = async (prompt: string, img: { data: string; mime: string } | 
   return String(data?.choices?.[0]?.message?.content ?? "");
 };
 
+const getGoogleGenAI = () => {
+  const apiKey = applyGeminiKeyToProcessEnv();
+  if (!apiKey) return null;
+  try {
+    return new GoogleGenAI({ apiKey });
+  } catch (error) {
+    console.error("[agent] GoogleGenAI init failed", error);
+    return null;
+  }
+};
+
 const callGemini = async (prompt: string, img: { data: string; mime: string } | null) => {
-  const key = process.env.GEMINI_API_KEY || process.env.NEXT_PUBLIC_GEMINI_API_KEY;
+  const key = applyGeminiKeyToProcessEnv();
   if (!key) return null;
-  const parts: Array<Record<string, unknown>> = [{ text: prompt }];
-  if (img) parts.push({ inlineData: { mimeType: img.mime, data: img.data } });
+  const parts: Array<{ text?: string; inlineData?: { mimeType: string; data: string } }> = [{ text: prompt }];
+  if (img) parts.push({ inlineData: { mimeType: img.mime || "image/jpeg", data: img.data } });
   let lastErr = "";
+  const ai = getGoogleGenAI();
   for (const model of GEMINI_MODELS) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), GEMINI_TIMEOUT_MS);
     try {
+      if (ai) {
+        const response = await ai.models.generateContent({
+          model,
+          contents: [{ role: "user", parts }],
+          config: {
+            temperature: 0,
+            responseMimeType: "application/json",
+            maxOutputTokens: 2048,
+            abortSignal: controller.signal,
+          },
+        });
+        const text = String(response.text ?? "").trim();
+        if (text) return text;
+        lastErr = `Gemini ${model} empty response`;
+        continue;
+      }
       const res = await fetch(
         `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${key}`,
         {
@@ -418,12 +448,17 @@ const callGemini = async (prompt: string, img: { data: string; mime: string } | 
       clearTimeout(timer);
     }
   }
-  throw new Error(lastErr);
+  throw new Error(lastErr || "Gemini request failed");
 };
 
 const runModel = async (prompt: string, img: { data: string; mime: string } | null) => {
+  const hasGemini = Boolean(resolveGeminiApiKey());
+  const hasOpenAI = Boolean(resolveOpenAIApiKey());
+  if (!hasGemini && !hasOpenAI) {
+    throw new Error("Missing GEMINI_API_KEY / NEXT_PUBLIC_GEMINI_API_KEY");
+  }
   // Screenshots go to Gemini Flash first — OpenAI vision regularly exceeds Vercel's limit.
-  if (img) {
+  if (img && hasGemini) {
     const gemini = await callGemini(prompt, img).catch((error) => {
       console.error("[agent] Gemini OCR failed, trying OpenAI", error);
       return null;
@@ -433,9 +468,19 @@ const runModel = async (prompt: string, img: { data: string; mime: string } | nu
       if (parsed) return parsed;
     }
   }
-  const out = (await callOpenAI(prompt, img)) ?? (img ? null : await callGemini(prompt, img));
-  if (out === null) throw new Error("Missing OPENAI_API_KEY / GEMINI_API_KEY");
-  return extractJsonObject(out);
+  if (hasOpenAI) {
+    const out = await callOpenAI(prompt, img);
+    if (out) return extractJsonObject(out);
+  }
+  if (hasGemini && !img) {
+    const out = await callGemini(prompt, img);
+    if (out) return extractJsonObject(out);
+  }
+  throw new Error(
+    hasGemini
+      ? "Gemini returned an empty or invalid response"
+      : "Missing GEMINI_API_KEY / NEXT_PUBLIC_GEMINI_API_KEY",
+  );
 };
 
 /* ---------- questions ---------- */
