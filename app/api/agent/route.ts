@@ -17,13 +17,12 @@ import { loadFamilyRoster } from "@/app/lib/familyRosterStore";
 import { recordAgentInteraction } from "@/app/lib/agentHistoryStore";
 import { parseFlexibleDate, weekdayIndexUtc } from "@/app/lib/scheduleDate";
 import { applyGeminiKeyToProcessEnv, resolveGeminiApiKey, resolveOpenAIApiKey } from "@/app/lib/llmKeys";
-import { GoogleGenAI } from "@google/genai";
 
 export const revalidate = 0;
 export const maxDuration = 60;
 
-const GEMINI_MODELS = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash-latest", "gemini-1.5-flash"] as const;
-const GEMINI_TIMEOUT_MS = 25_000;
+const GEMINI_MODELS = ["gemini-2.0-flash"] as const;
+const GEMINI_TIMEOUT_MS = 12_000;
 const GEMINI_SAFETY = [
   { category: "HARM_CATEGORY_HARASSMENT", threshold: "BLOCK_NONE" },
   { category: "HARM_CATEGORY_HATE_SPEECH", threshold: "BLOCK_NONE" },
@@ -354,6 +353,22 @@ ${hist ? `היסטוריית שיחה:\n${hist}\n` : ""}קלט חדש מהמשת
 {"sender_or_group": string|null, "child_name": ${roster.memberKeys.map((k) => `"${k}"`).join("|")}|null, "events": [{"date": "YYYY-MM-DD"|null, "time": "HH:mm"|null, "title": string|null, "type": "dog|gym|sport|lesson|dance|other"|null, "keyword": string|null}]}`;
 };
 
+/** Short vision prompt: read whatever is in the screenshot, do not assume a specific person. */
+const buildImagePrompt = (text: string, roster: FamilyRoster) => {
+  const now = israelNow();
+  const people = roster.members.map((m) => `${m.name}=${m.key}`).join(", ");
+  return `קראי את צילום המסך וחלצי את האירועים שכתובים בו בלבד. אל תמציאי פרטים שלא נראים.
+היום: ${now.iso} (${now.weekday}), Asia/Jerusalem.
+כל כרטיס / הודעה / שורת יומן = אירוע נפרד.
+date=YYYY-MM-DD (28/10/26 → 2026-10-28). time=HH:mm שעת התחלה.
+title=הכותרת שכתובה (תור במרפאה, אימון, שיעור...).
+אם כתוב על הכרטיס שם מאלה, זה הבעלים: ${people}. שימי את המפתח ב-child_name ואת השם ב-keyword.
+type: מרפאה/תור/רופא=other, אימון/משחק=sport, שיעור=lesson, כלב=dog.
+${text ? `הערת המשתמש: ${text}` : ""}
+החזירי JSON בלבד:
+{"sender_or_group": string|null, "child_name": string|null, "events":[{"date":"YYYY-MM-DD"|null,"time":"HH:mm"|null,"title":string|null,"type":"dog|gym|sport|lesson|dance|other"|null,"keyword":string|null}]}`;
+};
+
 const extractJsonObject = (t: string) => {
   if (!t) return null;
   const cleaned = t.replace(/```(?:json)?/gi, "").trim();
@@ -420,17 +435,6 @@ const callOpenAI = async (prompt: string, img: { data: string; mime: string } | 
   return String(data?.choices?.[0]?.message?.content ?? "");
 };
 
-const getGoogleGenAI = () => {
-  const apiKey = applyGeminiKeyToProcessEnv();
-  if (!apiKey) return null;
-  try {
-    return new GoogleGenAI({ apiKey });
-  } catch (error) {
-    console.error("[agent] GoogleGenAI init failed", error);
-    return null;
-  }
-};
-
 const callGeminiRest = async (
   key: string,
   model: string,
@@ -479,86 +483,32 @@ const callGemini = async (prompt: string, img: { data: string; mime: string } | 
     ? { inlineData: { mimeType: img.mime || "image/jpeg", data: img.data.replace(/\s+/g, "") } }
     : null;
   const parts = imagePart ? [imagePart, { text: prompt }] : [{ text: prompt }];
-  let lastErr = "";
-  const ai = getGoogleGenAI();
-  for (const model of GEMINI_MODELS) {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), GEMINI_TIMEOUT_MS);
-    try {
-      if (ai) {
-        try {
-          const response = await ai.models.generateContent({
-            model,
-            contents: parts,
-            config: {
-              temperature: 0,
-              responseMimeType: "application/json",
-              maxOutputTokens: 2048,
-              abortSignal: controller.signal,
-              safetySettings: GEMINI_SAFETY as never,
-            },
-          });
-          const text = textFromGeminiPayload(response) || String(response.text ?? "").trim();
-          if (text) return text;
-          console.warn("[agent] Gemini SDK empty", model, response.promptFeedback ?? response.candidates?.[0]);
-        } catch (sdkError) {
-          lastErr = `Gemini SDK ${model} ${sdkError instanceof Error ? sdkError.message : String(sdkError)}`;
-          console.error("[agent] Gemini SDK failed, trying REST", lastErr);
-        }
-      }
-      return await callGeminiRest(key, model, parts, controller.signal);
-    } catch (error) {
-      lastErr = `Gemini ${model} ${error instanceof Error ? error.message : String(error)}`;
-      console.error(`[agent] Gemini request failed (model=${model}):`, error);
-    } finally {
-      clearTimeout(timer);
-    }
+  const model = GEMINI_MODELS[0];
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), GEMINI_TIMEOUT_MS);
+  try {
+    return await callGeminiRest(key, model, parts, controller.signal);
+  } finally {
+    clearTimeout(timer);
   }
-  throw new Error(lastErr || "Gemini request failed");
 };
 
-const compactOcrPrompt = (fullPrompt: string, roster: FamilyRoster) =>
-  `${fullPrompt}
-
-החזר JSON תקין בלבד. אם זו כרטיסיית תור אחת — events באורך 1, עם date/time/title. child_name אם כתוב שם מ: ${roster.memberDisplayNames.join(", ")}.`;
-
-const runModel = async (prompt: string, img: { data: string; mime: string } | null, roster: FamilyRoster) => {
+const runModel = async (prompt: string, img: { data: string; mime: string } | null) => {
   const hasGemini = Boolean(resolveGeminiApiKey());
   const hasOpenAI = Boolean(resolveOpenAIApiKey());
   if (!hasGemini && !hasOpenAI) {
     throw new Error("Missing GEMINI_API_KEY / NEXT_PUBLIC_GEMINI_API_KEY");
   }
-  const tryParse = async (raw: string | null) => {
-    if (!raw) return null;
-    return extractJsonObject(raw);
-  };
-  // Screenshots go to Gemini Flash first — OpenAI vision regularly exceeds Vercel's limit.
-  if (img && hasGemini) {
-    const first = await callGemini(prompt, img).catch((error) => {
-      console.error("[agent] Gemini OCR failed", error);
-      return null;
-    });
-    const parsed = await tryParse(first);
+  if (img) {
+    if (!hasGemini) throw new Error("Missing GEMINI_API_KEY / NEXT_PUBLIC_GEMINI_API_KEY");
+    const raw = await callGemini(prompt, img);
+    const parsed = raw ? extractJsonObject(raw) : null;
     if (parsed) return parsed;
-    if (first) {
-      const retry = await callGemini(compactOcrPrompt(prompt, roster), img).catch((error) => {
-        console.error("[agent] Gemini OCR retry failed", error);
-        return null;
-      });
-      const parsedRetry = await tryParse(retry);
-      if (parsedRetry) return parsedRetry;
-    }
+    throw new Error("לא הצלחתי לקרוא את הצילום. נסי שוב עם אותה תמונה.");
   }
-  if (hasOpenAI) {
-    const out = await callOpenAI(prompt, img);
-    const parsed = await tryParse(out);
-    if (parsed) return parsed;
-  }
-  if (hasGemini && !img) {
-    const out = await callGemini(prompt, img);
-    const parsed = await tryParse(out);
-    if (parsed) return parsed;
-  }
+  const out = (await callOpenAI(prompt, null)) ?? (await callGemini(prompt, null));
+  const parsed = out ? extractJsonObject(out) : null;
+  if (parsed) return parsed;
   throw new Error(
     hasGemini
       ? "Gemini returned an empty or invalid response"
@@ -735,8 +685,8 @@ export async function POST(request: NextRequest) {
     const multiKids: Child[] | null =
       replyKids && replyKids.length > 1 ? replyKids : mentionedKids.length > 1 ? mentionedKids : null;
 
-    // Fast path (owner reply) needs no learned patterns: skip that DB work entirely.
-    const patterns = replyChild ? [] : await loadPatterns();
+    // Fast path (owner reply / screenshot OCR) skips learned-pattern DB work.
+    const patterns = replyChild || imageBase64 ? [] : await loadPatterns();
 
     let draft: Draft;
     if (spreadsheetUploaded) {
@@ -798,27 +748,45 @@ export async function POST(request: NextRequest) {
     ) {
       draft = { ...previousDraft };
     } else {
-      const prompt = buildPrompt(text, previousDraft, history, patterns, roster);
-      const parsed = (await runModel(prompt, imageBase64 ? { data: imageBase64, mime: imageMime } : null, roster)) as
+      const prompt = imageBase64
+        ? buildImagePrompt(text, roster)
+        : buildPrompt(text, previousDraft, history, patterns, roster);
+      const parsed = (await runModel(prompt, imageBase64 ? { data: imageBase64, mime: imageMime } : null)) as
         | Record<string, unknown>
         | null;
       const fromModel = sanitizeDraft(parsed, roster);
       // Never infer an owner from a greeting/acknowledgement ("היי רועי", "רועי רשמתי", "תודה רועי").
-      // For plain text we can verify it; for screenshots the prompt rule applies (plus the general-event rule below).
+      // For screenshots, trust the name the model read on the card.
       const verifiedModelChild =
         fromModel.child_name && !imageBase64 && !isExplicitOwnerMention(text, fromModel.child_name, roster)
           ? null
           : fromModel.child_name;
-      draft = {
-        // The model returns the full merged list; if it returns none, keep what we had.
-        events: fromModel.events.length > 0 ? fromModel.events : previousDraft.events,
-        child_name: verifiedModelChild ?? previousDraft.child_name,
-        sender_or_group: fromModel.sender_or_group ?? previousDraft.sender_or_group,
-        needs_confirm: previousDraft.needs_confirm === true,
-        import_kind: previousDraft.import_kind,
-        league: previousDraft.league,
-        team: previousDraft.team,
-      };
+      const ownerFromCard = imageBase64
+        ? [...new Set(
+            [fromModel.child_name, fromModel.sender_or_group, ...fromModel.events.flatMap((e) => [e.keyword, e.title])]
+              .map((value) => normalizeChild(value, roster))
+              .filter((value): value is Child => Boolean(value)),
+          )]
+        : [];
+      draft = imageBase64
+        ? {
+            events: fromModel.events,
+            child_name: verifiedModelChild ?? (ownerFromCard.length === 1 ? ownerFromCard[0] : null),
+            sender_or_group: fromModel.sender_or_group,
+            needs_confirm: false,
+            import_kind: null,
+            league: null,
+            team: null,
+          }
+        : {
+            events: fromModel.events.length > 0 ? fromModel.events : previousDraft.events,
+            child_name: verifiedModelChild ?? previousDraft.child_name,
+            sender_or_group: fromModel.sender_or_group ?? previousDraft.sender_or_group,
+            needs_confirm: previousDraft.needs_confirm === true,
+            import_kind: previousDraft.import_kind,
+            league: previousDraft.league,
+            team: previousDraft.team,
+          };
     }
 
     if (multiKids) draft.child_name = multiKids[0];

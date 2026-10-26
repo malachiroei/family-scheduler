@@ -334,7 +334,7 @@ export default function AgentChat({
 
   // Sync the shared conversation only while the agent is open (not on every page load).
   useEffect(() => {
-    if (!historyLoaded || !open) return;
+    if (!historyLoaded || !open || busy) return;
     void syncFromServer();
     const run = () => {
       if (document.visibilityState === "hidden") return;
@@ -348,7 +348,7 @@ export default function AgentChat({
       document.removeEventListener("visibilitychange", run);
       window.removeEventListener("focus", run);
     };
-  }, [open, historyLoaded, syncFromServer]);
+  }, [open, historyLoaded, syncFromServer, busy]);
 
   // Cache the last N messages locally (without image payloads) for instant display next time.
   // Example prompts are never cached.
