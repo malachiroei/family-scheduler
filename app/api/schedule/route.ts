@@ -11,6 +11,7 @@ import { sendPushToAll, sendPushToParents } from "@/app/lib/push";
 import { fallbackRoster, isPlaceholderMemberName, looksLikeMemberId, type FamilyRoster } from "@/app/lib/familyMembers";
 import { loadFamilyRoster, peekFamilyRoster } from "@/app/lib/familyRosterStore";
 import { parseFlexibleDate, weekdayIndexUtc } from "@/app/lib/scheduleDate";
+import { dateForWeekdayInRange, parseHebrewScheduleRange, parseWeeklyScheduleMessage } from "@/app/lib/weeklyScheduleParse";
 import { resolveGeminiApiKey } from "@/app/lib/llmKeys";
 
 export const dynamic = 'force-dynamic';
@@ -401,6 +402,28 @@ const defaultWeekStartIso = (): string => {
 };
 
 const parseBulkEventsFromText = (text: string, weekStartIso: string, roster: FamilyRoster = fallbackRoster) => {
+  const headerRange = parseHebrewScheduleRange(text);
+  if (headerRange) {
+    try {
+      const weekly = parseWeeklyScheduleMessage(text, { viewedWeekStart: weekStartIso });
+      if (weekly && weekly.events.length > 0) {
+        const child = weekly.assigneeName
+          ? (roster.resolveMemberKey(weekly.assigneeName) ?? roster.defaultChildKey)
+          : roster.defaultChildKey;
+        return weekly.events.map((event) => ({
+          date: event.date,
+          dayIndex: event.dayIndex,
+          time: event.time,
+          child,
+          title: event.title,
+          type: event.type,
+        }));
+      }
+    } catch (error) {
+      console.error("[schedule] weekly range parse failed", error);
+    }
+  }
+
   const lines = text
     .split(/\r?\n/)
     .map((line) => line.trim())
@@ -454,7 +477,9 @@ const parseBulkEventsFromText = (text: string, weekStartIso: string, roster: Fam
         continue;
       }
 
-      const resolvedDate = dateForWeekDay(weekStartIso, dayIndex);
+      const resolvedDate = headerRange
+        ? dateForWeekdayInRange(headerRange, dayIndex) ?? dateForWeekDay(weekStartIso, dayIndex)
+        : dateForWeekDay(weekStartIso, dayIndex);
       if (!resolvedDate) {
         continue;
       }

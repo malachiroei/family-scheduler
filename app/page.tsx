@@ -10,6 +10,13 @@ import { applyDocumentFavicon, appIconSrc, defaultAppBranding, mergeAppBranding,
 import { clearPwaInstallPrompt, getPwaInstallPrompt } from '@/app/lib/pwaInstall';
 import { normalizeMetadataTime, parseMetadataBoolean } from '@/app/lib/scheduleTime';
 import { parseFlexibleDate } from '@/app/lib/scheduleDate';
+import {
+  dateForWeekdayInRange,
+  leadingClockRange,
+  parseHebrewScheduleRange,
+  parseWeeklyScheduleMessage,
+  weekStartDateForRange,
+} from '@/app/lib/weeklyScheduleParse';
 import { fixtureLeagueBadge } from '@/app/lib/fixtureLeague';
 import {
   canonicalHebrewName,
@@ -968,12 +975,53 @@ const parseComplexWhatsAppMessage = (
     return null;
   }
 
+  const headerRange = parseHebrewScheduleRange(text);
+  const weekAnchor = headerRange ? weekStartDateForRange(headerRange) : getWeekStart(weekStart);
+  const isoForScheduleDay = (dayIndex: number, hasToday = false): string => {
+    if (hasToday) return toIsoDate(new Date());
+    if (headerRange) {
+      const inRange = dateForWeekdayInRange(headerRange, dayIndex);
+      if (inRange) return inRange;
+    }
+    return toIsoDate(addDays(weekAnchor, dayIndex));
+  };
+
+  if (headerRange) {
+    try {
+      const weekly = parseWeeklyScheduleMessage(text, { viewedWeekStart: weekStart });
+      if (weekly && weekly.events.length > 0) {
+        const coachChild = weekly.assigneeName ? normalizeChildKey(weekly.assigneeName) : null;
+        const headerChild =
+          coachChild ??
+          weekly.assigneeName ??
+          defaultChildFromHeader ??
+          inferScheduleHeaderChild(text) ??
+          detectChildFromText(text) ??
+          defaultChildKeyValue();
+        return {
+          targetWeekStart: weekAnchor,
+          events: weekly.events.map((event) => ({
+            dayIndex: event.dayIndex,
+            date: event.date,
+            time: event.time,
+            child: headerChild,
+            title: event.title,
+            type: event.type,
+            recurringWeekly: false,
+          })),
+        };
+      }
+    } catch (error) {
+      console.error('[schedule] weekly range parse failed', error);
+    }
+  }
+
   const parseBulkScheduleLines = (
     rawText: string,
     headerChild: BaseChildKey | null,
   ): { targetWeekStart: Date; events: AiEvent[] } | null => {
     const effectiveHeaderChild = inferScheduleHeaderChild(rawText) ?? headerChild;
-    const targetWeekStart = getWeekStart(weekStart);
+    const targetWeekStart = weekAnchor;
     const lines = insertBulkScheduleLineBreaks(rawText)
       .split(/\r?\n|•|\u2022|\||;/)
       .map((line) => line.trim())
@@ -1064,7 +1112,6 @@ const parseComplexWhatsAppMessage = (
             detectChildFromText(line) ??
             defaultChildKeyValue();
 
-          const targetDate = addDays(targetWeekStart, dayIndex);
           const key = `${dayIndex}|${mainTime}|${resolvedTitle}|${child}`;
           if (seen.has(key)) {
             continue;
@@ -1073,7 +1120,7 @@ const parseComplexWhatsAppMessage = (
 
           events.push({
             dayIndex,
-            date: toIsoDate(targetDate),
+            date: isoForScheduleDay(dayIndex),
             time: mainTime,
             child,
             title: resolvedTitle,
@@ -1089,7 +1136,10 @@ const parseComplexWhatsAppMessage = (
       }
 
       const dayIndex = getDayIndexFromText(line);
-      const { mainTime, shuttleTime } = pickMainTimeAndShuttle(line);
+      const ranged = leadingClockRange(line);
+      const picked = pickMainTimeAndShuttle(line);
+      const mainTime = ranged?.start ?? picked.mainTime;
+      const shuttleTime = picked.shuttleTime;
       if (dayIndex === null || !mainTime) {
         continue;
       }
@@ -1111,7 +1161,6 @@ const parseComplexWhatsAppMessage = (
 
       const child = effectiveHeaderChild ?? detectChildFromText(line) ?? defaultChildKeyValue();
 
-      const targetDate = addDays(targetWeekStart, dayIndex);
       const key = `${dayIndex}|${mainTime}|${resolvedTitle}|${child}`;
       if (seen.has(key)) {
         continue;
@@ -1120,7 +1169,7 @@ const parseComplexWhatsAppMessage = (
 
       events.push({
         dayIndex,
-        date: toIsoDate(targetDate),
+        date: isoForScheduleDay(dayIndex),
         time: mainTime,
         child,
         title: resolvedTitle,
@@ -1177,7 +1226,10 @@ const parseComplexWhatsAppMessage = (
       continue;
     }
 
-    const { mainTime: chosenTime, shuttleTime } = pickMainTimeAndShuttle(line);
+    const ranged = leadingClockRange(line);
+    const picked = pickMainTimeAndShuttle(line);
+    const chosenTime = ranged?.start ?? picked.mainTime;
+    const shuttleTime = picked.shuttleTime;
 
     if (!chosenTime) {
       continue;
@@ -1200,10 +1252,9 @@ const parseComplexWhatsAppMessage = (
     }
     seen.add(key);
 
-    const activeWeekStart = getWeekStart(weekStart);
     events.push({
       dayIndex: currentDayIndex,
-      date: toIsoDate(hasToday ? new Date() : addDays(activeWeekStart, currentDayIndex)),
+      date: isoForScheduleDay(currentDayIndex, hasToday),
       time: chosenTime,
       child: inferredChild,
       title: description,
@@ -1219,7 +1270,7 @@ const parseComplexWhatsAppMessage = (
   const firstEventDate = events[0]?.date ? parseEventDateKey(events[0].date) : null;
   const targetWeekStart = firstEventDate
     ? getWeekStart(firstEventDate)
-    : (text.includes('היום') ? getWeekStart(new Date()) : weekStart);
+    : (text.includes('היום') ? getWeekStart(new Date()) : weekAnchor);
   return { targetWeekStart, events };
 };
 

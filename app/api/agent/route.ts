@@ -16,6 +16,11 @@ import {
 import { loadFamilyRoster } from "@/app/lib/familyRosterStore";
 import { recordAgentInteraction } from "@/app/lib/agentHistoryStore";
 import { parseFlexibleDate, weekdayIndexUtc } from "@/app/lib/scheduleDate";
+import {
+  findHeaderWeeklySchedule,
+  remapEventDatesToHeaderRange,
+  type WeeklyScheduleParse,
+} from "@/app/lib/weeklyScheduleParse";
 import { applyGeminiKeyToProcessEnv, resolveGeminiApiKey, resolveOpenAIApiKey } from "@/app/lib/llmKeys";
 
 export const revalidate = 0;
@@ -330,6 +335,9 @@ const buildPrompt = (text: string, draft: Draft, history: ChatTurn[], patterns: 
 - הודעה אחת יכולה להכיל לו"ז שבועי עם כמה ימים ושעות, למשל "יום שני 16:30, שלישי 15:30, רביעי 16:00". החזר אירוע נפרד לכל יום/שעה. אל תדלג על אף בלוק ואל תמזג שני ימים לאירוע אחד.
 - חפש בלוקים בצורת "יום X - שעה Y" (או "X ב-Y", "X בשעה Y", "X Y"). time = שעת ההתחלה בלבד בפורמט HH:mm (בטווח "16:30-17:30" קח 16:30). שעה "4" אחה"צ = 16:00 בהקשר של פעילות ילדים.
 - date = תאריך YYYY-MM-DD מדויק. אם כתוב רק יום בשבוע (ראשון..שבת) — זה המופע הקרוב הבא של אותו יום החל מהיום (או מהשבוע שצוין בהודעה). פענח גם "מחר", "מחרתיים", "ביום שלישי הבא".
+- כשהכותרת מציינת טווח בחודש, למשל "לו"ז שבועי | 1-7 בנובמבר", שייך כל יום לתאריך שבתוך הטווח הזה באותו חודש. אסור להצמיד את האירועים לשבוע אחר (למשל השבוע שמוצג ביומן). time = שעת ההתחלה של הטווח.
+- שורה שאינה אימון רגיל, למשל "19:00-20:30 משחק בוגרות באולם, לבוא לעודד", היא אירוע תקין ולא שגיאת פענוח. החזר אותה עם type "other", time של שעת ההתחלה, ו-title שכולל את כל התיאור (תזכורת/הערה לקבוצה או לשיוך). אסור לדלג עליה ואסור להפיל את כל הלו"ז בגללה.
+- transcript = הטקסט המלא של ההודעה כפי שמופיע בתמונה, שורה לכל שורה, כולל כותרת הטווח. אם אין תמונה — null.
 - אל תמציא שעה או יום שלא כתובים. אם חסר — החזר null לשדה הזה.
 - sender_or_group = שם קבוצת הוואטסאפ / כותרת השיחה / שם איש הקשר שמופיע בראש צילום המסך (או מוזכר בטקסט), בדיוק כפי שהוא כתוב. אם אין - null.
 - הבחנה בין פנייה לשיוך: פנייה מנומסת לנמען השיחה, כמו "היי רועי", "רועי רשמתי", "שלום סיון", היא רק פנייה לנמען ואינה אומרת שהאירוע שייך לו! אל תקבע child_name על סמך פנייה/ברכה כזו. child_name נקבע רק כשברור שהאירוע עצמו מיועד לאותו אדם (למשל "אימון לרביד", "תרשום לרועי פגישה").
@@ -350,7 +358,7 @@ ${hist ? `היסטוריית שיחה:\n${hist}\n` : ""}קלט חדש מהמשת
 אם הקלט החדש מפנה לאירוע קודם בשיחה (למשל "תוסיף עוד אחד כזה מחר", "אותו דבר גם ביום שלישי"), שכפל את האירוע האחרון שנרשם בהיסטוריית השיחה (כותרת, שעה, ילד) עם התאריך/היום החדש שביקשו.
 אם הקלט החדש הוא תיקון/השלמה (למשל "18:00" או "ביום חמישי") — עדכן את האירוע המתאים בטיוטה והחזר את הרשימה המלאה של האירועים (כולל אלה שלא השתנו).
 החזר JSON בלבד בפורמט:
-{"sender_or_group": string|null, "child_name": ${roster.memberKeys.map((k) => `"${k}"`).join("|")}|null, "events": [{"date": "YYYY-MM-DD"|null, "time": "HH:mm"|null, "title": string|null, "type": "dog|gym|sport|lesson|dance|other"|null, "keyword": string|null}]}`;
+{"sender_or_group": string|null, "child_name": ${roster.memberKeys.map((k) => `"${k}"`).join("|")}|null, "transcript": string|null, "events": [{"date": "YYYY-MM-DD"|null, "time": "HH:mm"|null, "title": string|null, "type": "dog|gym|sport|lesson|dance|other"|null, "keyword": string|null}]}`;
 };
 
 const extractJsonObject = (t: string) => {
@@ -436,7 +444,7 @@ const callGeminiRest = async (
         generationConfig: {
           temperature: 0,
           responseMimeType: "application/json",
-          maxOutputTokens: 2048,
+          maxOutputTokens: 4096,
         },
         safetySettings: GEMINI_SAFETY,
       }),
@@ -482,7 +490,48 @@ const callGemini = async (prompt: string, img: { data: string; mime: string } | 
   }
 };
 
-const runModel = async (prompt: string, img: { data: string; mime: string } | null) => {
+type ModelRead = { raw: string; parsed: Record<string, unknown> | null };
+
+const asRecord = (value: unknown): Record<string, unknown> | null =>
+  value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : null;
+
+const transcriptFrom = (parsed: Record<string, unknown> | null): string => {
+  if (!parsed) return "";
+  for (const key of ["transcript", "ocr", "message_text", "text"]) {
+    const value = parsed[key];
+    if (typeof value === "string" && value.trim()) return value;
+  }
+  return "";
+};
+
+const weeklyToModelRaw = (
+  weekly: WeeklyScheduleParse,
+  parsed: Record<string, unknown> | null,
+): Record<string, unknown> => ({
+  sender_or_group:
+    (typeof parsed?.sender_or_group === "string" && parsed.sender_or_group.trim()) || weekly.sender,
+  child_name: weekly.assigneeName ?? (typeof parsed?.child_name === "string" ? parsed.child_name : null),
+  transcript: transcriptFrom(parsed) || null,
+  events: weekly.events.map((event) => ({
+    date: event.date,
+    time: event.time,
+    title: event.title,
+    type: event.type,
+    keyword: event.keyword,
+  })),
+});
+
+/** Header month range wins. A thrown parser is logged here instead of becoming a generic 500. */
+const readHeaderSchedule = (sources: Array<string | null | undefined>): WeeklyScheduleParse | null => {
+  try {
+    return findHeaderWeeklySchedule(sources);
+  } catch (error) {
+    console.error("Agent schedule parse error:", error);
+    return null;
+  }
+};
+
+const runModel = async (prompt: string, img: { data: string; mime: string } | null): Promise<ModelRead> => {
   const hasGemini = Boolean(resolveGeminiApiKey());
   const hasOpenAI = Boolean(resolveOpenAIApiKey());
   if (!hasGemini && !hasOpenAI) {
@@ -490,20 +539,15 @@ const runModel = async (prompt: string, img: { data: string; mime: string } | nu
   }
   if (img) {
     if (!hasGemini) throw new Error("Missing GEMINI_API_KEY / NEXT_PUBLIC_GEMINI_API_KEY");
-    const raw = await callGemini(prompt, img);
-    const parsed = raw ? extractJsonObject(raw) : null;
-    if (parsed) return parsed;
-    throw new Error("לא הצלחתי לקרוא את הצילום. נסי שוב עם אותה תמונה.");
+    const raw = (await callGemini(prompt, img)) ?? "";
+    return { raw, parsed: raw ? asRecord(extractJsonObject(raw)) : null };
   }
-  const out = (await callOpenAI(prompt, null)) ?? (await callGemini(prompt, null));
-  const parsed = out ? extractJsonObject(out) : null;
-  if (parsed) return parsed;
-  throw new Error(
-    hasGemini
-      ? "Gemini returned an empty or invalid response"
-      : "Missing GEMINI_API_KEY / NEXT_PUBLIC_GEMINI_API_KEY",
-  );
+  const raw = (await callOpenAI(prompt, null)) ?? (await callGemini(prompt, null)) ?? "";
+  return { raw, parsed: raw ? asRecord(extractJsonObject(raw)) : null };
 };
+
+const TRANSCRIBE_PROMPT =
+  'החזר JSON בלבד {"transcript":"..."} עם הטקסט המלא של הודעת הוואטסאפ שבתמונה, שורה לכל שורה, כולל כותרת הטווח והחודש (למשל לו"ז שבועי | 1-7 בנובמבר) וכל יום עם שעת ההתחלה. אל תדלג על שורה כמו "משחק בוגרות באולם, לבוא לעודד".';
 
 /* ---------- questions ---------- */
 
@@ -737,11 +781,65 @@ export async function POST(request: NextRequest) {
     ) {
       draft = { ...previousDraft };
     } else {
-      const prompt = buildPrompt(text, previousDraft, history, patterns, roster);
-      const parsed = (await runModel(prompt, imageBase64 ? { data: imageBase64, mime: imageMime } : null)) as
-        | Record<string, unknown>
-        | null;
-      const fromModel = sanitizeDraft(parsed, roster);
+      const image = imageBase64 ? { data: imageBase64, mime: imageMime } : null;
+      let modelRaw = "";
+      let modelParsed: Record<string, unknown> | null = null;
+      let weekly = image ? null : readHeaderSchedule([text]);
+      if (!weekly) {
+        try {
+          const prompt = buildPrompt(text, previousDraft, history, patterns, roster);
+          const read = await runModel(prompt, image);
+          modelRaw = read.raw;
+          modelParsed = read.parsed;
+          weekly = readHeaderSchedule([text, transcriptFrom(modelParsed), modelRaw]);
+          if (!weekly && image && !modelParsed) {
+            try {
+              const transcribed = (await callGemini(TRANSCRIBE_PROMPT, image)) ?? "";
+              modelRaw = modelRaw || transcribed;
+              const transcribedRecord = transcribed ? asRecord(extractJsonObject(transcribed)) : null;
+              if (!modelParsed && transcribedRecord) modelParsed = transcribedRecord;
+              weekly = readHeaderSchedule([
+                transcriptFrom(transcribedRecord),
+                transcribed,
+                text,
+                modelRaw,
+              ]);
+            } catch (error) {
+              console.error("Agent schedule parse error:", error);
+            }
+          }
+        } catch (error) {
+          console.error("Agent schedule parse error:", error);
+          weekly = readHeaderSchedule([text, modelRaw]);
+          if (!weekly) {
+            return NextResponse.json({ success: false, error: describeError(error) }, { status: 500 });
+          }
+        }
+      }
+
+      const parsedRecord: Record<string, unknown> | null = weekly
+        ? weeklyToModelRaw(weekly, modelParsed)
+        : modelParsed
+          ? {
+              ...modelParsed,
+              events: remapEventDatesToHeaderRange(
+                Array.isArray(modelParsed.events) ? modelParsed.events : [],
+                [text, transcriptFrom(modelParsed), modelRaw].join("\n"),
+              ),
+            }
+          : null;
+
+      if (!parsedRecord) {
+        const err = new Error(
+          modelRaw
+            ? `Invalid schedule parse: ${modelRaw.slice(0, 400)}`
+            : "Schedule parse returned no events",
+        );
+        console.error("Agent schedule parse error:", err);
+        return NextResponse.json({ success: false, error: describeError(err) }, { status: 500 });
+      }
+
+      const fromModel = sanitizeDraft(parsedRecord, roster);
       // Never infer an owner from a greeting/acknowledgement ("היי רועי", "רועי רשמתי", "תודה רועי").
       // For screenshots the model may set child_name from a name written on the card.
       const verifiedModelChild =
