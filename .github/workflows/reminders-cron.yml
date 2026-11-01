@@ -17,8 +17,8 @@ jobs:
           set -e
           URL="https://family-scheduler-topaz.vercel.app/api/notifications/check"
           if [ -n "$CRON_SECRET" ]; then
-            curl --fail-with-body -sS -m 60 -H "Authorization: Bearer $CRON_SECRET" "$URL"
+            curl --fail-with-body -sS -m 25 --connect-timeout 10 --retry 2 --retry-delay 3 -H "Authorization: Bearer $CRON_SECRET" "$URL"
           else
-            curl --fail-with-body -sS -m 60 "$URL"
+            curl --fail-with-body -sS -m 25 --connect-timeout 10 --retry 2 --retry-delay 3 "$URL"
           fi
           echo

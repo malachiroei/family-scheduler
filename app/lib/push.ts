@@ -268,6 +268,20 @@ export const removePushSubscription = async (endpoint: string) => {
   await sql`DELETE FROM push_subscriptions WHERE endpoint = ${trimmed}`;
 };
 
+const PUSH_SEND_TIMEOUT_MS = 8_000;
+
+const withTimeout = <T>(promise: Promise<T>, ms: number, label: string): Promise<T> => {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms);
+  });
+  // If the deadline wins, the original request must not surface later as an unhandled rejection.
+  promise.catch(() => undefined);
+  return Promise.race([promise, timeout]).finally(() => {
+    if (timer) clearTimeout(timer);
+  });
+};
+
 const sendToSubscription = async (row: SubscriptionRow, payload: PushPayload) => {
   if (!initVapid()) {
     console.error("[PUSH] Missing VAPID config; cannot send notification");
@@ -277,15 +291,20 @@ const sendToSubscription = async (row: SubscriptionRow, payload: PushPayload) =>
   try {
     console.log("Sending Push Notification for:", payload.confirmTask?.eventTitle || payload.title);
     console.log("Sending push to:", row.endpoint);
-    await webpush.sendNotification(
-      {
-        endpoint: row.endpoint,
-        keys: {
-          p256dh: row.p256dh,
-          auth: row.auth,
+    await withTimeout(
+      webpush.sendNotification(
+        {
+          endpoint: row.endpoint,
+          keys: {
+            p256dh: row.p256dh,
+            auth: row.auth,
+          },
         },
-      },
-      JSON.stringify(payload)
+        JSON.stringify(payload),
+        { timeout: PUSH_SEND_TIMEOUT_MS, TTL: 60 },
+      ),
+      PUSH_SEND_TIMEOUT_MS,
+      "webpush",
     );
 
     return { ok: true as const, removed: false };
@@ -702,6 +721,23 @@ export const sendUpcomingTaskReminders = async (
     delivery_failed: 0,
   };
 
+  const dueSends: Array<{
+    taskId: string;
+    taskTitle: string;
+    taskTime: string;
+    diffMinutes: number;
+    subscription: SubscriptionRow;
+    dispatchKey: string;
+    childSubscriptionName: string;
+    childDisplayName: string;
+  }> = [];
+  const taskOutcomes = new Map<string, {
+    hadDue: boolean;
+    delivered: number;
+    diffMinutes: number;
+    audienceChildren: string[];
+  }>();
+
   for (const task of tasksResult.rows) {
     if (Boolean(task.completed)) {
       skippedByReason.completed += 1;
@@ -803,12 +839,12 @@ export const sendUpcomingTaskReminders = async (
       JSON.stringify(targetSubscriptions.map((s) => ({ user: s.user_name, lead: s.reminder_lead_minutes, endpoint: String(s.endpoint).slice(0, 60) })))
     );
 
-    let deliveredForTask = 0;
-    let hadDueByOffset = false;
     const defaultChildName = audienceChildren[0] || "הילד";
     const taskReminderLeadMinutes = task.reminder_lead_minutes == null
       ? null
       : normalizeReminderLeadMinutes(task.reminder_lead_minutes);
+    const outcome = taskOutcomes.get(String(task.id)) ?? { hadDue: false, delivered: 0, diffMinutes, audienceChildren };
+    taskOutcomes.set(String(task.id), outcome);
     for (const subscription of targetSubscriptions) {
       const reminderLeadMinutes = taskReminderLeadMinutes ?? normalizeReminderLeadMinutes(subscription.reminder_lead_minutes);
       const minDue = -REMINDER_GRACE_MINUTES;
@@ -817,70 +853,130 @@ export const sendUpcomingTaskReminders = async (
         continue;
       }
 
-      hadDueByOffset = true;
-      const dispatchKey = `${task.id}:${taskStartUtc.toISOString()}:${reminderLeadMinutes}:${subscription.endpoint}`;
-      if (await wasReminderDispatched(dispatchKey)) {
-        skippedByReason.already_dispatched += 1;
-        debugReminderLog("skip already_dispatched", { taskId: task.id, dispatchKey });
-        continue;
-      }
-
+      outcome.hadDue = true;
       const childSubscriptionName = normalizeAllowedUserName(subscription.user_name, roster) || "";
       const childDisplayName = isChildUserName(childSubscriptionName, roster) ? childSubscriptionName : defaultChildName;
-      console.log("Pushing to device of:", childSubscriptionName || "(unknown)");
-      options?.onAttempt?.({
-        userName: childSubscriptionName || "(unknown)",
-        eventTitle: String(task.text || "משימה"),
+      dueSends.push({
+        taskId: String(task.id),
+        taskTitle: String(task.text || "משימה"),
+        taskTime: String(task.time || ""),
+        diffMinutes,
+        subscription,
+        dispatchKey: `${task.id}:${taskStartUtc.toISOString()}:${reminderLeadMinutes}:${subscription.endpoint}`,
+        childSubscriptionName,
+        childDisplayName,
       });
-      const sendResult = await sendToSubscription(subscription, {
+    }
+  }
+
+  const dispatchedKeys = new Set<string>();
+  if (dueSends.length) {
+    try {
+      const existing = await sql<{ dispatch_key: string }>`
+        SELECT dispatch_key
+        FROM push_reminder_dispatches
+        WHERE dispatch_key = ANY(${dueSends.map((job) => job.dispatchKey)})
+      `;
+      for (const row of existing.rows) {
+        if (row.dispatch_key) dispatchedKeys.add(row.dispatch_key);
+      }
+    } catch (error) {
+      console.error("[notifications:check] dispatch lookup failed", error);
+      const checks = await Promise.allSettled(
+        dueSends.map(async (job) => ({ key: job.dispatchKey, already: await wasReminderDispatched(job.dispatchKey) })),
+      );
+      for (const check of checks) {
+        if (check.status === "fulfilled" && check.value.already) dispatchedKeys.add(check.value.key);
+      }
+    }
+  }
+
+  const pendingSends = dueSends.filter((job) => {
+    if (!dispatchedKeys.has(job.dispatchKey)) return true;
+    skippedByReason.already_dispatched += 1;
+    debugReminderLog("skip already_dispatched", { taskId: job.taskId, dispatchKey: job.dispatchKey });
+    return false;
+  });
+
+  const sendSettled = await Promise.allSettled(
+    pendingSends.map(async (job) => {
+      console.log("Pushing to device of:", job.childSubscriptionName || "(unknown)");
+      options?.onAttempt?.({
+        userName: job.childSubscriptionName || "(unknown)",
+        eventTitle: job.taskTitle,
+      });
+      const sendResult = await sendToSubscription(job.subscription, {
         title: "תזכורת למשימה",
-        body: diffMinutes > 0
-          ? `${task.text} מתחילה בעוד ${formatMinutesHe(diffMinutes)} (${task.time})`
-          : `${task.text} מתחילה עכשיו (${task.time})`,
+        body: job.diffMinutes > 0
+          ? `${job.taskTitle} מתחילה בעוד ${formatMinutesHe(job.diffMinutes)} (${job.taskTime})`
+          : `${job.taskTitle} מתחילה עכשיו (${job.taskTime})`,
         url: "/",
         actions: [{ action: "confirm", title: "אישרתי שראיתי" }],
         confirmTask: {
-          eventId: String(task.id),
-          eventTitle: String(task.text || "משימה"),
-          childName: childDisplayName,
+          eventId: job.taskId,
+          eventTitle: job.taskTitle,
+          childName: job.childDisplayName,
         },
       });
-
-      console.log("[notifications:check] webpush.sendNotification result:", JSON.stringify(sendResult), "user:", childSubscriptionName);
+      console.log("[notifications:check] webpush.sendNotification result:", JSON.stringify(sendResult), "user:", job.childSubscriptionName);
       if (sendResult.ok) {
-        await markReminderDispatched(dispatchKey);
-        deliveredForTask += 1;
+        await markReminderDispatched(job.dispatchKey);
       }
-    }
+      return { taskId: job.taskId, ok: sendResult.ok };
+    }),
+  );
 
-    if (!hadDueByOffset) {
-      skippedByReason.offset_not_due += 1;
-      debugReminderLog("skip offset_not_due", { taskId: task.id, diffMinutes, audienceSubscriptions: targetSubscriptions.length });
-      continue;
+  for (const item of sendSettled) {
+    if (item.status === "fulfilled" && item.value.ok) {
+      const outcome = taskOutcomes.get(item.value.taskId);
+      if (outcome) outcome.delivered += 1;
+    } else if (item.status === "rejected") {
+      console.error("[notifications:check] push send rejected", item.reason);
     }
+  }
 
-    if (deliveredForTask > 0) {
+  const notifiedSettled = await Promise.allSettled(
+    [...taskOutcomes.entries()].map(async ([taskId, outcome]) => {
+      if (!outcome.hadDue) {
+        skippedByReason.offset_not_due += 1;
+        debugReminderLog("skip offset_not_due", {
+          taskId,
+          diffMinutes: outcome.diffMinutes,
+          audienceSubscriptions: outcome.audienceChildren.length,
+        });
+        return;
+      }
+      if (outcome.delivered <= 0) {
+        skippedByReason.delivery_failed += 1;
+        debugReminderLog("skip delivery_failed", {
+          taskId,
+          audienceChildren: outcome.audienceChildren,
+          subscriptions: outcome.audienceChildren.length,
+        });
+        return;
+      }
       try {
-        // metadata.notified + dedicated column (when it exists)
         await sql`
           UPDATE schedule
           SET metadata = jsonb_set(COALESCE(metadata, '{}'::jsonb), '{notified}', 'true'::jsonb, true),
               notified = true
-          WHERE id = ${task.id}
+          WHERE id = ${taskId}
         `;
       } catch {
         await sql`
           UPDATE schedule
           SET metadata = jsonb_set(COALESCE(metadata, '{}'::jsonb), '{notified}', 'true'::jsonb, true)
-          WHERE id = ${task.id}
+          WHERE id = ${taskId}
         `;
       }
-      console.log("[notifications:check] marked notified=true:", task.id);
-      sent += deliveredForTask;
-      debugReminderLog("sent", { taskId: task.id, deliveredForTask, diffMinutes, audienceChildren });
-    } else {
-      skippedByReason.delivery_failed += 1;
-      debugReminderLog("skip delivery_failed", { taskId: task.id, audienceChildren, subscriptions: targetSubscriptions.length });
+      console.log("[notifications:check] marked notified=true:", taskId);
+      sent += outcome.delivered;
+      debugReminderLog("sent", { taskId, deliveredForTask: outcome.delivered, diffMinutes: outcome.diffMinutes, audienceChildren: outcome.audienceChildren });
+    }),
+  );
+  for (const item of notifiedSettled) {
+    if (item.status === "rejected") {
+      console.error("[notifications:check] mark notified failed", item.reason);
     }
   }
 
