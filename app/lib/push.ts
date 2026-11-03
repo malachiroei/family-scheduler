@@ -326,8 +326,10 @@ const sendToSubscription = async (row: SubscriptionRow, payload: PushPayload) =>
       JSON.stringify({
         ...payload,
         category,
-        tag: payload.tag || channel.tag,
+        level: category,
+        tag: channel.tag,
         importance: channel.importance,
+        silent: channel.silent,
       }),
       { TTL: 60, urgency: channel.urgency },
     );

@@ -1,4 +1,4 @@
-const CACHE_NAME = 'family-scheduler-v23';
+const CACHE_NAME = 'family-scheduler-v24';
 /** Same origin as the registered app (localhost or production) — avoids CORS when SW calls the API. */
 const apiUrl = (path) => {
   const normalized = path.startsWith('/') ? path : `/${path}`;
@@ -14,17 +14,27 @@ const defaultPushPreferences = {
   sound: '/sounds/standard.mp3',
 };
 
-/** Same channels the server sends: tag groups them, vibrate and requireInteraction set importance. */
-const notificationChannels = {
-  medical: { tag: 'medical', vibrate: [400, 150, 400, 150, 400], importance: 'high', requireInteraction: true, renotify: true },
-  game: { tag: 'game', vibrate: [200, 80, 200, 80, 500], importance: 'high', requireInteraction: true, renotify: true },
-  training: { tag: 'training', vibrate: [120, 70, 120], importance: 'normal', requireInteraction: false, renotify: true },
-  general: { tag: 'general', vibrate: [80, 40, 80], importance: 'low', requireInteraction: false, renotify: false },
+/** Levels sent by the server. Older payloads may still use general/training/game/medical. */
+const notificationLevels = {
+  silent: { tag: 'silent', vibrate: [], silent: true, requireInteraction: false, renotify: false },
+  normal: { tag: 'normal', vibrate: [100], silent: false, requireInteraction: false, renotify: true },
+  medium: { tag: 'medium', vibrate: [150, 100, 150], silent: false, requireInteraction: false, renotify: true },
+  urgent: { tag: 'urgent', vibrate: [300, 100, 300, 100, 400], silent: false, requireInteraction: true, renotify: true },
+};
+const legacyNotificationLevel = {
+  general: 'silent',
+  quiet: 'silent',
+  training: 'normal',
+  standard: 'normal',
+  game: 'medium',
+  medical: 'urgent',
+  important: 'urgent',
 };
 
-const notificationChannelFor = (payload) => {
-  const raw = String(payload?.category || payload?.channel || payload?.tag || 'general').trim().toLowerCase();
-  return notificationChannels[raw] || notificationChannels.general;
+const notificationLevelFor = (payload) => {
+  const raw = String(payload?.level || payload?.category || payload?.channel || 'normal').trim().toLowerCase();
+  const key = legacyNotificationLevel[raw] || raw;
+  return notificationLevels[key] || notificationLevels.normal;
 };
 
 let pushPreferences = { ...defaultPushPreferences };
@@ -140,39 +150,37 @@ self.addEventListener('push', (event) => {
   }
 
   const leadMinutes = sanitizeReminderLead(pushPreferences.reminderLeadMinutes);
-  const sound = sanitizePushSound(pushPreferences.sound);
-  const channel = notificationChannelFor(payload);
+  const level = notificationLevelFor(payload);
 
   const options = {
-    // The server already writes the exact time left into the body.
     body: payload.body,
     icon: appIcon(),
     badge: appIcon(),
-    tag: payload.tag || channel.tag,
-    renotify: channel.renotify,
-    vibrate: channel.vibrate,
-    requireInteraction: channel.requireInteraction,
+    tag: level.tag,
+    renotify: level.renotify,
+    vibrate: level.vibrate,
+    silent: level.silent,
+    requireInteraction: level.requireInteraction,
     actions: Array.isArray(payload.actions)
       ? payload.actions
       : (payload.confirmTask ? [{ action: 'confirm', title: 'אישרתי שראיתי' }] : []),
     data: {
       url: payload.url || '/',
-      sound,
+      level: level.tag,
       reminderLeadMinutes: leadMinutes,
       confirmTask: payload.confirmTask || null,
-      category: channel.tag,
-      importance: channel.importance,
     },
   };
 
   event.waitUntil((async () => {
     await self.registration.showNotification(payload.title, options);
+    if (level.silent) return;
     const openClients = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
     openClients.forEach((client) => {
       client.postMessage({
         type: 'PLAY_PUSH_SOUND',
         payload: {
-          sound,
+          level: level.tag,
           reminderLeadMinutes: leadMinutes,
         },
       });

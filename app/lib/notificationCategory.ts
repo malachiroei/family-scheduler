@@ -1,53 +1,50 @@
-export const NOTIFICATION_CATEGORIES = ["general", "training", "game", "medical"] as const;
+export const NOTIFICATION_LEVELS = ["silent", "normal", "medium", "urgent"] as const;
 
-export type NotificationCategory = (typeof NOTIFICATION_CATEGORIES)[number];
+export type NotificationLevel = (typeof NOTIFICATION_LEVELS)[number];
+
+/** Stored on events. Older rows may still say general, training, game, or medical. */
+export type NotificationCategory = NotificationLevel;
 
 export type NotificationImportance = "low" | "normal" | "high";
 
-export type PushUrgency = "low" | "normal" | "high";
+export type PushUrgency = "very-low" | "low" | "normal" | "high";
 
-export const NOTIFICATION_CATEGORY_OPTIONS: Array<{ value: NotificationCategory; label: string }> = [
-  { value: "general", label: "כללי — שקטה" },
-  { value: "training", label: "אימון — רגילה" },
-  { value: "game", label: "משחק — גבוהה" },
-  { value: "medical", label: "רפואי — דחופה" },
+export const NOTIFICATION_LEVEL_OPTIONS: Array<{ value: NotificationLevel; label: string }> = [
+  { value: "silent", label: "שקטה" },
+  { value: "normal", label: "רגילה" },
+  { value: "medium", label: "בינונית" },
+  { value: "urgent", label: "חשובה" },
 ];
 
-const categorySet = new Set<string>(NOTIFICATION_CATEGORIES);
+export const NOTIFICATION_CATEGORY_OPTIONS = NOTIFICATION_LEVEL_OPTIONS;
 
-export const normalizeNotificationCategory = (value: unknown): NotificationCategory | null => {
-  const raw = typeof value === "string" ? value.trim().toLowerCase() : "";
-  return categorySet.has(raw) ? (raw as NotificationCategory) : null;
+const levelSet = new Set<string>(NOTIFICATION_LEVELS);
+
+const legacyLevel: Record<string, NotificationLevel> = {
+  silent: "silent",
+  quiet: "silent",
+  general: "silent",
+  normal: "normal",
+  standard: "normal",
+  training: "normal",
+  medium: "medium",
+  game: "medium",
+  urgent: "urgent",
+  important: "urgent",
+  medical: "urgent",
 };
 
-/** Explicit category wins. Otherwise sport/משחק → game, practice → training, clinic words → medical. */
+export const normalizeNotificationCategory = (value: unknown): NotificationLevel | null => {
+  const raw = typeof value === "string" ? value.trim().toLowerCase() : "";
+  return legacyLevel[raw] ?? (levelSet.has(raw) ? (raw as NotificationLevel) : null);
+};
+
+/** An explicit level wins. Missing values stay at the caller's fallback (usually the user's default, or רגילה). */
 export const inferNotificationCategory = (input: {
   category?: unknown;
   type?: string | null;
   title?: string | null;
-}): NotificationCategory => {
-  const explicit = normalizeNotificationCategory(input.category);
-  if (explicit) return explicit;
-
-  const type = String(input.type || "").trim().toLowerCase();
-  const title = String(input.title || "");
-  if (type === "medical" || /תור|מרפאה|רופא|חיסון|וטרינר|בית חולים/.test(title)) {
-    return "medical";
-  }
-  if (type === "sport" || /משחק/.test(title)) {
-    return "game";
-  }
-  if (
-    type === "gym" ||
-    type === "lesson" ||
-    type === "dance" ||
-    type === "tutoring" ||
-    /אימון|שיעור|ריקוד|תגבור/.test(title)
-  ) {
-    return "training";
-  }
-  return "general";
-};
+}): NotificationLevel => normalizeNotificationCategory(input.category) ?? "normal";
 
 export const sharedNotificationCategory = (
   items: Array<{
@@ -56,55 +53,57 @@ export const sharedNotificationCategory = (
     type?: string | null;
     title?: string | null;
   }>,
-): NotificationCategory => {
-  if (!items.length) return "general";
-  const categories = items.map((item) => inferNotificationCategory({
+): NotificationLevel => {
+  if (!items.length) return "normal";
+  const levels = items.map((item) => inferNotificationCategory({
     category: item.category ?? item.notificationCategory,
-    type: item.type,
-    title: item.title,
   }));
-  const first = categories[0];
-  return categories.every((category) => category === first) ? first : "general";
+  const first = levels[0];
+  return levels.every((level) => level === first) ? first : "normal";
 };
 
-/** Device grouping key, vibration, and delivery urgency for one channel. */
-export const notificationChannelProfile = (category: NotificationCategory) => {
-  switch (category) {
-    case "medical":
+/** Device grouping key, vibration, and delivery urgency for one level. */
+export const notificationChannelProfile = (level: NotificationLevel) => {
+  switch (level) {
+    case "silent":
       return {
-        tag: "medical",
-        vibrate: [400, 150, 400, 150, 400],
-        importance: "high" as NotificationImportance,
-        urgency: "high" as PushUrgency,
-        requireInteraction: true,
-        renotify: true,
+        tag: "silent",
+        vibrate: [] as number[],
+        importance: "low" as NotificationImportance,
+        urgency: "very-low" as PushUrgency,
+        requireInteraction: false,
+        renotify: false,
+        silent: true,
       };
-    case "game":
+    case "medium":
       return {
-        tag: "game",
-        vibrate: [200, 80, 200, 80, 500],
-        importance: "high" as NotificationImportance,
-        urgency: "high" as PushUrgency,
-        requireInteraction: true,
-        renotify: true,
-      };
-    case "training":
-      return {
-        tag: "training",
-        vibrate: [120, 70, 120],
+        tag: "medium",
+        vibrate: [150, 100, 150],
         importance: "normal" as NotificationImportance,
         urgency: "normal" as PushUrgency,
         requireInteraction: false,
         renotify: true,
+        silent: false,
+      };
+    case "urgent":
+      return {
+        tag: "urgent",
+        vibrate: [300, 100, 300, 100, 400],
+        importance: "high" as NotificationImportance,
+        urgency: "high" as PushUrgency,
+        requireInteraction: true,
+        renotify: true,
+        silent: false,
       };
     default:
       return {
-        tag: "general",
-        vibrate: [80, 40, 80],
-        importance: "low" as NotificationImportance,
-        urgency: "low" as PushUrgency,
+        tag: "normal",
+        vibrate: [100],
+        importance: "normal" as NotificationImportance,
+        urgency: "normal" as PushUrgency,
         requireInteraction: false,
-        renotify: false,
+        renotify: true,
+        silent: false,
       };
   }
 };

@@ -4,6 +4,7 @@ import Image from 'next/image';
 import { Dog, Dumbbell, Music, GraduationCap, Trophy, Printer, MessageCircle, ChevronRight, ChevronLeft, X, Plus, CalendarDays, Settings, RefreshCw, Video, ClipboardList, Trash2, Share2, Pencil } from 'lucide-react';
 import html2canvas from 'html2canvas';
 import AgentChat from '@/app/components/AgentChat';
+import NotificationLevelPicker from '@/app/components/NotificationLevelPicker';
 import FamilyRosterEditor from '@/app/components/FamilyRosterEditor';
 import AppBrandingEditor, { AppIconView } from '@/app/components/AppBrandingEditor';
 import { applyDocumentFavicon, appIconSrc, defaultAppBranding, mergeAppBranding, resolveShareImagePath, type AppBranding } from '@/app/lib/appBranding';
@@ -19,11 +20,11 @@ import {
 } from '@/app/lib/weeklyScheduleParse';
 import { fixtureLeagueBadge } from '@/app/lib/fixtureLeague';
 import {
-  inferNotificationCategory,
-  NOTIFICATION_CATEGORY_OPTIONS,
   normalizeNotificationCategory,
   type NotificationCategory,
+  type NotificationLevel,
 } from '@/app/lib/notificationCategory';
+import { playNotificationLevelFromPayload } from '@/app/lib/notificationSound';
 import {
   canonicalHebrewName,
   createFamilyRoster,
@@ -254,7 +255,8 @@ const pushSoundOptions: Array<{ value: PushSoundPreset; label: string }> = [
 ];
 const defaultPushLeadMinutes: ReminderLeadMinutes = 10;
 const defaultPushSound: PushSoundPreset = '/sounds/standard.mp3';
-const SERVICE_WORKER_URL = toApiUrl('/sw.js?v=20');
+const defaultNotificationLevelValue: NotificationLevel = 'normal';
+const SERVICE_WORKER_URL = toApiUrl('/sw.js?v=24');
 
 /**
  * Parse a fetch Response without ever throwing on non-JSON bodies (e.g. Vercel's HTML/plain-text 504 page).
@@ -1836,7 +1838,7 @@ const createWeekDays = (
       requireConfirmation: Boolean(event.requireConfirmation),
       reminderLeadMinutes: sanitizeReminderLead(event.reminderLeadMinutes),
       notificationCategory: normalizeNotificationCategory(event.notificationCategory)
-        ?? inferNotificationCategory({ type: event.type, title: event.title }),
+        ?? undefined,
     });
   };
 
@@ -1867,7 +1869,7 @@ const createWeekDays = (
       requireConfirmation: template.requireConfirmation,
       reminderLeadMinutes: template.reminderLeadMinutes,
       notificationCategory: template.notificationCategory
-        ?? inferNotificationCategory({ type: template.type, title: template.title }),
+        ?? undefined,
     });
   });
 
@@ -1986,6 +1988,7 @@ export default function FamilyScheduler() {
   const [parentWatchChildren, setParentWatchChildren] = useState<PushChildName[]>([...pushChildOptions()]);
   const [reminderLeadMinutes, setReminderLeadMinutes] = useState<ReminderLeadMinutes>(defaultPushLeadMinutes);
   const [pushSound, setPushSound] = useState<PushSoundPreset>(defaultPushSound);
+  const [defaultNotificationLevel, setDefaultNotificationLevel] = useState<NotificationLevel>(defaultNotificationLevelValue);
   const [installToast, setInstallToast] = useState('');
   const [installBusy, setInstallBusy] = useState(false);
   const installToastTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -2513,9 +2516,10 @@ export default function FamilyScheduler() {
         return;
       }
 
-      const parsed = JSON.parse(rawPrefs) as { reminderLeadMinutes?: unknown; sound?: unknown };
+      const parsed = JSON.parse(rawPrefs) as { reminderLeadMinutes?: unknown; sound?: unknown; notificationLevel?: unknown };
       setReminderLeadMinutes(sanitizeReminderLead(parsed?.reminderLeadMinutes));
       setPushSound(sanitizePushSound(parsed?.sound));
+      setDefaultNotificationLevel(normalizeNotificationCategory(parsed?.notificationLevel) ?? defaultNotificationLevelValue);
     } catch {
       // no-op
     }
@@ -2526,17 +2530,19 @@ export default function FamilyScheduler() {
       localStorage.setItem(NOTIFICATION_SETTINGS_STORAGE_KEY, JSON.stringify({
         reminderLeadMinutes,
         sound: pushSound,
+        notificationLevel: defaultNotificationLevel,
       }));
       localStorage.setItem(PUSH_PREFS_STORAGE_KEY, JSON.stringify({
         reminderLeadMinutes,
         sound: pushSound,
+        notificationLevel: defaultNotificationLevel,
       }));
     } catch {
       // no-op
     }
 
     void syncPushPreferencesToServiceWorker().catch(() => undefined);
-  }, [reminderLeadMinutes, pushSound, syncPushPreferencesToServiceWorker]);
+  }, [reminderLeadMinutes, pushSound, defaultNotificationLevel, syncPushPreferencesToServiceWorker]);
 
   useEffect(() => {
     if (!("serviceWorker" in navigator)) {
@@ -2550,10 +2556,17 @@ export default function FamilyScheduler() {
       } | undefined;
 
       if (data?.type === 'PLAY_PUSH_SOUND') {
-        const selectedSound = (typeof data?.payload?.sound === 'string' && data.payload.sound)
-          ? data.payload.sound
-          : pushSound;
-        playPushSound(selectedSound);
+        const level = normalizeNotificationCategory(
+          (data.payload as { level?: unknown } | undefined)?.level,
+        );
+        if (level) {
+          playNotificationLevelFromPayload(level);
+        } else {
+          const selectedSound = (typeof data?.payload?.sound === 'string' && data.payload.sound)
+            ? data.payload.sound
+            : pushSound;
+          playPushSound(selectedSound);
+        }
         return;
       }
 
@@ -3399,7 +3412,7 @@ export default function FamilyScheduler() {
           requireConfirmation: Boolean(event.requireConfirmation),
           reminderLeadMinutes: sanitizeReminderLead(event.reminderLeadMinutes),
           notificationCategory: normalizeNotificationCategory(event.notificationCategory)
-            ?? inferNotificationCategory({ type: event.type, title: event.title }),
+            ?? undefined,
         });
       }
     });
@@ -3455,7 +3468,7 @@ export default function FamilyScheduler() {
           requireConfirmation: Boolean(event.requireConfirmation),
           reminderLeadMinutes: sanitizeReminderLead(event.reminderLeadMinutes),
           notificationCategory: normalizeNotificationCategory(event.notificationCategory)
-            ?? inferNotificationCategory({ type: event.type, title: event.title }),
+            ?? undefined,
           league: event.league,
         };
         const dayEvents = weekDays[dayIndex].events;
@@ -3834,6 +3847,7 @@ export default function FamilyScheduler() {
     setParentWatchChildren([...pushChildOptions()]);
     setReminderLeadMinutes(defaultPushLeadMinutes);
     setPushSound(defaultPushSound);
+    setDefaultNotificationLevel(defaultNotificationLevelValue);
     setSuccessMessage('ההגדרות אופסו בהצלחה.');
     if (apiError) {
       setApiError('');
@@ -4061,7 +4075,7 @@ export default function FamilyScheduler() {
         requireConfirmation: Boolean(ev.requireConfirmation),
         reminderLeadMinutes: sanitizeReminderLead(ev.reminderLeadMinutes),
         notificationCategory: normalizeNotificationCategory(ev.notificationCategory)
-          ?? inferNotificationCategory({ type: ev.type, title: ev.title }),
+          ?? undefined,
         league: ev.league,
       },
     });
@@ -4939,7 +4953,7 @@ export default function FamilyScheduler() {
         sendNotification: true,
         requireConfirmation: false,
         reminderLeadMinutes,
-        notificationCategory: inferNotificationCategory({ type: 'lesson' }),
+        notificationCategory: defaultNotificationLevel,
       },
     });
   };
@@ -4990,7 +5004,7 @@ export default function FamilyScheduler() {
       requireConfirmation: Boolean(creatingEvent.data.requireConfirmation),
       reminderLeadMinutes: sanitizeReminderLead(creatingEvent.data.reminderLeadMinutes),
       notificationCategory: normalizeNotificationCategory(creatingEvent.data.notificationCategory)
-        ?? inferNotificationCategory({ type: creatingEvent.data.type, title }),
+        ?? defaultNotificationLevel,
     };
 
     const targetWeekKey = toIsoDate(targetWeekStart);
@@ -5149,7 +5163,7 @@ export default function FamilyScheduler() {
       time: normalizeTimeForPicker(editingEvent.data.time),
       reminderLeadMinutes: sanitizeReminderLead(editingEvent.data.reminderLeadMinutes),
       notificationCategory: normalizeNotificationCategory(editingEvent.data.notificationCategory)
-        ?? inferNotificationCategory({ type: editingEvent.data.type, title: trimmedTitle }),
+        ?? defaultNotificationLevel,
       isRecurring: editingEvent.recurringWeekly,
       recurringTemplateId: editingEvent.recurringWeekly
         ? (editingEvent.originalRecurringTemplateId ?? editingEvent.data.recurringTemplateId ?? generateId())
@@ -6035,21 +6049,18 @@ export default function FamilyScheduler() {
                 </div>
               )}
 
+            <div className="space-y-2 border border-slate-200 rounded-xl p-2.5 bg-slate-50">
+              <div className="text-xs font-bold text-slate-700">ברירת מחדל להתראות</div>
+              <p className="text-[11px] text-slate-500">הרמה הזו נבחרת במשימה חדשה. אפשר לשמוע כל צליל לפני הבחירה.</p>
+              <NotificationLevelPicker
+                name="default-notification-level"
+                value={defaultNotificationLevel}
+                onChange={setDefaultNotificationLevel}
+              />
+            </div>
+
             {notificationsApproved && (
               <div className="space-y-2 border border-slate-200 rounded-xl p-2.5 bg-slate-50">
-                <div>
-                  <div className="text-xs text-slate-500 mb-1">בחירת צליל</div>
-                  <select
-                    value={pushSound}
-                    onChange={(event) => setPushSound(sanitizePushSound(event.target.value))}
-                    className="w-full rounded-xl border border-slate-300 px-3 py-1.5 text-sm text-slate-700 outline-none focus:border-blue-400"
-                  >
-                    {pushSoundOptions.map((option) => (
-                      <option key={`settings-sound-${option.value}`} value={option.value}>{option.label}</option>
-                    ))}
-                  </select>
-                </div>
-
                 <div>
                   <div className="text-xs text-slate-500 mb-1">זמן התראה</div>
                   <select
@@ -6277,7 +6288,6 @@ export default function FamilyScheduler() {
                           data: {
                             ...prev.data,
                             type: preset.value,
-                            notificationCategory: inferNotificationCategory({ type: preset.value, title: prev.data.title }),
                           },
                         }) : prev)}
                         className={`rounded-xl border px-2 py-2 text-xs font-semibold transition ${active ? 'bg-blue-50 border-blue-400 text-blue-700' : 'bg-white border-slate-300 text-slate-700 hover:bg-slate-50'}`}
@@ -6339,23 +6349,16 @@ export default function FamilyScheduler() {
                 </select>
               </div>
               <div>
-                <div className="text-xs text-slate-500 mb-1">ערוץ התראה</div>
-                <select
+                <div className="text-xs text-slate-500 mb-1">רמת התראה</div>
+                <NotificationLevelPicker
+                  name="create-event-level"
                   value={creatingEvent.data.notificationCategory}
-                  onChange={(e) => setCreatingEvent((prev) => prev ? ({
-                    ...prev,
-                    data: {
-                      ...prev.data,
-                      notificationCategory: normalizeNotificationCategory(e.target.value) ?? 'general',
-                    },
-                  }) : prev)}
                   disabled={!creatingEvent.data.sendNotification}
-                  className="w-full rounded-xl border border-slate-300 px-3 py-1.5 text-sm text-slate-700 outline-none focus:border-blue-400 disabled:opacity-60 disabled:cursor-not-allowed"
-                >
-                  {NOTIFICATION_CATEGORY_OPTIONS.map((option) => (
-                    <option key={`create-event-channel-${option.value}`} value={option.value}>{option.label}</option>
-                  ))}
-                </select>
+                  onChange={(level) => setCreatingEvent((prev) => prev ? ({
+                    ...prev,
+                    data: { ...prev.data, notificationCategory: level },
+                  }) : prev)}
+                />
               </div>
               <label className="flex items-center gap-2 text-sm text-slate-700 font-medium">
                 <input
@@ -6524,7 +6527,6 @@ export default function FamilyScheduler() {
                   data: {
                     ...prev.data,
                     type: e.target.value as EventType,
-                    notificationCategory: inferNotificationCategory({ type: e.target.value, title: prev.data.title }),
                   },
                 }) : prev)}
                 disabled={Boolean(editingEvent.data.completed)}
@@ -6620,24 +6622,16 @@ export default function FamilyScheduler() {
                 </select>
               </div>
               <div>
-                <div className="text-xs text-slate-500 mb-1">ערוץ התראה</div>
-                <select
-                  value={normalizeNotificationCategory(editingEvent.data.notificationCategory)
-                    ?? inferNotificationCategory({ type: editingEvent.data.type, title: editingEvent.data.title })}
-                  onChange={(e) => setEditingEvent((prev) => prev ? ({
-                    ...prev,
-                    data: {
-                      ...prev.data,
-                      notificationCategory: normalizeNotificationCategory(e.target.value) ?? 'general',
-                    },
-                  }) : prev)}
+                <div className="text-xs text-slate-500 mb-1">רמת התראה</div>
+                <NotificationLevelPicker
+                  name="edit-event-level"
+                  value={normalizeNotificationCategory(editingEvent.data.notificationCategory) ?? defaultNotificationLevel}
                   disabled={Boolean(editingEvent.data.completed) || !editingEvent.data.sendNotification}
-                  className="w-full rounded-xl border border-slate-300 px-3 py-1.5 text-sm text-slate-700 outline-none focus:border-blue-400 disabled:opacity-60 disabled:cursor-not-allowed"
-                >
-                  {NOTIFICATION_CATEGORY_OPTIONS.map((option) => (
-                    <option key={`edit-event-channel-${option.value}`} value={option.value}>{option.label}</option>
-                  ))}
-                </select>
+                  onChange={(level) => setEditingEvent((prev) => prev ? ({
+                    ...prev,
+                    data: { ...prev.data, notificationCategory: level },
+                  }) : prev)}
+                />
               </div>
               <label className="flex items-center gap-2 text-sm text-slate-700 font-medium">
                 <input
