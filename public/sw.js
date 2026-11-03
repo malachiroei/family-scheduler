@@ -1,4 +1,4 @@
-const CACHE_NAME = 'family-scheduler-v22';
+const CACHE_NAME = 'family-scheduler-v23';
 /** Same origin as the registered app (localhost or production) — avoids CORS when SW calls the API. */
 const apiUrl = (path) => {
   const normalized = path.startsWith('/') ? path : `/${path}`;
@@ -12,6 +12,19 @@ const pushSoundOptions = ['/sounds/standard.mp3', '/sounds/bell.mp3', '/sounds/m
 const defaultPushPreferences = {
   reminderLeadMinutes: 10,
   sound: '/sounds/standard.mp3',
+};
+
+/** Same channels the server sends: tag groups them, vibrate and requireInteraction set importance. */
+const notificationChannels = {
+  medical: { tag: 'medical', vibrate: [400, 150, 400, 150, 400], importance: 'high', requireInteraction: true, renotify: true },
+  game: { tag: 'game', vibrate: [200, 80, 200, 80, 500], importance: 'high', requireInteraction: true, renotify: true },
+  training: { tag: 'training', vibrate: [120, 70, 120], importance: 'normal', requireInteraction: false, renotify: true },
+  general: { tag: 'general', vibrate: [80, 40, 80], importance: 'low', requireInteraction: false, renotify: false },
+};
+
+const notificationChannelFor = (payload) => {
+  const raw = String(payload?.category || payload?.channel || payload?.tag || 'general').trim().toLowerCase();
+  return notificationChannels[raw] || notificationChannels.general;
 };
 
 let pushPreferences = { ...defaultPushPreferences };
@@ -128,13 +141,17 @@ self.addEventListener('push', (event) => {
 
   const leadMinutes = sanitizeReminderLead(pushPreferences.reminderLeadMinutes);
   const sound = sanitizePushSound(pushPreferences.sound);
+  const channel = notificationChannelFor(payload);
 
   const options = {
     // The server already writes the exact time left into the body.
     body: payload.body,
     icon: appIcon(),
     badge: appIcon(),
-    vibrate: [200, 100, 200],
+    tag: payload.tag || channel.tag,
+    renotify: channel.renotify,
+    vibrate: channel.vibrate,
+    requireInteraction: channel.requireInteraction,
     actions: Array.isArray(payload.actions)
       ? payload.actions
       : (payload.confirmTask ? [{ action: 'confirm', title: 'אישרתי שראיתי' }] : []),
@@ -143,6 +160,8 @@ self.addEventListener('push', (event) => {
       sound,
       reminderLeadMinutes: leadMinutes,
       confirmTask: payload.confirmTask || null,
+      category: channel.tag,
+      importance: channel.importance,
     },
   };
 

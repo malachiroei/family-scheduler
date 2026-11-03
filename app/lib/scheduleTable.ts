@@ -1,5 +1,6 @@
 import { sql } from "@/app/lib/db";
 import { defaultChildKey } from "@/app/lib/familyMembers";
+import { inferNotificationCategory, normalizeNotificationCategory, type NotificationCategory } from "@/app/lib/notificationCategory";
 import { parseFlexibleDate } from "@/app/lib/scheduleDate";
 import { normalizeMetadataTime, parseMetadataBoolean } from "@/app/lib/scheduleTime";
 
@@ -29,6 +30,8 @@ export type ScheduleEventMetadata = {
   eventDate?: string | null;
   /** "fixtures" for spreadsheet imports. */
   source?: string | null;
+  /** Push channel: game, medical, training, or general. Null on older rows — callers infer from type and title. */
+  notificationCategory?: NotificationCategory | null;
 };
 
 const defaultMetadata = (): ScheduleEventMetadata => ({
@@ -51,6 +54,7 @@ const defaultMetadata = (): ScheduleEventMetadata => ({
   league: null,
   eventDate: null,
   source: null,
+  notificationCategory: null,
 });
 
 /** Accepts whole weeks 2..8; anything else (including 1) means plain weekly and is stored as null. */
@@ -128,6 +132,9 @@ export const parseScheduleMetadata = (raw: unknown): ScheduleEventMetadata => {
     league: typeof o.league === "string" && o.league.trim() ? o.league.trim() : null,
     eventDate: parseFlexibleDate(o.eventDate ?? o.event_date),
     source: typeof o.source === "string" && o.source.trim() ? o.source.trim() : null,
+    notificationCategory: normalizeNotificationCategory(
+      o.notificationCategory ?? o.notification_category ?? o.category,
+    ),
   };
 };
 
@@ -151,6 +158,8 @@ export const buildMetadataFromIncoming = (incoming: {
   league?: string | null;
   eventDate?: string | null;
   source?: string | null;
+  title?: string | null;
+  notificationCategory?: unknown;
 }): ScheduleEventMetadata => {
   const recurring = parseMetadataBoolean(incoming.isRecurring);
   return {
@@ -173,6 +182,11 @@ export const buildMetadataFromIncoming = (incoming: {
     league: incoming.league ?? null,
     eventDate: incoming.eventDate ?? null,
     source: incoming.source ?? null,
+    notificationCategory: inferNotificationCategory({
+      category: incoming.notificationCategory,
+      type: incoming.type,
+      title: incoming.title,
+    }),
   };
 };
 

@@ -12,6 +12,7 @@ import { fallbackRoster, isPlaceholderMemberName, looksLikeMemberId, type Family
 import { loadFamilyRoster, peekFamilyRoster } from "@/app/lib/familyRosterStore";
 import { parseFlexibleDate, weekdayIndexUtc } from "@/app/lib/scheduleDate";
 import { dateForWeekdayInRange, parseHebrewScheduleRange, parseWeeklyScheduleMessage } from "@/app/lib/weeklyScheduleParse";
+import { inferNotificationCategory, sharedNotificationCategory } from "@/app/lib/notificationCategory";
 import { resolveGeminiApiKey } from "@/app/lib/llmKeys";
 
 export const dynamic = 'force-dynamic';
@@ -277,6 +278,11 @@ const sanitizeDbEvent = (event: unknown, roster: FamilyRoster = fallbackRoster) 
   const reminderLeadMinutes = parseReminderLeadMinutes(
     candidate.reminderLeadMinutes ?? candidate.reminder_lead_minutes
   );
+  const notificationCategory = inferNotificationCategory({
+    category: candidate.notificationCategory ?? candidate.notification_category ?? candidate.category,
+    type,
+    title,
+  });
   const userId = typeof candidate.userId === "string" && candidate.userId.trim()
     ? candidate.userId.trim()
     : (typeof candidate.user_id === "string" && candidate.user_id.trim() ? candidate.user_id.trim() : "system");
@@ -312,6 +318,7 @@ const sanitizeDbEvent = (event: unknown, roster: FamilyRoster = fallbackRoster) 
     requireConfirmation,
     needsAck,
     reminderLeadMinutes,
+    notificationCategory,
     userId,
     eventDate: date,
     source: typeof candidate.source === "string" && candidate.source.trim() ? candidate.source.trim() : null,
@@ -624,6 +631,11 @@ const upsertScheduleEvent = async (incoming: ReturnType<typeof sanitizeDbEvent>)
         requireConfirmation: meta.needsAck ?? meta.requireConfirmation,
         reminderLeadMinutes: parseReminderLeadMinutes(meta.reminderLeadMinutes),
         league: meta.league ?? undefined,
+        notificationCategory: inferNotificationCategory({
+          category: meta.notificationCategory,
+          type: meta.type,
+          title: String(saved.title),
+        }),
       },
     };
   } catch (error) {
@@ -743,6 +755,11 @@ async function handleGet() {
         requireConfirmation: meta.needsAck ?? meta.requireConfirmation,
         reminderLeadMinutes: parseReminderLeadMinutes(meta.reminderLeadMinutes),
         league: meta.league ?? undefined,
+        notificationCategory: inferNotificationCategory({
+          category: meta.notificationCategory,
+          type: meta.type,
+          title: r.title,
+        }),
       };
     });
 
@@ -1112,6 +1129,7 @@ export async function POST(request: NextRequest) {
               title: "משימה חדשה נוספה",
               body: `נוספה משימה ל${getChildTargetLabel(flatIncoming.child, roster)}: ${flatIncoming.title} - ${flatIncoming.time}`,
               url: "/",
+              category: flatIncoming.notificationCategory,
             },
             { excludeEndpoint: senderSubscriptionEndpoint }
           );
@@ -1146,6 +1164,7 @@ export async function POST(request: NextRequest) {
               title: "משימה חדשה נוספה",
               body: `נוספה משימה ל${getChildTargetLabel(incoming.child, roster)}: ${incoming.title} - ${incoming.time}`,
               url: "/",
+              category: incoming.notificationCategory,
             },
             { excludeEndpoint: senderSubscriptionEndpoint }
           );
@@ -1246,6 +1265,7 @@ export async function POST(request: NextRequest) {
           title: "משימות חדשות נוספו",
           body: `נוספו ${savedEvents.length} משימות עבור: ${bulkChildrenText}`,
           url: "/",
+          category: sharedNotificationCategory(savedEvents),
         },
         { excludeEndpoint: senderSubscriptionEndpoint }
       );

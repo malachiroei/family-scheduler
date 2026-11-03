@@ -2,12 +2,20 @@ import { sql } from "@/app/lib/db";
 import { ensureScheduleMetadataColumn, parseScheduleMetadata } from "@/app/lib/scheduleTable";
 import { fallbackRoster, type FamilyRoster } from "@/app/lib/familyMembers";
 import { loadFamilyRoster, peekFamilyRoster } from "@/app/lib/familyRosterStore";
+import {
+  inferNotificationCategory,
+  notificationChannelProfile,
+  type NotificationCategory,
+} from "@/app/lib/notificationCategory";
 import webpush from "web-push";
 
 type PushPayload = {
   title: string;
   body: string;
   url?: string;
+  /** Channel the service worker groups by: game, medical, training, or general. */
+  category?: NotificationCategory | string;
+  tag?: string;
   actions?: Array<{ action: string; title: string }>;
   confirmTask?: {
     eventId: string;
@@ -40,6 +48,7 @@ type TaskRow = {
   require_confirmation?: boolean;
   needs_ack?: boolean;
   reminder_lead_minutes?: number | null;
+  notification_category?: NotificationCategory | null;
 };
 
 type ChildUserName = string;
@@ -289,7 +298,9 @@ const sendToSubscription = async (row: SubscriptionRow, payload: PushPayload) =>
   }
 
   try {
-    console.log("Sending Push Notification for:", payload.confirmTask?.eventTitle || payload.title);
+    const category = inferNotificationCategory({ category: payload.category });
+    const channel = notificationChannelProfile(category);
+    console.log("Sending Push Notification for:", payload.confirmTask?.eventTitle || payload.title, "category:", category);
     console.log("Sending push to:", row.endpoint);
     await withTimeout(
       webpush.sendNotification(
@@ -300,8 +311,13 @@ const sendToSubscription = async (row: SubscriptionRow, payload: PushPayload) =>
             auth: row.auth,
           },
         },
-        JSON.stringify(payload),
-        { timeout: PUSH_SEND_TIMEOUT_MS, TTL: 60 },
+        JSON.stringify({
+          ...payload,
+          category,
+          tag: payload.tag || channel.tag,
+          importance: channel.importance,
+        }),
+        { timeout: PUSH_SEND_TIMEOUT_MS, TTL: 60, urgency: channel.urgency },
       ),
       PUSH_SEND_TIMEOUT_MS,
       "webpush",
@@ -677,6 +693,11 @@ export const sendUpcomingTaskReminders = async (
         require_confirmation: m.requireConfirmation,
         needs_ack: m.needsAck,
         reminder_lead_minutes: m.reminderLeadMinutes,
+        notification_category: inferNotificationCategory({
+          category: m.notificationCategory,
+          type: m.type,
+          title: r.title,
+        }),
       } as TaskRow;
     }),
     rowCount: tasksRaw.rowCount,
@@ -730,6 +751,7 @@ export const sendUpcomingTaskReminders = async (
     dispatchKey: string;
     childSubscriptionName: string;
     childDisplayName: string;
+    category: NotificationCategory;
   }> = [];
   const taskOutcomes = new Map<string, {
     hadDue: boolean;
@@ -865,6 +887,7 @@ export const sendUpcomingTaskReminders = async (
         dispatchKey: `${task.id}:${taskStartUtc.toISOString()}:${reminderLeadMinutes}:${subscription.endpoint}`,
         childSubscriptionName,
         childDisplayName,
+        category: task.notification_category || inferNotificationCategory({ type: task.type, title: task.text }),
       });
     }
   }
@@ -911,6 +934,7 @@ export const sendUpcomingTaskReminders = async (
           ? `${job.taskTitle} מתחילה בעוד ${formatMinutesHe(job.diffMinutes)} (${job.taskTime})`
           : `${job.taskTitle} מתחילה עכשיו (${job.taskTime})`,
         url: "/",
+        category: job.category,
         actions: [{ action: "confirm", title: "אישרתי שראיתי" }],
         confirmTask: {
           eventId: job.taskId,

@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse, after } from "next/server";
 import { sql, sqlJson } from "@/app/lib/db";
 import { buildMetadataFromIncoming } from "@/app/lib/scheduleTable";
+import { sharedNotificationCategory } from "@/app/lib/notificationCategory";
 import { sendPushToAll } from "@/app/lib/push";
 import {
   fixtureSenderKey,
@@ -989,6 +990,7 @@ export async function POST(request: NextRequest) {
         time,
         child: kid,
         type,
+        title,
         isRecurring: false,
         completed: false,
         sendNotification: true,
@@ -1083,6 +1085,7 @@ export async function POST(request: NextRequest) {
                 ? `נוספו ${saved.length} משימות עבור ${kidsLabel}`
                 : `נוספה משימה ל${kidsLabel}: ${saved[0].title} - ${saved[0].time}`,
             url: "/",
+            category: sharedNotificationCategory(saved),
           },
           { excludeEndpoint: senderEndpoint },
         );

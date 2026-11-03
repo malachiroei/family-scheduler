@@ -19,6 +19,12 @@ import {
 } from '@/app/lib/weeklyScheduleParse';
 import { fixtureLeagueBadge } from '@/app/lib/fixtureLeague';
 import {
+  inferNotificationCategory,
+  NOTIFICATION_CATEGORY_OPTIONS,
+  normalizeNotificationCategory,
+  type NotificationCategory,
+} from '@/app/lib/notificationCategory';
+import {
   canonicalHebrewName,
   createFamilyRoster,
   escapeRegExp,
@@ -69,6 +75,7 @@ type SchedulerEvent = {
   sendNotification?: boolean;
   requireConfirmation?: boolean;
   reminderLeadMinutes?: ReminderLeadMinutes;
+  notificationCategory?: NotificationCategory;
   league?: string;
 };
 
@@ -119,6 +126,7 @@ type RecurringTemplate = {
   sendNotification?: boolean;
   requireConfirmation?: boolean;
   reminderLeadMinutes?: ReminderLeadMinutes;
+  notificationCategory?: NotificationCategory;
 };
 
 type NewEventDraft = {
@@ -132,6 +140,7 @@ type NewEventDraft = {
     sendNotification: boolean;
     requireConfirmation: boolean;
     reminderLeadMinutes: ReminderLeadMinutes;
+    notificationCategory: NotificationCategory;
   };
 };
 
@@ -215,6 +224,7 @@ type ScheduleApiEvent = {
   sendNotification?: boolean;
   requireConfirmation?: boolean;
   reminderLeadMinutes?: ReminderLeadMinutes;
+  notificationCategory?: NotificationCategory;
   league?: string;
 };
 
@@ -1825,6 +1835,8 @@ const createWeekDays = (
       sendNotification: event.sendNotification ?? true,
       requireConfirmation: Boolean(event.requireConfirmation),
       reminderLeadMinutes: sanitizeReminderLead(event.reminderLeadMinutes),
+      notificationCategory: normalizeNotificationCategory(event.notificationCategory)
+        ?? inferNotificationCategory({ type: event.type, title: event.title }),
     });
   };
 
@@ -1854,6 +1866,8 @@ const createWeekDays = (
       sendNotification: template.sendNotification,
       requireConfirmation: template.requireConfirmation,
       reminderLeadMinutes: template.reminderLeadMinutes,
+      notificationCategory: template.notificationCategory
+        ?? inferNotificationCategory({ type: template.type, title: template.title }),
     });
   });
 
@@ -3384,6 +3398,8 @@ export default function FamilyScheduler() {
           sendNotification: event.sendNotification ?? true,
           requireConfirmation: Boolean(event.requireConfirmation),
           reminderLeadMinutes: sanitizeReminderLead(event.reminderLeadMinutes),
+          notificationCategory: normalizeNotificationCategory(event.notificationCategory)
+            ?? inferNotificationCategory({ type: event.type, title: event.title }),
         });
       }
     });
@@ -3438,6 +3454,8 @@ export default function FamilyScheduler() {
           sendNotification: event.sendNotification ?? true,
           requireConfirmation: Boolean(event.requireConfirmation),
           reminderLeadMinutes: sanitizeReminderLead(event.reminderLeadMinutes),
+          notificationCategory: normalizeNotificationCategory(event.notificationCategory)
+            ?? inferNotificationCategory({ type: event.type, title: event.title }),
           league: event.league,
         };
         const dayEvents = weekDays[dayIndex].events;
@@ -4042,6 +4060,8 @@ export default function FamilyScheduler() {
         sendNotification: ev.sendNotification ?? true,
         requireConfirmation: Boolean(ev.requireConfirmation),
         reminderLeadMinutes: sanitizeReminderLead(ev.reminderLeadMinutes),
+        notificationCategory: normalizeNotificationCategory(ev.notificationCategory)
+          ?? inferNotificationCategory({ type: ev.type, title: ev.title }),
         league: ev.league,
       },
     });
@@ -4919,6 +4939,7 @@ export default function FamilyScheduler() {
         sendNotification: true,
         requireConfirmation: false,
         reminderLeadMinutes,
+        notificationCategory: inferNotificationCategory({ type: 'lesson' }),
       },
     });
   };
@@ -4968,6 +4989,8 @@ export default function FamilyScheduler() {
       sendNotification: Boolean(creatingEvent.data.sendNotification),
       requireConfirmation: Boolean(creatingEvent.data.requireConfirmation),
       reminderLeadMinutes: sanitizeReminderLead(creatingEvent.data.reminderLeadMinutes),
+      notificationCategory: normalizeNotificationCategory(creatingEvent.data.notificationCategory)
+        ?? inferNotificationCategory({ type: creatingEvent.data.type, title }),
     };
 
     const targetWeekKey = toIsoDate(targetWeekStart);
@@ -5125,6 +5148,8 @@ export default function FamilyScheduler() {
       title: trimmedTitle,
       time: normalizeTimeForPicker(editingEvent.data.time),
       reminderLeadMinutes: sanitizeReminderLead(editingEvent.data.reminderLeadMinutes),
+      notificationCategory: normalizeNotificationCategory(editingEvent.data.notificationCategory)
+        ?? inferNotificationCategory({ type: editingEvent.data.type, title: trimmedTitle }),
       isRecurring: editingEvent.recurringWeekly,
       recurringTemplateId: editingEvent.recurringWeekly
         ? (editingEvent.originalRecurringTemplateId ?? editingEvent.data.recurringTemplateId ?? generateId())
@@ -6247,7 +6272,14 @@ export default function FamilyScheduler() {
                       <button
                         key={`create-${preset.value}`}
                         type="button"
-                        onClick={() => setCreatingEvent((prev) => prev ? ({ ...prev, data: { ...prev.data, type: preset.value } }) : prev)}
+                        onClick={() => setCreatingEvent((prev) => prev ? ({
+                          ...prev,
+                          data: {
+                            ...prev.data,
+                            type: preset.value,
+                            notificationCategory: inferNotificationCategory({ type: preset.value, title: prev.data.title }),
+                          },
+                        }) : prev)}
                         className={`rounded-xl border px-2 py-2 text-xs font-semibold transition ${active ? 'bg-blue-50 border-blue-400 text-blue-700' : 'bg-white border-slate-300 text-slate-700 hover:bg-slate-50'}`}
                       >
                         <span className="text-base" aria-hidden="true">{preset.emoji}</span>
@@ -6303,6 +6335,25 @@ export default function FamilyScheduler() {
                 >
                   {reminderLeadOptions.map((minutes) => (
                     <option key={`create-event-lead-${minutes}`} value={minutes}>{reminderLeadLabel(minutes)}</option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <div className="text-xs text-slate-500 mb-1">ערוץ התראה</div>
+                <select
+                  value={creatingEvent.data.notificationCategory}
+                  onChange={(e) => setCreatingEvent((prev) => prev ? ({
+                    ...prev,
+                    data: {
+                      ...prev.data,
+                      notificationCategory: normalizeNotificationCategory(e.target.value) ?? 'general',
+                    },
+                  }) : prev)}
+                  disabled={!creatingEvent.data.sendNotification}
+                  className="w-full rounded-xl border border-slate-300 px-3 py-1.5 text-sm text-slate-700 outline-none focus:border-blue-400 disabled:opacity-60 disabled:cursor-not-allowed"
+                >
+                  {NOTIFICATION_CATEGORY_OPTIONS.map((option) => (
+                    <option key={`create-event-channel-${option.value}`} value={option.value}>{option.label}</option>
                   ))}
                 </select>
               </div>
@@ -6468,7 +6519,14 @@ export default function FamilyScheduler() {
               <input
                 list="activity-types"
                 value={editingEvent.data.type}
-                onChange={(e) => setEditingEvent((prev) => prev ? ({ ...prev, data: { ...prev.data, type: e.target.value as EventType } }) : prev)}
+                onChange={(e) => setEditingEvent((prev) => prev ? ({
+                  ...prev,
+                  data: {
+                    ...prev.data,
+                    type: e.target.value as EventType,
+                    notificationCategory: inferNotificationCategory({ type: e.target.value, title: prev.data.title }),
+                  },
+                }) : prev)}
                 disabled={Boolean(editingEvent.data.completed)}
                 className="mt-1 w-full border border-slate-300 rounded-xl px-3 py-2 outline-none focus:border-blue-400"
                 placeholder="בחר או הקלד סוג פעילות"
@@ -6558,6 +6616,26 @@ export default function FamilyScheduler() {
                 >
                   {reminderLeadOptions.map((minutes) => (
                     <option key={`edit-event-lead-${minutes}`} value={minutes}>{reminderLeadLabel(minutes)}</option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <div className="text-xs text-slate-500 mb-1">ערוץ התראה</div>
+                <select
+                  value={normalizeNotificationCategory(editingEvent.data.notificationCategory)
+                    ?? inferNotificationCategory({ type: editingEvent.data.type, title: editingEvent.data.title })}
+                  onChange={(e) => setEditingEvent((prev) => prev ? ({
+                    ...prev,
+                    data: {
+                      ...prev.data,
+                      notificationCategory: normalizeNotificationCategory(e.target.value) ?? 'general',
+                    },
+                  }) : prev)}
+                  disabled={Boolean(editingEvent.data.completed) || !editingEvent.data.sendNotification}
+                  className="w-full rounded-xl border border-slate-300 px-3 py-1.5 text-sm text-slate-700 outline-none focus:border-blue-400 disabled:opacity-60 disabled:cursor-not-allowed"
+                >
+                  {NOTIFICATION_CATEGORY_OPTIONS.map((option) => (
+                    <option key={`edit-event-channel-${option.value}`} value={option.value}>{option.label}</option>
                   ))}
                 </select>
               </div>
