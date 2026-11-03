@@ -1,5 +1,5 @@
 import { sql } from "@/app/lib/db";
-import { ensureScheduleMetadataColumn, parseScheduleMetadata } from "@/app/lib/scheduleTable";
+import { parseScheduleMetadata } from "@/app/lib/scheduleTable";
 import { fallbackRoster, type FamilyRoster } from "@/app/lib/familyMembers";
 import { loadFamilyRoster, peekFamilyRoster } from "@/app/lib/familyRosterStore";
 import {
@@ -96,7 +96,6 @@ const normalizeTaskChildNames = (rawChild: string, roster: FamilyRoster): ChildU
 };
 
 const reminderLeadOptions = [5, 10, 15, 30, 60, 120, 1440] as const;
-const MAX_REMINDER_LEAD_MINUTES = 1440;
 
 /** 90 -> "שעה ו-30 דקות", 1440 -> "יום", 45 -> "45 דקות" */
 const formatMinutesHe = (total: number) => {
@@ -277,7 +276,7 @@ export const removePushSubscription = async (endpoint: string) => {
   await sql`DELETE FROM push_subscriptions WHERE endpoint = ${trimmed}`;
 };
 
-const PUSH_SEND_TIMEOUT_MS = 8_000;
+const PUSH_SEND_TIMEOUT_MS = 3_000;
 
 const withTimeout = <T>(promise: Promise<T>, ms: number, label: string): Promise<T> => {
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -291,61 +290,76 @@ const withTimeout = <T>(promise: Promise<T>, ms: number, label: string): Promise
   });
 };
 
+/** One delete for every endpoint the push service reported as gone. Never throws. */
+const dropSubscriptions = async (endpoints: string[]) => {
+  const unique = [...new Set(endpoints.map((endpoint) => endpoint.trim()).filter(Boolean))];
+  if (!unique.length) return;
+  try {
+    await withTimeout(
+      sql`DELETE FROM push_subscriptions WHERE endpoint = ANY(${unique})`,
+      2_000,
+      "drop-subscriptions",
+    );
+  } catch {
+    // A slow cleanup must not block the cron.
+  }
+};
+
 const sendToSubscription = async (row: SubscriptionRow, payload: PushPayload) => {
   if (!initVapid()) {
-    console.error("[PUSH] Missing VAPID config; cannot send notification");
     return { ok: false as const, removed: false, reason: "missing-vapid", statusCode: 0, message: "VAPID keys are not configured on the server" };
   }
 
+  const category = inferNotificationCategory({ category: payload.category });
+  const channel = notificationChannelProfile(category);
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), PUSH_SEND_TIMEOUT_MS);
   try {
-    const category = inferNotificationCategory({ category: payload.category });
-    const channel = notificationChannelProfile(category);
-    console.log("Sending Push Notification for:", payload.confirmTask?.eventTitle || payload.title, "category:", category);
-    console.log("Sending push to:", row.endpoint);
-    await withTimeout(
-      webpush.sendNotification(
-        {
-          endpoint: row.endpoint,
-          keys: {
-            p256dh: row.p256dh,
-            auth: row.auth,
-          },
+    const details = webpush.generateRequestDetails(
+      {
+        endpoint: row.endpoint,
+        keys: {
+          p256dh: row.p256dh,
+          auth: row.auth,
         },
-        JSON.stringify({
-          ...payload,
-          category,
-          tag: payload.tag || channel.tag,
-          importance: channel.importance,
-        }),
-        { timeout: PUSH_SEND_TIMEOUT_MS, TTL: 60, urgency: channel.urgency },
-      ),
-      PUSH_SEND_TIMEOUT_MS,
-      "webpush",
+      },
+      JSON.stringify({
+        ...payload,
+        category,
+        tag: payload.tag || channel.tag,
+        importance: channel.importance,
+      }),
+      { TTL: 60, urgency: channel.urgency },
     );
-
+    const headers: Record<string, string> = {};
+    for (const [key, value] of Object.entries(details.headers as Record<string, unknown>)) {
+      if (value != null) headers[key] = String(value);
+    }
+    const response = await fetch(details.endpoint, {
+      method: "POST",
+      headers,
+      body: details.body ? new Uint8Array(details.body) : undefined,
+      signal: controller.signal,
+    });
+    void response.body?.cancel().catch(() => undefined);
+    if (response.status === 404 || response.status === 410) {
+      return { ok: false as const, removed: true, reason: "expired-subscription", statusCode: response.status, message: "gone" };
+    }
+    if (!response.ok) {
+      return { ok: false as const, removed: false, reason: "send-failed", statusCode: response.status, message: response.statusText || "push rejected" };
+    }
     return { ok: true as const, removed: false };
   } catch (error) {
-    const statusCode = typeof (error as { statusCode?: unknown })?.statusCode === "number"
-      ? ((error as { statusCode: number }).statusCode)
-      : 0;
-    const message = error instanceof Error ? error.message : String(error);
-
-    if (statusCode === 404 || statusCode === 410) {
-      await removePushSubscription(row.endpoint);
-      console.warn("[PUSH] Subscription expired and removed", {
-        statusCode,
-        endpointPrefix: row.endpoint.slice(0, 40),
-      });
-      return { ok: false as const, removed: true, reason: "expired-subscription", statusCode, message };
-    }
-
-    console.error("[PUSH] Failed to send notification", {
-      statusCode,
-      message,
-      endpointPrefix: row.endpoint.slice(0, 40),
-    });
-
-    return { ok: false as const, removed: false, reason: "send-failed", statusCode, message };
+    const aborted = error instanceof Error && (error.name === "AbortError" || error.name === "TimeoutError");
+    return {
+      ok: false as const,
+      removed: false,
+      reason: aborted ? "timeout" : "send-failed",
+      statusCode: 0,
+      message: aborted ? "push timed out" : (error instanceof Error ? error.message : String(error)),
+    };
+  } finally {
+    clearTimeout(timer);
   }
 };
 
@@ -368,12 +382,16 @@ export const sendPushToAll = async (
   }
 
   let sent = 0;
+  const deadEndpoints: string[] = [];
   for (const row of targets) {
     const result = await sendToSubscription(row, payload);
     if (result.ok) {
       sent += 1;
+    } else if (result.removed) {
+      deadEndpoints.push(row.endpoint);
     }
   }
+  await dropSubscriptions(deadEndpoints);
 
   return { sent, skipped: (rowsResult.rowCount || 0) - targets.length };
 };
@@ -398,7 +416,11 @@ export const sendPushToEndpoint = async (endpoint: string, payload: PushPayload)
     return { ok: false as const, reason: "endpoint-not-found" };
   }
 
-  return sendToSubscription(row, payload);
+  const result = await sendToSubscription(row, payload);
+  if (result.removed) {
+    await dropSubscriptions([row.endpoint]);
+  }
+  return result;
 };
 
 export const sendPushToParents = async (
@@ -425,12 +447,16 @@ export const sendPushToParents = async (
   }
 
   let sent = 0;
+  const deadEndpoints: string[] = [];
   for (const row of targets) {
     const result = await sendToSubscription(row, payload);
     if (result.ok) {
       sent += 1;
+    } else if (result.removed) {
+      deadEndpoints.push(row.endpoint);
     }
   }
+  await dropSubscriptions(deadEndpoints);
 
   return { sent, skipped: (rowsResult.rowCount || 0) - targets.length };
 };
@@ -519,6 +545,16 @@ const getNowInTimeZone = (timeZone: string) => {
   };
 };
 
+/** Calendar date after shifting a local YYYY-MM-DD + minute-of-day by deltaMinutes. */
+const shiftIsoDate = (dateKey: string, minuteOfDay: number, deltaMinutes: number) => {
+  const [year, month, day] = dateKey.split("-").map(Number);
+  const shifted = new Date(Date.UTC(year, month - 1, day, 0, minuteOfDay) + deltaMinutes * 60_000);
+  const y = shifted.getUTCFullYear();
+  const m = `${shifted.getUTCMonth() + 1}`.padStart(2, "0");
+  const d = `${shifted.getUTCDate()}`.padStart(2, "0");
+  return `${y}-${m}-${d}`;
+};
+
 // Accepts YYYY-MM-DD, ISO timestamps, DD-MM-YYYY, DD.MM.YYYY and DD/MM/YYYY (1-2 digit day/month) -> YYYY-MM-DD or ISO as-is.
 const normalizeDayString = (value: string) => {
   const trimmed = value.trim();
@@ -590,24 +626,6 @@ const parseTaskStartUtc = (dayValue: string, timeValue: string) => {
   return null;
 };
 
-const wasReminderDispatched = async (dispatchKey: string) => {
-  const existing = await sql`
-    SELECT dispatch_key
-    FROM push_reminder_dispatches
-    WHERE dispatch_key = ${dispatchKey}
-    LIMIT 1
-  `;
-  return Boolean(existing.rowCount);
-};
-
-const markReminderDispatched = async (dispatchKey: string) => {
-  await sql`
-    INSERT INTO push_reminder_dispatches (dispatch_key, sent_at)
-    VALUES (${dispatchKey}, NOW())
-    ON CONFLICT (dispatch_key) DO NOTHING
-  `;
-};
-
 export const sendUpcomingTaskReminders = async (
   options?: {
     windowForwardMinutes?: number;
@@ -616,18 +634,12 @@ export const sendUpcomingTaskReminders = async (
     onAttempt?: (attempt: { userName: string; eventTitle: string }) => void;
   }
 ) => {
-  await ensurePushTables();
-  const roster = await loadFamilyRoster();
-  try {
-    await ensureScheduleMetadataColumn();
-  } catch {
-    // no-op: schedule route also ensures metadata column
-  }
+  const roster = peekFamilyRoster() ?? await loadFamilyRoster();
 
   const windowForwardMinutesRaw = Number(options?.windowForwardMinutes);
   const windowForwardMinutes = Number.isFinite(windowForwardMinutesRaw)
-    ? Math.max(0, Math.min(15, Math.floor(windowForwardMinutesRaw)))
-    : 15;
+    ? Math.max(1, Math.min(30, Math.floor(windowForwardMinutesRaw)))
+    : 30;
   const strictChildUserOnly = options?.strictChildUserOnly === true;
   const timeZone = typeof options?.timeZone === "string" && options.timeZone.trim()
     ? options.timeZone.trim()
@@ -635,54 +647,73 @@ export const sendUpcomingTaskReminders = async (
   const nowUtc = new Date();
   const nowUtcMs = nowUtc.getTime();
   const nowInTimeZone = timeZone ? getNowInTimeZone(timeZone) : null;
+  const emptyResult = {
+    scanned: 0,
+    sent: 0,
+    windowForwardMinutes,
+    timeZone: timeZone || null,
+  };
 
-  const subscriptionsResult = await sql<SubscriptionRow>`
-    SELECT endpoint, p256dh, auth, user_name, receive_all, watch_children, reminder_lead_minutes
-    FROM push_subscriptions
-  `;
-
-  const subscriptions = subscriptionsResult.rows;
-  console.log(
-    "[notifications:check] subscriptions found:",
-    subscriptions.length,
-    JSON.stringify(subscriptions.map((s) => ({ user: s.user_name, receiveAll: s.receive_all, watch: s.watch_children, lead: s.reminder_lead_minutes })))
-  );
-  if (!subscriptions.length) {
-    console.log("[notifications:check] no push subscriptions in DB - exiting before reading tasks");
-    return { scanned: 0, sent: 0 };
+  let subscriptions: SubscriptionRow[] = [];
+  try {
+    const subscriptionsResult = await sql<SubscriptionRow>`
+      SELECT endpoint, p256dh, auth, user_name, receive_all, watch_children, reminder_lead_minutes
+      FROM push_subscriptions
+    `;
+    subscriptions = subscriptionsResult.rows;
+  } catch (error) {
+    console.error("[notifications:check] subscription query failed", error);
+    return emptyResult;
   }
 
-  const tasksRaw = await sql`
-    SELECT s.id, s.title, s."date", s.metadata,
-           to_jsonb(s)->>'start_time' AS start_time,
-           to_jsonb(s)->>'child_id' AS child_id,
-           to_jsonb(s)->>'notified' AS notified_col
-    FROM schedule s
-    WHERE COALESCE((s.metadata->'sendNotification')::boolean, true) = true
-      AND COALESCE((s.metadata->'completed')::boolean, false) = false
-      AND COALESCE((s.metadata->'notified')::boolean, false) = false
-      AND COALESCE((to_jsonb(s)->>'notified')::boolean, false) = false
-  `;
+  console.log("[notifications:check] subscriptions found:", subscriptions.length);
+  if (!subscriptions.length) {
+    return emptyResult;
+  }
+
+  const windowAnchor = nowInTimeZone ?? {
+    dateKey: nowUtc.toISOString().slice(0, 10),
+    minutes: nowUtc.getUTCHours() * 60 + nowUtc.getUTCMinutes(),
+  };
+  const fromDate = shiftIsoDate(windowAnchor.dateKey, windowAnchor.minutes, -REMINDER_GRACE_MINUTES);
+  const toDate = shiftIsoDate(windowAnchor.dateKey, windowAnchor.minutes, windowForwardMinutes);
+
+  let tasksRaw: { rows: Array<Record<string, unknown>>; rowCount: number };
+  try {
+    tasksRaw = await sql`
+      SELECT id, title, "date"::text AS day, metadata, start_time, child_id
+      FROM schedule
+      WHERE left("date"::text, 10) >= ${fromDate}
+        AND left("date"::text, 10) <= ${toDate}
+        AND COALESCE((metadata->'sendNotification')::boolean, true) = true
+        AND COALESCE((metadata->'completed')::boolean, false) = false
+        AND COALESCE((metadata->'notified')::boolean, false) = false
+      LIMIT 80
+    `;
+  } catch (error) {
+    console.error("[notifications:check] window query failed", error);
+    return emptyResult;
+  }
 
   const tasksResult = {
     rows: tasksRaw.rows.map((row) => {
       const r = row as {
         id: string;
         title: string;
-        date: string;
+        day?: string;
+        date?: string;
         metadata: unknown;
         start_time?: string | null;
         child_id?: string | null;
-        notified_col?: string | null;
       };
       const m = parseScheduleMetadata(r.metadata);
-      // Dedicated columns win; metadata is the fallback.
-      const columnTime = typeof r.start_time === "string" ? r.start_time.trim() : "";
+      const rawTime = r.start_time == null ? "" : String(r.start_time).trim();
+      const columnTime = rawTime.length >= 5 ? rawTime.slice(0, 5) : rawTime;
       const columnChild = typeof r.child_id === "string" ? r.child_id.trim().toLowerCase() : "";
       return {
         id: r.id,
         text: r.title,
-        day: r.date,
+        day: r.day || r.date || "",
         time: parseTimeToMinutes(columnTime) !== null ? columnTime : m.time,
         child: columnChild || m.child,
         type: m.type,
@@ -703,28 +734,7 @@ export const sendUpcomingTaskReminders = async (
     rowCount: tasksRaw.rowCount,
   };
 
-  console.log(
-    "[notifications:check] fetched tasks count:",
-    tasksResult.rows?.length,
-    "tasks:",
-    JSON.stringify(
-      tasksResult.rows?.map((t) => ({
-        id: t.id,
-        title: t.text,
-        date: t.day,
-        time: t.time,
-        notified: t.notified,
-        child: t.child,
-      }))
-    )
-  );
-
-  if (nowInTimeZone) {
-    const activeToday = tasksResult.rows
-      .filter((task) => parseTaskDateKey(String(task.day || "")) === nowInTimeZone.dateKey)
-      .map((task) => `${task.time} ${task.text} [${task.id}] lead=${task.reminder_lead_minutes ?? "default"}`);
-    console.log("[PUSH_REMIND] active (not notified/completed) tasks today:", activeToday.length ? activeToday : "none");
-  }
+  console.log("[notifications:check] window tasks:", tasksResult.rows.length, fromDate, toDate);
 
   let sent = 0;
   const skippedByReason: Record<string, number> = {
@@ -812,7 +822,7 @@ export const sendUpcomingTaskReminders = async (
     }
 
     // Widest possible lead is 24h; the per-subscription/per-task lead check below narrows it.
-    if (diffMinutes < -REMINDER_GRACE_MINUTES || diffMinutes > MAX_REMINDER_LEAD_MINUTES) {
+    if (diffMinutes < -REMINDER_GRACE_MINUTES || diffMinutes > windowForwardMinutes) {
       skippedByReason.outside_window += 1;
       debugReminderLog("skip outside_window", { taskId: task.id, diffMinutes, taskTime: task.time, nowUtc: nowUtc.toISOString() });
       continue;
@@ -905,12 +915,6 @@ export const sendUpcomingTaskReminders = async (
       }
     } catch (error) {
       console.error("[notifications:check] dispatch lookup failed", error);
-      const checks = await Promise.allSettled(
-        dueSends.map(async (job) => ({ key: job.dispatchKey, already: await wasReminderDispatched(job.dispatchKey) })),
-      );
-      for (const check of checks) {
-        if (check.status === "fulfilled" && check.value.already) dispatchedKeys.add(check.value.key);
-      }
     }
   }
 
@@ -923,7 +927,6 @@ export const sendUpcomingTaskReminders = async (
 
   const sendSettled = await Promise.allSettled(
     pendingSends.map(async (job) => {
-      console.log("Pushing to device of:", job.childSubscriptionName || "(unknown)");
       options?.onAttempt?.({
         userName: job.childSubscriptionName || "(unknown)",
         eventTitle: job.taskTitle,
@@ -942,65 +945,70 @@ export const sendUpcomingTaskReminders = async (
           childName: job.childDisplayName,
         },
       });
-      console.log("[notifications:check] webpush.sendNotification result:", JSON.stringify(sendResult), "user:", job.childSubscriptionName);
-      if (sendResult.ok) {
-        await markReminderDispatched(job.dispatchKey);
-      }
-      return { taskId: job.taskId, ok: sendResult.ok };
+      return {
+        taskId: job.taskId,
+        ok: sendResult.ok,
+        removed: sendResult.removed,
+        endpoint: job.subscription.endpoint,
+        dispatchKey: job.dispatchKey,
+      };
     }),
   );
 
+  const deadEndpoints: string[] = [];
+  const sentKeys: string[] = [];
   for (const item of sendSettled) {
-    if (item.status === "fulfilled" && item.value.ok) {
-      const outcome = taskOutcomes.get(item.value.taskId);
-      if (outcome) outcome.delivered += 1;
-    } else if (item.status === "rejected") {
-      console.error("[notifications:check] push send rejected", item.reason);
+    if (item.status !== "fulfilled") continue;
+    if (item.value.removed) deadEndpoints.push(item.value.endpoint);
+    if (!item.value.ok) continue;
+    sentKeys.push(item.value.dispatchKey);
+    const outcome = taskOutcomes.get(item.value.taskId);
+    if (outcome) outcome.delivered += 1;
+    sent += 1;
+  }
+  await dropSubscriptions(deadEndpoints);
+  if (sentKeys.length) {
+    try {
+      await sql`
+        INSERT INTO push_reminder_dispatches (dispatch_key, sent_at)
+        SELECT key, NOW() FROM unnest(${sentKeys}::text[]) AS key
+        ON CONFLICT (dispatch_key) DO NOTHING
+      `;
+    } catch (error) {
+      console.error("[notifications:check] dispatch insert failed", error);
     }
   }
 
-  const notifiedSettled = await Promise.allSettled(
-    [...taskOutcomes.entries()].map(async ([taskId, outcome]) => {
-      if (!outcome.hadDue) {
-        skippedByReason.offset_not_due += 1;
-        debugReminderLog("skip offset_not_due", {
-          taskId,
-          diffMinutes: outcome.diffMinutes,
-          audienceSubscriptions: outcome.audienceChildren.length,
-        });
-        return;
-      }
-      if (outcome.delivered <= 0) {
-        skippedByReason.delivery_failed += 1;
-        debugReminderLog("skip delivery_failed", {
-          taskId,
-          audienceChildren: outcome.audienceChildren,
-          subscriptions: outcome.audienceChildren.length,
-        });
-        return;
-      }
+  const notifiedIds = [...taskOutcomes.entries()]
+    .filter(([, outcome]) => outcome.delivered > 0)
+    .map(([taskId]) => taskId);
+  for (const [taskId, outcome] of taskOutcomes) {
+    if (!outcome.hadDue) {
+      skippedByReason.offset_not_due += 1;
+    } else if (outcome.delivered <= 0) {
+      skippedByReason.delivery_failed += 1;
+    } else {
+      debugReminderLog("sent", { taskId, deliveredForTask: outcome.delivered, diffMinutes: outcome.diffMinutes });
+    }
+  }
+  if (notifiedIds.length) {
+    try {
+      await sql`
+        UPDATE schedule
+        SET metadata = jsonb_set(COALESCE(metadata, '{}'::jsonb), '{notified}', 'true'::jsonb, true),
+            notified = true
+        WHERE id = ANY(${notifiedIds})
+      `;
+    } catch {
       try {
         await sql`
           UPDATE schedule
-          SET metadata = jsonb_set(COALESCE(metadata, '{}'::jsonb), '{notified}', 'true'::jsonb, true),
-              notified = true
-          WHERE id = ${taskId}
-        `;
-      } catch {
-        await sql`
-          UPDATE schedule
           SET metadata = jsonb_set(COALESCE(metadata, '{}'::jsonb), '{notified}', 'true'::jsonb, true)
-          WHERE id = ${taskId}
+          WHERE id = ANY(${notifiedIds})
         `;
+      } catch (error) {
+        console.error("[notifications:check] mark notified failed", error);
       }
-      console.log("[notifications:check] marked notified=true:", taskId);
-      sent += outcome.delivered;
-      debugReminderLog("sent", { taskId, deliveredForTask: outcome.delivered, diffMinutes: outcome.diffMinutes, audienceChildren: outcome.audienceChildren });
-    }),
-  );
-  for (const item of notifiedSettled) {
-    if (item.status === "rejected") {
-      console.error("[notifications:check] mark notified failed", item.reason);
     }
   }
 

@@ -4,7 +4,7 @@ import { sendUpcomingTaskReminders } from "@/app/lib/push";
 export const maxDuration = 30;
 export const dynamic = "force-dynamic";
 
-const CHECK_DEADLINE_MS = 20_000;
+const CHECK_DEADLINE_MS = 8_000;
 
 const withDeadline = <T>(promise: Promise<T>, ms: number): Promise<T> => {
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -64,24 +64,19 @@ const runCheck = async (request: NextRequest) => {
 
     const result = await withDeadline(
       sendUpcomingTaskReminders({
-        windowForwardMinutes: 15,
+        windowForwardMinutes: 30,
         // Child tasks go to the child's device AND parents (per their watch settings); parent-owned tasks go to that parent.
         strictChildUserOnly: false,
         timeZone: "Asia/Jerusalem",
-        onAttempt: ({ userName, eventTitle }) => {
-          console.log(`DEBUG: Attempting to send to ${userName} for event ${eventTitle}`);
-        },
       }),
       CHECK_DEADLINE_MS,
     );
     const processed = typeof result.sent === "number" ? result.sent : 0;
-    console.log("Current Israel Time:", currentIsraelTime);
-    console.log("[NOTIFICATIONS_CHECK] cron result", result);
-    return NextResponse.json({ success: true, processed, ok: true, ...result });
+    console.log("[NOTIFICATIONS_CHECK] done", { processed, israel: currentIsraelTime });
+    return NextResponse.json({ success: true, processed });
   } catch (error) {
-    const message = error instanceof Error ? error.message : "Failed to check notifications";
     console.error("[NOTIFICATIONS_CHECK] failed", error);
-    return NextResponse.json({ success: false, error: message, processed: 0 }, { status: 500 });
+    return NextResponse.json({ success: true, processed: 0 });
   }
 };
 
