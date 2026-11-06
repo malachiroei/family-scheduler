@@ -55,7 +55,7 @@ const baseChildrenConfigValue = () => uiRoster.baseChildrenConfig;
 
 type BaseChildKey = string;
 type ChildKey = string;
-type KnownEventType = 'dog' | 'gym' | 'sport' | 'lesson' | 'dance';
+type KnownEventType = 'dog' | 'gym' | 'sport' | 'game' | 'lesson' | 'dance';
 type EventType = string;
 
 type SchedulerEvent = {
@@ -78,6 +78,7 @@ type SchedulerEvent = {
   reminderLeadMinutes?: ReminderLeadMinutes;
   notificationCategory?: NotificationCategory;
   league?: string;
+  notes?: string;
 };
 
 type DaySchedule = {
@@ -95,6 +96,7 @@ type AiEvent = {
   title: string;
   type: EventType;
   recurringWeekly?: boolean;
+  notes?: string;
 };
 
 type ChatClarificationPending = {
@@ -146,11 +148,12 @@ type NewEventDraft = {
 };
 
 const dayNames = ['יום ראשון', 'יום שני', 'יום שלישי', 'יום רביעי', 'יום חמישי', 'יום שישי', 'שבת'];
-const eventTypeOptions: KnownEventType[] = ['dog', 'gym', 'sport', 'lesson', 'dance'];
+const eventTypeOptions: KnownEventType[] = ['dog', 'gym', 'sport', 'game', 'lesson', 'dance'];
 const eventTypeLabels: Record<KnownEventType, string> = {
   dog: 'טיפול בכלב 🐶',
   gym: 'אימון 💪',
   sport: 'משחק/ספורט 🏆',
+  game: 'משחק 🏆',
   lesson: 'שיעור/תגבור 📚',
   dance: 'ריקוד 💃',
 };
@@ -227,6 +230,7 @@ type ScheduleApiEvent = {
   reminderLeadMinutes?: ReminderLeadMinutes;
   notificationCategory?: NotificationCategory;
   league?: string;
+  notes?: string;
 };
 
 type PushUserName = string;
@@ -562,6 +566,13 @@ const detectTypeAndTitle = (text: string): { type: EventType; title: string } =>
     !/משחק|שיעור|Karl|Rachel|RAVHEL|מורה/i.test(text)
   ) {
     return { type: 'gym', title: 'אימון' };
+  }
+  const homeAway = text.match(/משחק\s+(?:חוץ|בית)(?:\s+ב[\u0590-\u05FF]{2,})?/);
+  if (homeAway || (/משחק/.test(text) && !/לבוא|לעודד|תזכורת/.test(text))) {
+    const phrase = (homeAway?.[0] ?? 'משחק').replace(/\s+/g, ' ').trim();
+    const group = text.match(/(?:נערים|נערות|ילדות)\s+[א-ת]['׳]?|בוגרות|בוגרים/);
+    const title = group && !phrase.includes(group[0]) ? `${phrase} — ${group[0].replace(/\s+/g, ' ').trim()}` : phrase;
+    return { type: 'game', title };
   }
   if (/אימון/.test(text)) {
     return { type: 'gym', title: 'אימון' };
@@ -998,34 +1009,36 @@ const parseComplexWhatsAppMessage = (
     return toIsoDate(addDays(weekAnchor, dayIndex));
   };
 
-  if (headerRange) {
-    try {
-      const weekly = parseWeeklyScheduleMessage(text, { viewedWeekStart: weekStart });
-      if (weekly && weekly.events.length > 0) {
-        const coachChild = weekly.assigneeName ? normalizeChildKey(weekly.assigneeName) : null;
-        const headerChild =
-          coachChild ??
-          weekly.assigneeName ??
-          defaultChildFromHeader ??
-          inferScheduleHeaderChild(text) ??
-          detectChildFromText(text) ??
-          defaultChildKeyValue();
-        return {
-          targetWeekStart: weekAnchor,
-          events: weekly.events.map((event) => ({
-            dayIndex: event.dayIndex,
-            date: event.date,
-            time: event.time,
-            child: headerChild,
-            title: event.title,
-            type: event.type,
-            recurringWeekly: false,
-          })),
-        };
-      }
-    } catch (error) {
-      console.error('[schedule] weekly range parse failed', error);
+  try {
+    const weekly = parseWeeklyScheduleMessage(text, { viewedWeekStart: weekStart });
+    const weeklyHasMatch = Boolean(
+      weekly && weekly.events.some((event) => event.type === 'game' || event.notes),
+    );
+    if (weekly && weekly.events.length > 0 && (headerRange || weeklyHasMatch)) {
+      const coachChild = weekly.assigneeName ? normalizeChildKey(weekly.assigneeName) : null;
+      const headerChild =
+        coachChild ??
+        weekly.assigneeName ??
+        defaultChildFromHeader ??
+        inferScheduleHeaderChild(text) ??
+        detectChildFromText(text) ??
+        defaultChildKeyValue();
+      return {
+        targetWeekStart: weekAnchor,
+        events: weekly.events.map((event) => ({
+          dayIndex: event.dayIndex,
+          date: event.date,
+          time: event.time,
+          child: headerChild,
+          title: event.title,
+          type: event.type,
+          notes: event.notes ?? undefined,
+          recurringWeekly: false,
+        })),
+      };
     }
+  } catch (error) {
+    console.error('[schedule] weekly range parse failed', error);
   }
 
   const parseBulkScheduleLines = (
@@ -1486,8 +1499,8 @@ const delay = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve,
 
 const normalizeTypeForStorage = (eventType: string, title: string) => {
   const normalized = eventType.trim().toLowerCase();
-  if (['dog', 'gym', 'sport', 'lesson', 'dance'].includes(normalized)) {
-    return normalized as EventType;
+  if (normalized === 'game' || ['dog', 'gym', 'sport', 'lesson', 'dance'].includes(normalized)) {
+    return normalized;
   }
 
   if (/(כדורסל|משחק|אולם)/.test(`${eventType} ${title}`)) {
@@ -1506,6 +1519,7 @@ const normalizeTypeForStorage = (eventType: string, title: string) => {
 
 const getDefaultTitleFromType = (eventType: string) => {
   const normalized = eventType.trim().toLowerCase();
+  if (normalized === 'game') return 'משחק';
   if (normalized === 'sport') return 'כדורסל';
   if (normalized === 'gym') return 'אימון';
   if (normalized === 'lesson') return 'שיעור';
@@ -1888,12 +1902,26 @@ const createWeekDays = (
   return days;
 };
 
+const matchStyleForEvent = (event: { type?: string; league?: string; title?: string }) => {
+  const fromLeague = fixtureLeagueBadge(`${event.league || ''} ${event.title || ''}`);
+  if (fromLeague) return fromLeague;
+  if (String(event.type || '').toLowerCase() === 'game') {
+    return {
+      text: 'משחק',
+      wrapClass: 'bg-sky-50 border-sky-300',
+      pillClass: 'text-sky-900 bg-sky-100 border-sky-300',
+    };
+  }
+  return null;
+};
+
 const getEventIcon = (eventType: EventType, title?: string) => {
   const source = `${eventType} ${title || ''}`;
   if (/אימון\s*מצוינות/i.test(source)) return <Trophy size={18} />;
   if (/dog|כלב|ג׳וני|ג'וני/i.test(source)) return <Dog size={18} />;
+  if (/\bgame\b|משחק/i.test(source)) return <Trophy size={18} />;
   if (/gym|כושר|אימון|מצוינות/i.test(source)) return <Dumbbell size={18} />;
-  if (/sport|כדורסל|משחק|אולם/i.test(source)) return <Trophy size={18} />;
+  if (/sport|כדורסל|אולם/i.test(source)) return <Trophy size={18} />;
   if (/lesson|שיעור|תגבור|אנגלית|rachel|karl/i.test(source)) return <GraduationCap size={18} />;
   if (/other|אחר/i.test(source)) return <Music size={18} />;
   if (/dance|ריקוד/i.test(source)) return <Music size={18} />;
@@ -3470,6 +3498,7 @@ export default function FamilyScheduler() {
           notificationCategory: normalizeNotificationCategory(event.notificationCategory)
             ?? undefined,
           league: event.league,
+          notes: event.notes,
         };
         const dayEvents = weekDays[dayIndex].events;
         const existingIdx = dayEvents.findIndex((e) => e.id === mapped.id);
@@ -4666,6 +4695,7 @@ export default function FamilyScheduler() {
         time: normalizeTimeForPicker(eventData.time),
         child: normalizeChildForSave(normalizedChild),
         title: eventData.title,
+        notes: eventData.notes,
         type: normalizeTypeForStorage(eventData.type, eventData.title),
         isRecurring: parseMetadataBoolean(eventData.recurringWeekly),
         recurringTemplateId,
@@ -5605,7 +5635,7 @@ export default function FamilyScheduler() {
               {visibleEvents.map((event) => {
                 const mainIconColor = memberVisual(getChildKeys(event.child)[0]).iconColor;
                 const eventLink = typeof event.zoomLink === 'string' ? event.zoomLink.trim() : '';
-                const leagueBadge = fixtureLeagueBadge(`${event.league || ''} ${event.title || ''}`);
+                const leagueBadge = matchStyleForEvent(event);
                 return (
                   <div
                     key={event.id}
@@ -5689,6 +5719,9 @@ export default function FamilyScheduler() {
                             </button>
                           )}
                         </div>
+                        {event.notes ? (
+                          <p className="text-[11px] leading-snug text-slate-500 break-words">{event.notes}</p>
+                        ) : null}
                         {eventLink && (
                           <a
                             href={eventLink}
@@ -5817,7 +5850,7 @@ export default function FamilyScheduler() {
                       : childKey ? memberVisual(childKey).name : String(ev.child);
                     const now = new Date();
                     const past = isEventStartInPast(ev, now);
-                    const leagueBadge = fixtureLeagueBadge(`${ev.league || ''} ${ev.title || ''}`);
+                    const leagueBadge = matchStyleForEvent(ev);
                     return (
                       <li
                         key={ev.id}
@@ -5870,6 +5903,9 @@ export default function FamilyScheduler() {
                               <span className="text-[10px] font-bold px-2 py-0.5 rounded-full border border-blue-200 bg-blue-50 text-blue-800">קבוע</span>
                             )}
                           </div>
+                          {ev.notes ? (
+                            <p className="text-[11px] leading-snug text-slate-500 break-words mt-0.5">{ev.notes}</p>
+                          ) : null}
                           <div className="text-xs text-slate-600 mt-1 flex flex-wrap items-center gap-x-2 gap-y-0.5 justify-end">
                             <span className="font-semibold">
                               {upcomingListTab === 'recurring'

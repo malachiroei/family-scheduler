@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse, after } from "next/server";
-import { ensureDatabaseConnectionString, formatPublicDbError, getDatabaseConfig, sql, sqlJson } from "@/app/lib/db";
+import { ensureDatabaseConnectionString, formatPublicDbError, getDatabaseConfig, isTransientDbError, sql, sqlJson, withDbRetry } from "@/app/lib/db";
 import {
   buildMetadataFromIncoming,
   ensureScheduleExtraColumns,
@@ -17,7 +17,7 @@ import { resolveGeminiApiKey } from "@/app/lib/llmKeys";
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
-// Allow for a serverless cold start + DB connect (connect_timeout is 15s) before the platform cuts us off.
+// Cold start plus one 1s DB retry. connect_timeout is 8s; the route itself waits up to 20s.
 export const maxDuration = 30;
 
 const dbConfig = getDatabaseConfig();
@@ -43,7 +43,7 @@ const modelAliasMap: Record<string, SupportedModel> = {
   "gemini-2.0-flash": "gemini-3.8-flash",
   "gemini-2.0-flash-exp": "gemini-3.8-flash",
 };
-const allowedTypes = ["dog", "gym", "sport", "lesson", "dance"] as const;
+const allowedTypes = ["dog", "gym", "sport", "game", "lesson", "dance"] as const;
 
 const getChildTargetLabel = (rawChild: unknown, roster: FamilyRoster = fallbackRoster) => {
   const key = typeof rawChild === "string" ? rawChild.trim() : "";
@@ -322,6 +322,9 @@ const sanitizeDbEvent = (event: unknown, roster: FamilyRoster = fallbackRoster) 
     userId,
     eventDate: date,
     source: typeof candidate.source === "string" && candidate.source.trim() ? candidate.source.trim() : null,
+    notes: typeof candidate.notes === "string" && candidate.notes.trim()
+      ? candidate.notes.replace(/\s+/g, " ").trim().slice(0, 240)
+      : null,
   };
 };
 
@@ -410,25 +413,25 @@ const defaultWeekStartIso = (): string => {
 
 const parseBulkEventsFromText = (text: string, weekStartIso: string, roster: FamilyRoster = fallbackRoster) => {
   const headerRange = parseHebrewScheduleRange(text);
-  if (headerRange) {
-    try {
-      const weekly = parseWeeklyScheduleMessage(text, { viewedWeekStart: weekStartIso });
-      if (weekly && weekly.events.length > 0) {
-        const child = weekly.assigneeName
-          ? (roster.resolveMemberKey(weekly.assigneeName) ?? roster.defaultChildKey)
-          : roster.defaultChildKey;
-        return weekly.events.map((event) => ({
-          date: event.date,
-          dayIndex: event.dayIndex,
-          time: event.time,
-          child,
-          title: event.title,
-          type: event.type,
-        }));
-      }
-    } catch (error) {
-      console.error("[schedule] weekly range parse failed", error);
+  try {
+    const weekly = parseWeeklyScheduleMessage(text, { viewedWeekStart: weekStartIso });
+    const weeklyHasMatch = Boolean(weekly?.events.some((event) => event.type === "game" || event.notes));
+    if (weekly && weekly.events.length > 0 && (headerRange || weeklyHasMatch)) {
+      const child = weekly.assigneeName
+        ? (roster.resolveMemberKey(weekly.assigneeName) ?? roster.defaultChildKey)
+        : roster.defaultChildKey;
+      return weekly.events.map((event) => ({
+        date: event.date,
+        dayIndex: event.dayIndex,
+        time: event.time,
+        child,
+        title: event.title,
+        type: event.type,
+        notes: event.notes,
+      }));
     }
+  } catch (error) {
+    console.error("[schedule] weekly range parse failed", error);
   }
 
   const lines = text
@@ -631,6 +634,7 @@ const upsertScheduleEvent = async (incoming: ReturnType<typeof sanitizeDbEvent>)
         requireConfirmation: meta.needsAck ?? meta.requireConfirmation,
         reminderLeadMinutes: parseReminderLeadMinutes(meta.reminderLeadMinutes),
         league: meta.league ?? undefined,
+        notes: meta.notes ?? undefined,
         notificationCategory: inferNotificationCategory({
           category: meta.notificationCategory,
           type: meta.type,
@@ -639,6 +643,7 @@ const upsertScheduleEvent = async (incoming: ReturnType<typeof sanitizeDbEvent>)
       },
     };
   } catch (error) {
+    if (isTransientDbError(error)) throw error;
     console.error("[API] SQL upsert failed", {
       error,
       message: getErrorMessage(error),
@@ -660,14 +665,18 @@ const runReminderSweep = async (source: string) => {
   debugScheduleLog(`[API] reminder sweep skipped after save (${source}); handled by /api/notifications/check`);
 };
 
-const DB_WRITE_TIMEOUT_MS = 6000; // single INSERT/UPDATE
-const DB_TIMEOUT_MS = 12000; // reads
+const DB_WRITE_TIMEOUT_MS = 20000;
+const DB_TIMEOUT_MS = 20000;
 
 class DbTimeoutError extends Error {
   constructor(ms: number) {
     super(`Database did not respond within ${ms / 1000} seconds`);
   }
 }
+
+/** One attempt, then a 1s pause and a second attempt, inside the caller's deadline. */
+const runDb = <T,>(run: () => Promise<T>, ms: number = DB_TIMEOUT_MS): Promise<T> =>
+  withDbTimeout(withDbRetry(run), ms);
 
 /** Rejects after DB_TIMEOUT_MS so the client gets an answer instead of hanging. */
 const withDbTimeout = <T,>(promise: Promise<T>, ms: number = DB_TIMEOUT_MS): Promise<T> =>
@@ -687,12 +696,12 @@ const withDbTimeout = <T,>(promise: Promise<T>, ms: number = DB_TIMEOUT_MS): Pro
 
 export async function GET() {
   try {
-    return await withDbTimeout(handleGet());
+    return await runDb(() => handleGet());
   } catch (error) {
     if (error instanceof DbTimeoutError) {
       console.error("[API] GET /api/schedule timed out", getDatabaseConfig().source);
       return NextResponse.json(
-        { error: "מסד הנתונים לא הגיב תוך 12 שניות (DB timeout)", code: "DB_TIMEOUT" },
+        { error: "מסד הנתונים לא הגיב תוך 20 שניות (DB timeout)", code: "DB_TIMEOUT" },
         { status: 504 },
       );
     }
@@ -755,6 +764,7 @@ async function handleGet() {
         requireConfirmation: meta.needsAck ?? meta.requireConfirmation,
         reminderLeadMinutes: parseReminderLeadMinutes(meta.reminderLeadMinutes),
         league: meta.league ?? undefined,
+        notes: meta.notes ?? undefined,
         notificationCategory: inferNotificationCategory({
           category: meta.notificationCategory,
           type: meta.type,
@@ -785,7 +795,7 @@ export async function PUT(request: NextRequest) {
       return NextResponse.json({ error: "Invalid event payload" }, { status: 400 });
     }
 
-    const upsertResult = await withDbTimeout(upsertScheduleEvent(incoming), DB_WRITE_TIMEOUT_MS);
+    const upsertResult = await runDb(() => upsertScheduleEvent(incoming), DB_WRITE_TIMEOUT_MS);
     if (!upsertResult.ok) {
       return NextResponse.json({ error: upsertResult.error }, { status: 500 });
     }
@@ -795,7 +805,7 @@ export async function PUT(request: NextRequest) {
     if (error instanceof DbTimeoutError) {
       console.error('[API] PUT /api/schedule timed out');
       return NextResponse.json(
-        { error: "מסד הנתונים לא הגיב תוך 6 שניות (DB timeout). נסו שוב.", code: "DB_TIMEOUT" },
+        { error: "מסד הנתונים לא הגיב תוך 20 שניות (DB timeout). נסו שוב.", code: "DB_TIMEOUT" },
         { status: 504 },
       );
     }
@@ -1073,7 +1083,7 @@ export async function POST(request: NextRequest) {
           if (!incoming) {
             return { ok: false as const, error: "Invalid bulk event payload" };
           }
-          const upsertResult = await withDbTimeout(upsertScheduleEvent(incoming), DB_WRITE_TIMEOUT_MS);
+          const upsertResult = await runDb(() => upsertScheduleEvent(incoming), DB_WRITE_TIMEOUT_MS);
           if (!upsertResult.ok) {
             console.error("[API] POST /api/schedule bulk upsert failed", {
               error: upsertResult.error,
@@ -1112,7 +1122,7 @@ export async function POST(request: NextRequest) {
 
     const flatIncoming = createIncomingFromFlatBody(body, roster);
     if (flatIncoming) {
-      const upsertResult = await withDbTimeout(upsertScheduleEvent(flatIncoming), DB_WRITE_TIMEOUT_MS);
+      const upsertResult = await runDb(() => upsertScheduleEvent(flatIncoming), DB_WRITE_TIMEOUT_MS);
       if (!upsertResult.ok) {
         console.error("[API] POST /api/schedule upsert failed (flatIncoming)", {
           error: upsertResult.error,
@@ -1148,7 +1158,7 @@ export async function POST(request: NextRequest) {
     const nestedFlatIncoming = nestedEvent ? createIncomingFromFlatBody(nestedEvent, roster) : null;
     const incoming = sanitizeDbEvent(body?.event, roster) ?? nestedFlatIncoming;
     if (incoming) {
-      const upsertResult = await withDbTimeout(upsertScheduleEvent(incoming), DB_WRITE_TIMEOUT_MS);
+      const upsertResult = await runDb(() => upsertScheduleEvent(incoming), DB_WRITE_TIMEOUT_MS);
       if (!upsertResult.ok) {
         console.error("[API] POST /api/schedule upsert failed (incoming)", {
           error: upsertResult.error,
@@ -1209,6 +1219,7 @@ export async function POST(request: NextRequest) {
             child: roster.defaultChildKey,
             title: item.title,
             type: item.type,
+            notes: "notes" in item ? item.notes : null,
             isRecurring: false,
             completed: false,
             sendNotification: true,
@@ -1219,7 +1230,7 @@ export async function POST(request: NextRequest) {
             return { ok: false as const, error: "Invalid bulk text event payload" };
           }
 
-          const upsertResult = await withDbTimeout(upsertScheduleEvent(incoming), DB_WRITE_TIMEOUT_MS);
+          const upsertResult = await runDb(() => upsertScheduleEvent(incoming), DB_WRITE_TIMEOUT_MS);
           if (!upsertResult.ok) {
             console.error("[API] POST /api/schedule bulk-text upsert failed", {
               error: upsertResult.error,
@@ -1391,7 +1402,7 @@ ${text}`;
   } catch (error) {
     if (error instanceof DbTimeoutError) {
       console.error('[API] POST /api/schedule timed out');
-      return NextResponse.json({ error: 'מסד הנתונים לא הגיב תוך 6 שניות (DB timeout). נסו שוב.', code: 'DB_TIMEOUT' }, { status: 504 });
+      return NextResponse.json({ error: 'מסד הנתונים לא הגיב תוך 20 שניות (DB timeout). נסו שוב.', code: 'DB_TIMEOUT' }, { status: 504 });
     }
     console.error('[API] POST /api/schedule failed', error);
     return Response.json({ error: getErrorMessage(error) }, { status: 500 });

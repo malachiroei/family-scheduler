@@ -33,7 +33,7 @@ export type HebrewScheduleRange = {
   endDay: number;
 };
 
-export type WeeklyEventType = "dog" | "gym" | "sport" | "lesson" | "dance" | "other";
+export type WeeklyEventType = "dog" | "gym" | "sport" | "game" | "lesson" | "dance" | "other";
 
 export type WeeklyScheduleEvent = {
   date: string;
@@ -195,36 +195,142 @@ const cleanDescription = (rest: string): string => {
   return sliced.replace(/[.!\s]+$/u, "").replace(/^[,.\s–—-]+/u, "").trim();
 };
 
+const HOME_AWAY_RE = /משחק\s+(?:חוץ|בית)(?:\s+ב[\u0590-\u05FF]{2,})?/u;
+const GROUP_RE = /(?:נערים|נערות|ילדות)\s+[א-ת]['׳]?|בוגרות|בוגרים/u;
+const GROUP_ONLY_RE = /^(?:(?:נערים|נערות|ילדות)\s+[א-ת]['׳]?|בוגרות|בוגרים)$/u;
+const SHUTTLE_RE = /הסע[הת][^\n]*/u;
+
+const formatCompactClock = (raw: string): string | null => {
+  const digits = raw.replace(/\D/g, "");
+  if (digits.length !== 3 && digits.length !== 4) return null;
+  const padded = digits.padStart(4, "0");
+  return clock(`${padded.slice(0, 2)}:${padded.slice(2)}`);
+};
+
+const formatClockToken = (raw: string): string | null =>
+  raw.includes(":") ? clock(raw) : formatCompactClock(raw);
+
+/** "הסעה בשעה 1715 מעירוני ט'" → "הסעה בשעה 17:15 מעירוני ט'". */
+const normalizeShuttleText = (raw: string): string => {
+  let text = raw.replace(/\s+/g, " ").trim().replace(/[.]+$/u, "");
+  text = text.replace(/בשעה\s*(\d{1,2}:\d{2}|\d{3,4})/u, (_, token: string) => {
+    const formatted = formatClockToken(token);
+    return formatted ? `בשעה ${formatted}` : `בשעה ${token}`;
+  });
+  text = text.replace(/הסע[הת]\s+(\d{1,2}:\d{2}|\d{3,4})/u, (full, token: string) => {
+    const formatted = formatClockToken(token);
+    return formatted ? `הסעה בשעה ${formatted}` : full;
+  });
+  return text;
+};
+
+const splitShuttle = (text: string): { rest: string; shuttle: string | null } => {
+  const match = text.match(SHUTTLE_RE);
+  if (!match || match.index == null) return { rest: text.trim(), shuttle: null };
+  const shuttle = normalizeShuttleText(match[0]);
+  const rest = `${text.slice(0, match.index)} ${text.slice(match.index + match[0].length)}`
+    .replace(/\s+/g, " ")
+    .trim();
+  return { rest, shuttle };
+};
+
+const buildMatchTitle = (phrase: string, group: string | null): string => {
+  const clean = phrase.replace(/\s+/g, " ").trim();
+  if (!group) return clean;
+  const label = group.replace(/\s+/g, " ").trim();
+  if (!label || clean.includes(label)) return clean;
+  return `${clean} — ${label}`;
+};
+
+const appendNote = (current: string | null, extra: string | null): string | null => {
+  const next = extra?.trim() ?? "";
+  if (!next) return current;
+  if (!current) return next;
+  if (current.includes(next)) return current;
+  return `${current} · ${next}`;
+};
+
+const looksLikeMatchContext = (line: string): boolean => {
+  const text = line.trim();
+  if (!text || text.length > 80) return false;
+  return /הסע[הת]|משחק/u.test(text) || GROUP_ONLY_RE.test(text);
+};
+
 /**
- * A line that is not a regular practice (game + "come and cheer") is still an event.
- * It is stored as a reminder/note instead of failing the whole schedule.
+ * A home/away match is a game, even when the same day also names a team or a practice hour.
+ * "Come and cheer" without a home/away fixture stays a reminder.
  */
 const classifyScheduleLine = (
   description: string,
 ): { type: WeeklyEventType; title: string; keyword: string | null; notes: string | null } => {
-  const text = description.trim();
+  const { rest, shuttle } = splitShuttle(description.trim());
+  const text = rest.trim();
   if (!text) {
-    return { type: "other", title: "אירוע", keyword: null, notes: null };
+    return { type: "other", title: "אירוע", keyword: null, notes: shuttle };
   }
-  if (/לבוא|לעודד|תזכורת/.test(text)) {
-    return { type: "other", title: text, keyword: "תזכורת", notes: text };
+  const homeAway = text.match(HOME_AWAY_RE)?.[0]?.replace(/\s+/g, " ").trim() ?? null;
+  const group = text.match(GROUP_RE)?.[0]?.replace(/\s+/g, " ").trim() ?? null;
+  const cheer = /לבוא|לעודד|תזכורת/u.test(text);
+  if (homeAway || (/משחק/u.test(text) && !cheer)) {
+    const phrase = homeAway ?? text;
+    return { type: "game", title: buildMatchTitle(phrase, group), keyword: "משחק", notes: shuttle };
   }
-  if (/משחק/.test(text)) {
-    return { type: "sport", title: text, keyword: "משחק", notes: null };
+  if (cheer) {
+    return { type: "other", title: text, keyword: "תזכורת", notes: shuttle ?? text };
   }
-  if (/ריקוד/.test(text)) {
-    return { type: "dance", title: text, keyword: "ריקוד", notes: null };
+  if (/ריקוד/u.test(text)) {
+    return { type: "dance", title: text, keyword: "ריקוד", notes: shuttle };
   }
-  if (/שיעור|תגבור|אנגלית/.test(text)) {
-    return { type: "lesson", title: text, keyword: "שיעור", notes: null };
+  if (/שיעור|תגבור|אנגלית/u.test(text)) {
+    return { type: "lesson", title: text, keyword: "שיעור", notes: shuttle };
   }
-  if (/כלב|גוני|ג'וני/.test(text)) {
-    return { type: "dog", title: text, keyword: "כלב", notes: null };
+  if (/כלב|גוני|ג'וני/u.test(text)) {
+    return { type: "dog", title: text, keyword: "כלב", notes: shuttle };
   }
-  if (/נערים|נערות|ילדות|אימון|אולם|כדורסל/.test(text)) {
-    return { type: "gym", title: text, keyword: text.slice(0, 40), notes: null };
+  if (/נערים|נערות|ילדות|אימון|אולם|כדורסל/u.test(text)) {
+    return { type: "gym", title: text, keyword: text.slice(0, 40), notes: shuttle };
   }
-  return { type: "other", title: text, keyword: null, notes: null };
+  return { type: "other", title: text, keyword: null, notes: shuttle };
+};
+
+/** Fold a following (or preceding) match / bus line into the day's timed event. */
+const attachContinuation = (event: WeeklyScheduleEvent, rawLine: string): boolean => {
+  const line = cleanDescription(rawLine);
+  if (!line) return false;
+  const { rest, shuttle } = splitShuttle(line);
+  if (/^הסע[הת]/u.test(line)) {
+    event.notes = appendNote(event.notes, shuttle ?? normalizeShuttleText(line));
+    return true;
+  }
+  const homeAway = rest.match(HOME_AWAY_RE)?.[0]?.replace(/\s+/g, " ").trim() ?? null;
+  const cheer = /לבוא|לעודד|תזכורת/u.test(rest);
+  if (homeAway || (/משחק/u.test(rest) && !cheer)) {
+    const phrase = homeAway ?? rest;
+    const group =
+      rest.match(GROUP_RE)?.[0]?.replace(/\s+/g, " ").trim()
+      ?? event.title.match(GROUP_RE)?.[0]?.replace(/\s+/g, " ").trim()
+      ?? null;
+    event.type = "game";
+    event.keyword = "משחק";
+    event.title = buildMatchTitle(phrase, group);
+    event.notes = appendNote(event.notes, shuttle);
+    return true;
+  }
+  if (GROUP_ONLY_RE.test(line) && (event.type === "game" || /משחק/u.test(event.title))) {
+    event.title = buildMatchTitle(event.title, line);
+    return true;
+  }
+  return false;
+};
+
+const applyMatchDetails = (event: WeeklyScheduleEvent, details: string) => {
+  const parts = details.split("\n").map((part) => part.trim()).filter(Boolean);
+  for (const part of parts) {
+    if (/משחק|הסע[הת]/u.test(part)) attachContinuation(event, part);
+  }
+  for (const part of parts) {
+    if (!/משחק|הסע[הת]/u.test(part)) attachContinuation(event, part);
+  }
 };
 
 const assigneeFromCoachLine = (text: string): string | null => {
@@ -267,6 +373,8 @@ export const parseWeeklyScheduleMessage = (
 
   let currentDay: number | null = null;
   let sender: string | null = null;
+  let pendingIndex: number | null = null;
+  let pendingDetail: string | null = null;
   const events: WeeklyScheduleEvent[] = [];
   const seen = new Set<string>();
 
@@ -276,6 +384,8 @@ export const parseWeeklyScheduleMessage = (
     const dayOnly = line.match(DAY_ONLY_RE);
     if (dayOnly) {
       currentDay = weekdayIndex(dayOnly[1] ?? "");
+      pendingIndex = null;
+      pendingDetail = null;
       continue;
     }
 
@@ -284,6 +394,21 @@ export const parseWeeklyScheduleMessage = (
     const body = dayBody ? dayBody[2] : line;
     const timed = leadingClockRange(body);
     if (dayIndex == null || !timed) {
+      if (dayIndex != null && looksLikeMatchContext(body)) {
+        if (
+          pendingIndex != null
+          && events[pendingIndex]?.dayIndex === dayIndex
+          && attachContinuation(events[pendingIndex], body)
+        ) {
+          currentDay = dayIndex;
+          continue;
+        }
+        if (/משחק|הסע[הת]/u.test(body) || GROUP_ONLY_RE.test(body.trim())) {
+          pendingDetail = pendingDetail ? `${pendingDetail}\n${body}` : body;
+          currentDay = dayIndex;
+          continue;
+        }
+      }
       const isHeader =
         RANGE_RE.test(line) ||
         /^אולם(?:\s|$)/u.test(line) ||
@@ -296,22 +421,31 @@ export const parseWeeklyScheduleMessage = (
 
     const description = cleanDescription(timed.rest);
     const classified = classifyScheduleLine(description);
-    const title = timed.end ? `${classified.title} (${timed.start}–${timed.end})` : classified.title;
-    const date = resolveEventDate(dayIndex, range, options);
-    // A named month range must not be replaced with the week currently on screen.
-    if (!date) continue;
-    const key = `${date}|${timed.start}|${title}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    events.push({
-      date,
+    const draft: WeeklyScheduleEvent = {
+      date: "",
       dayIndex,
       time: timed.start,
-      title,
+      title: classified.title,
       type: classified.type,
       keyword: classified.keyword,
       notes: classified.notes,
-    });
+    };
+    if (pendingDetail) {
+      applyMatchDetails(draft, pendingDetail);
+      pendingDetail = null;
+    }
+    if (draft.type !== "game" && timed.end) {
+      draft.title = `${draft.title} (${timed.start}–${timed.end})`;
+    }
+    const date = resolveEventDate(dayIndex, range, options);
+    // A named month range must not be replaced with the week currently on screen.
+    if (!date) continue;
+    draft.date = date;
+    const key = `${date}|${timed.start}|${draft.title}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    events.push(draft);
+    pendingIndex = events.length - 1;
     currentDay = dayIndex;
   }
 

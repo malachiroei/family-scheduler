@@ -39,12 +39,13 @@ const GEMINI_SAFETY = [
 type Child = string;
 const childLabel = (roster: FamilyRoster, key: string | null | undefined) =>
   key ? roster.labelForMemberKey(key) : "";
-const TYPES = ["dog", "gym", "sport", "lesson", "dance", "other"] as const;
+const TYPES = ["dog", "gym", "sport", "game", "lesson", "dance", "other"] as const;
 type EventType = (typeof TYPES)[number];
 const TYPE_LABEL: Record<EventType, string> = {
   dog: "כלב",
   gym: "חדר כושר",
   sport: "ספורט",
+  game: "משחק",
   lesson: "שיעור",
   dance: "ריקוד",
   other: "אירוע",
@@ -57,6 +58,7 @@ type DraftEvent = {
   type: EventType | null;
   keyword: string | null;
   league?: string | null;
+  notes?: string | null;
 };
 
 type Draft = {
@@ -150,6 +152,7 @@ const sanitizeEvent = (raw: unknown): DraftEvent => {
     type: normalizeType(o.type),
     keyword: str(o.keyword, 40),
     league: str(o.league, 80),
+    notes: str(o.notes, 240),
   };
 };
 
@@ -519,6 +522,7 @@ const weeklyToModelRaw = (
     title: event.title,
     type: event.type,
     keyword: event.keyword,
+    notes: event.notes,
   })),
 });
 
@@ -1002,6 +1006,7 @@ export async function POST(request: NextRequest) {
         league: e.league ?? draft.league ?? null,
         eventDate: date,
         source: draft.import_kind === "fixtures" ? "fixtures" : "agent",
+        notes: e.notes ?? null,
       });
       rowsToInsert.push({ id, title, date, metadata });
       saved.push({ id, title, date, time, child: kid, type });

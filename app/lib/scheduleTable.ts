@@ -32,6 +32,8 @@ export type ScheduleEventMetadata = {
   source?: string | null;
   /** Push channel: game, medical, training, or general. Null on older rows — callers infer from type and title. */
   notificationCategory?: NotificationCategory | null;
+  /** Logistics that are not the title, e.g. "הסעה בשעה 17:15 מעירוני ט'". */
+  notes?: string | null;
 };
 
 const defaultMetadata = (): ScheduleEventMetadata => ({
@@ -55,6 +57,7 @@ const defaultMetadata = (): ScheduleEventMetadata => ({
   eventDate: null,
   source: null,
   notificationCategory: null,
+  notes: null,
 });
 
 /** Accepts whole weeks 2..8; anything else (including 1) means plain weekly and is stored as null. */
@@ -135,7 +138,14 @@ export const parseScheduleMetadata = (raw: unknown): ScheduleEventMetadata => {
     notificationCategory: normalizeNotificationCategory(
       o.notificationCategory ?? o.notification_category ?? o.category,
     ),
+    notes: cleanNotes(o.notes ?? o.description),
   };
+};
+
+const cleanNotes = (value: unknown): string | null => {
+  if (typeof value !== "string") return null;
+  const trimmed = value.replace(/\s+/g, " ").trim();
+  return trimmed ? trimmed.slice(0, 240) : null;
 };
 
 export const buildMetadataFromIncoming = (incoming: {
@@ -160,6 +170,7 @@ export const buildMetadataFromIncoming = (incoming: {
   source?: string | null;
   title?: string | null;
   notificationCategory?: unknown;
+  notes?: string | null;
 }): ScheduleEventMetadata => {
   const recurring = parseMetadataBoolean(incoming.isRecurring);
   return {
@@ -187,6 +198,7 @@ export const buildMetadataFromIncoming = (incoming: {
       type: incoming.type,
       title: incoming.title,
     }),
+    notes: cleanNotes(incoming.notes),
   };
 };
 

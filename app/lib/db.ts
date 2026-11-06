@@ -47,11 +47,13 @@ function getPostgres() {
       console.log(`[db] env=${source} (unparseable URL)`);
     }
     pg = postgres(connectionUrl, {
+      // One pooled connection. Supabase's pooler rejects extra sessions, and a warm
+      // socket survives the pause between a cold-start failure and the retry below.
       max: 1,
-      idle_timeout: 5,
-      connect_timeout: 5,
+      idle_timeout: 20,
+      connect_timeout: 8,
       prepare: false,
-      connection: { statement_timeout: 8000 },
+      connection: { statement_timeout: 15000 },
       ...(needsSsl ? { ssl: { rejectUnauthorized: false } } : {}),
     });
     globalForPg.__familySchedulerPg = pg;
@@ -135,6 +137,57 @@ export function formatPublicDbError(error: unknown): string {
     return "אימות למסד נכשל. בדקי ש-DATABASE_URL / SUPABASE_DATABASE_URL ב-Vercel הוא אותו URI שעבד קודם, בלי שינוי שם משתמש.";
   }
   return message || "שגיאת מסד נתונים";
+}
+
+const TRANSIENT_DB_CODES = new Set([
+  "CONNECT_TIMEOUT",
+  "ETIMEDOUT",
+  "ECONNRESET",
+  "ECONNREFUSED",
+  "EPIPE",
+  "57P01",
+  "57P02",
+  "57P03",
+  "08000",
+  "08001",
+  "08003",
+  "08004",
+  "08006",
+  "53300",
+  "57014",
+]);
+
+/** Connection drops and statement timeouts while Supabase is waking up. Not auth or DNS. */
+export function isTransientDbError(error: unknown): boolean {
+  const e = (error ?? {}) as { code?: string; errno?: string | number; message?: string };
+  const code = String(e.code ?? e.errno ?? "");
+  if (code === "ENOTFOUND" || code === "EAI_AGAIN" || code === "28P01" || code === "28000") return false;
+  if (TRANSIENT_DB_CODES.has(code)) return true;
+  const message = String(e.message ?? (error instanceof Error ? error.message : ""));
+  return /timeout|timed out|Connection terminated|ECONNRESET|ECONNREFUSED|ETIMEDOUT|could not connect|Connection refused|server closed the connection|remaining connection slots|too many clients|statement timeout|canceling statement/i.test(message);
+}
+
+/** Drop the pooled socket so the next attempt opens a fresh connection. */
+export function resetPostgresClient() {
+  const dying = pg;
+  pg = null;
+  globalForPg.__familySchedulerPg = undefined;
+  if (dying) {
+    void Promise.resolve(dying.end({ timeout: 1 })).catch(() => undefined);
+  }
+}
+
+/** One retry, 1s apart, after a cold-start connection or statement timeout. */
+export async function withDbRetry<T>(run: () => Promise<T>, waitMs = 1000): Promise<T> {
+  try {
+    return await run();
+  } catch (error) {
+    if (!isTransientDbError(error)) throw error;
+    console.warn("[db] transient error, retrying once after 1s");
+    resetPostgresClient();
+    await new Promise((resolve) => setTimeout(resolve, waitMs));
+    return await run();
+  }
 }
 
 export function sqlJson(value: unknown) {
