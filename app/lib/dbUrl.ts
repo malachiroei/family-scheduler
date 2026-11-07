@@ -43,6 +43,30 @@ export const resolveDatabaseUrlFromEnv = (env: EnvMap): ResolvedDatabaseUrl => {
   return { url: chosen.url, source: chosen.source };
 };
 
+/**
+ * Supabase session mode (pooler host, port 5432) holds a backend until the client disconnects,
+ * which is what stalls Vercel. Transaction mode is the same host and user on port 6543.
+ * Direct `db.*.supabase.co` URLs are left unchanged — the region is not in that host.
+ */
+export const toTransactionPoolerUrl = (raw: string): string => {
+  const url = normalizeConnectionString(raw);
+  if (!url) return url;
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return url;
+  }
+  const host = parsed.hostname.toLowerCase();
+  if (!host.endsWith(".pooler.supabase.com")) return url;
+  const port = parsed.port || "5432";
+  if (port === "6543") return url;
+  if (parsed.port) {
+    return url.replace(/(\.pooler\.supabase\.com):5432\b/i, "$1:6543");
+  }
+  return url.replace(/(\.pooler\.supabase\.com)(?=\/)/i, "$1:6543");
+};
+
 export const redactDatabaseUrl = (url: string): string => {
   try {
     const parsed = new URL(url);

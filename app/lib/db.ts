@@ -2,6 +2,7 @@ import postgres, { type SerializableParameter } from "postgres";
 import {
   redactDatabaseUrl,
   resolveDatabaseUrlFromEnv,
+  toTransactionPoolerUrl,
   type DatabaseUrlSource,
 } from "@/app/lib/dbUrl";
 
@@ -46,14 +47,21 @@ function getPostgres() {
     } catch {
       console.log(`[db] env=${source} (unparseable URL)`);
     }
+    connectionUrl = toTransactionPoolerUrl(connectionUrl);
+    let loggedPort = "6543";
+    try {
+      loggedPort = new URL(connectionUrl).port || "5432";
+    } catch {
+      // ignore
+    }
+    console.log("[db] pooled port:", loggedPort);
     pg = postgres(connectionUrl, {
-      // One pooled connection. Supabase's pooler rejects extra sessions, and a warm
-      // socket survives the pause between a cold-start failure and the retry below.
+      // Transaction pooler (port 6543). One client per serverless instance.
       max: 1,
-      idle_timeout: 20,
-      connect_timeout: 8,
+      idle_timeout: 10,
+      connect_timeout: 4,
       prepare: false,
-      connection: { statement_timeout: 15000 },
+      connection: { statement_timeout: 5000 },
       ...(needsSsl ? { ssl: { rejectUnauthorized: false } } : {}),
     });
     globalForPg.__familySchedulerPg = pg;
@@ -69,11 +77,15 @@ export function sql<T extends PgRow = PgRow>(
   if (!client) {
     return Promise.reject(new Error("Missing database configuration"));
   }
-  return client(strings, ...values).then(
-    (result) => {
-      const rows = Array.from(result) as T[];
-      return { rows, rowCount: result.count };
-    },
+  // Supavisor ignores statement_timeout as a startup parameter (it stays at 2 minutes).
+  // Set it inside the transaction so a stuck query releases the single pooled connection.
+  return client.begin(async (tx) => {
+    await tx`SELECT set_config('statement_timeout', '5000', true)`;
+    const result = await tx(strings, ...values);
+    const rows = Array.from(result) as T[];
+    return { rows, rowCount: result.count };
+  }).then(
+    (value) => value,
     (error: unknown) => {
       logDbError(error);
       throw error;

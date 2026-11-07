@@ -17,7 +17,7 @@ import { resolveGeminiApiKey } from "@/app/lib/llmKeys";
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
-// Cold start plus one 1s DB retry. connect_timeout is 8s; the route itself waits up to 20s.
+// Reads fail at 5s (statement_timeout). Writes may retry once.
 export const maxDuration = 30;
 
 const dbConfig = getDatabaseConfig();
@@ -665,8 +665,8 @@ const runReminderSweep = async (source: string) => {
   debugScheduleLog(`[API] reminder sweep skipped after save (${source}); handled by /api/notifications/check`);
 };
 
-const DB_WRITE_TIMEOUT_MS = 20000;
-const DB_TIMEOUT_MS = 20000;
+const DB_WRITE_TIMEOUT_MS = 8000;
+const DB_TIMEOUT_MS = 5000;
 
 class DbTimeoutError extends Error {
   constructor(ms: number) {
@@ -694,14 +694,45 @@ const withDbTimeout = <T,>(promise: Promise<T>, ms: number = DB_TIMEOUT_MS): Pro
     );
   });
 
-export async function GET() {
+const isoDay = (date: Date): string => {
+  const yy = date.getFullYear();
+  const mm = `${date.getMonth() + 1}`.padStart(2, "0");
+  const dd = `${date.getDate()}`.padStart(2, "0");
+  return `${yy}-${mm}-${dd}`;
+};
+
+const addIsoDays = (iso: string, days: number): string | null => {
+  const match = iso.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!match) return null;
+  const date = new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]));
+  if (Number.isNaN(date.getTime())) return null;
+  date.setDate(date.getDate() + days);
+  return isoDay(date);
+};
+
+/** Viewed week when the client sends start/end or weekStart. Otherwise a bounded window, never the whole table. */
+const scheduleReadRange = (request: NextRequest): { start: string; end: string } => {
+  const url = new URL(request.url);
+  const start = parseFlexibleDate(url.searchParams.get("start") || url.searchParams.get("weekStart"));
+  let end = parseFlexibleDate(url.searchParams.get("end"));
+  if (start && !end) end = addIsoDays(start, 6);
+  if (start && end && start <= end) return { start, end };
+  const today = new Date();
+  const past = new Date(today);
+  past.setDate(today.getDate() - 120);
+  const future = new Date(today);
+  future.setDate(today.getDate() + 180);
+  return { start: isoDay(past), end: isoDay(future) };
+};
+
+export async function GET(request: NextRequest) {
   try {
-    return await runDb(() => handleGet());
+    return await withDbTimeout(handleGet(request), DB_TIMEOUT_MS);
   } catch (error) {
     if (error instanceof DbTimeoutError) {
       console.error("[API] GET /api/schedule timed out", getDatabaseConfig().source);
       return NextResponse.json(
-        { error: "מסד הנתונים לא הגיב תוך 20 שניות (DB timeout)", code: "DB_TIMEOUT" },
+        { error: "מסד הנתונים לא הגיב תוך 5 שניות (DB timeout)", code: "DB_TIMEOUT" },
         { status: 504 },
       );
     }
@@ -710,7 +741,7 @@ export async function GET() {
   }
 }
 
-async function handleGet() {
+async function handleGet(request: NextRequest) {
   try {
     debugScheduleLog('[API] GET /api/schedule');
     const tableStatus = await ensureScheduleTableReady();
@@ -721,10 +752,16 @@ async function handleGet() {
       return NextResponse.json({ error: tableStatus.error }, { status: 500 });
     }
 
-    // Reminders run on /api/notifications/check (client interval) and cron routes — do not block every schedule read.
+    // One week (or the caller's range) plus recurring templates. Not the full history.
+    const range = scheduleReadRange(request);
     const result = await sql`
       SELECT id, title, "date", metadata
       FROM schedule
+      WHERE (
+        left("date"::text, 10) >= ${range.start}
+        AND left("date"::text, 10) <= ${range.end}
+      )
+      OR COALESCE(metadata->>'isRecurring', '') IN ('true', '1')
       ORDER BY "date" ASC, COALESCE(metadata->>'time', '00:00') ASC
     `;
     debugScheduleLog("DB Action Success:", result.rowCount);
@@ -805,7 +842,7 @@ export async function PUT(request: NextRequest) {
     if (error instanceof DbTimeoutError) {
       console.error('[API] PUT /api/schedule timed out');
       return NextResponse.json(
-        { error: "מסד הנתונים לא הגיב תוך 20 שניות (DB timeout). נסו שוב.", code: "DB_TIMEOUT" },
+        { error: "מסד הנתונים לא הגיב תוך 8 שניות (DB timeout). נסו שוב.", code: "DB_TIMEOUT" },
         { status: 504 },
       );
     }
@@ -1402,7 +1439,7 @@ ${text}`;
   } catch (error) {
     if (error instanceof DbTimeoutError) {
       console.error('[API] POST /api/schedule timed out');
-      return NextResponse.json({ error: 'מסד הנתונים לא הגיב תוך 20 שניות (DB timeout). נסו שוב.', code: 'DB_TIMEOUT' }, { status: 504 });
+      return NextResponse.json({ error: 'מסד הנתונים לא הגיב תוך 8 שניות (DB timeout). נסו שוב.', code: 'DB_TIMEOUT' }, { status: 504 });
     }
     console.error('[API] POST /api/schedule failed', error);
     return Response.json({ error: getErrorMessage(error) }, { status: 500 });

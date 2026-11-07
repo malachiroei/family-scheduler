@@ -776,7 +776,60 @@ const applyActivityDetailToDraftEvents = (events: AiEvent[], detail: string): Ai
 };
 
 /** Generous enough for a serverless cold start + DB connect, short enough to never hang forever. */
-const SCHEDULE_FETCH_TIMEOUT_MS = 20000;
+const SCHEDULE_FETCH_TIMEOUT_MS = 6000;
+const SCHEDULE_IDB_NAME = 'family-scheduler';
+const SCHEDULE_IDB_STORE = 'kv';
+
+const openScheduleCacheDb = (): Promise<IDBDatabase | null> => {
+  if (typeof indexedDB === 'undefined') return Promise.resolve(null);
+  return new Promise((resolve) => {
+    const request = indexedDB.open(SCHEDULE_IDB_NAME, 1);
+    request.onupgradeneeded = () => {
+      const db = request.result;
+      if (!db.objectStoreNames.contains(SCHEDULE_IDB_STORE)) {
+        db.createObjectStore(SCHEDULE_IDB_STORE);
+      }
+    };
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => resolve(null);
+  });
+};
+
+const writeScheduleCacheCopy = (raw: string) => {
+  void openScheduleCacheDb().then((db) => {
+    if (!db) return;
+    try {
+      const tx = db.transaction(SCHEDULE_IDB_STORE, 'readwrite');
+      tx.objectStore(SCHEDULE_IDB_STORE).put(raw, SCHEDULER_STORAGE_KEY);
+      tx.oncomplete = () => db.close();
+      tx.onerror = () => db.close();
+    } catch {
+      db.close();
+    }
+  });
+};
+
+const readScheduleCacheCopy = async (): Promise<string | null> => {
+  const db = await openScheduleCacheDb();
+  if (!db) return null;
+  return new Promise((resolve) => {
+    try {
+      const tx = db.transaction(SCHEDULE_IDB_STORE, 'readonly');
+      const request = tx.objectStore(SCHEDULE_IDB_STORE).get(SCHEDULER_STORAGE_KEY);
+      request.onsuccess = () => {
+        db.close();
+        resolve(typeof request.result === 'string' ? request.result : null);
+      };
+      request.onerror = () => {
+        db.close();
+        resolve(null);
+      };
+    } catch {
+      db.close();
+      resolve(null);
+    }
+  });
+};
 
 const normalizeChildForSave = (value: string): ChildKey => {
   const trimmed = value.trim();
@@ -1349,12 +1402,16 @@ const normalizePersistedState = (
     [toIsoDate(safeWeekStart)]: createEmptyWeekDays(safeWeekStart),
   };
 
+  const storedWeeks = normalizeWeekEventsWithDate(payload?.weeksData);
+  if (!storedWeeks[toIsoDate(safeWeekStart)]) {
+    storedWeeks[toIsoDate(safeWeekStart)] = safeWeeksData[toIsoDate(safeWeekStart)];
+  }
+
   return {
     weekStart: safeWeekStart,
-    // DB GET /api/schedule (refetch) is the source of truth for recurring templates.
-    // Ignoring persisted recurringTemplates avoids resurrecting deleted series after refresh or on another device.
+    // Recurring templates are rebuilt from the database. The cached week still shows the last events seen.
     recurringTemplates: [] as RecurringTemplate[],
-    weeksData: safeWeeksData,
+    weeksData: storedWeeks,
   };
 };
 
@@ -2028,6 +2085,7 @@ export default function FamilyScheduler() {
   const [isHydrated, setIsHydrated] = useState(false);
   const autoRefetchInFlightRef = useRef(false);
   const autoRefetchWeekKeyRef = useRef<string>('');
+  const scheduleRetryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const dayCardRefs = useRef<Array<HTMLDivElement | null>>([]);
   const scheduleShellRef = useRef<HTMLDivElement | null>(null);
   const autoSyncPushProfileInFlightRef = useRef(false);
@@ -2408,7 +2466,7 @@ export default function FamilyScheduler() {
     const hydrateState = async () => {
       // 1) Local cache first: instant, works offline, and never leaves the board blank if the server is slow.
       try {
-        const raw = localStorage.getItem(SCHEDULER_STORAGE_KEY);
+        const raw = localStorage.getItem(SCHEDULER_STORAGE_KEY) || await readScheduleCacheCopy();
         if (raw) {
           const parsed = JSON.parse(raw) as PersistedStatePayload;
           const normalized = normalizePersistedState(parsed, initialWeekStart);
@@ -2480,10 +2538,9 @@ export default function FamilyScheduler() {
     };
 
     try {
-      localStorage.setItem(
-        SCHEDULER_STORAGE_KEY,
-        JSON.stringify(payload)
-      );
+      const raw = JSON.stringify(payload);
+      localStorage.setItem(SCHEDULER_STORAGE_KEY, raw);
+      writeScheduleCacheCopy(raw);
     } catch {
       // no-op: keep app usable even if persistence fails
     }
@@ -3379,8 +3436,27 @@ export default function FamilyScheduler() {
     ? (roster.getMemberByAnyName(pushUserName)?.name || pushUserName)
     : '';
 
-  const refetchEventsFromDatabase = async (targetWeekStart: Date) => {
-    // Never hang: abort the request after 5s. The timer covers body parsing too.
+  const restoreCachedWeek = async (targetWeekStart: Date) => {
+    try {
+      const raw = localStorage.getItem(SCHEDULER_STORAGE_KEY) || await readScheduleCacheCopy();
+      if (!raw) return false;
+      const parsed = JSON.parse(raw) as PersistedStatePayload;
+      const normalized = normalizePersistedState(parsed, targetWeekStart);
+      const key = toIsoDate(targetWeekStart);
+      const days = normalized.weeksData[key];
+      if (!days) return false;
+      setWeeksData((prev) => ({ ...prev, ...normalized.weeksData }));
+      setScheduleLoadError(null);
+      return days.some((day) => day.events.length > 0);
+    } catch {
+      return false;
+    }
+  };
+
+  const refetchEventsFromDatabase = async (
+    targetWeekStart: Date,
+    options?: { attempt?: number },
+  ) => {
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), SCHEDULE_FETCH_TIMEOUT_MS);
     try {
@@ -3513,16 +3589,24 @@ export default function FamilyScheduler() {
       setRecurringTemplates(templates);
       setWeeksData((prev) => ({ ...prev, [targetWeekKey]: weekDays }));
       setScheduleLoadError(null);
+      if (scheduleRetryTimerRef.current) {
+        clearTimeout(scheduleRetryTimerRef.current);
+        scheduleRetryTimerRef.current = null;
+      }
       return true;
     } catch (error) {
       console.error('[API] GET /api/schedule client failed', error);
-      const aborted = controller.signal.aborted || (error instanceof Error && error.name === 'AbortError');
-      const friendly = aborted
-        ? 'השרת לא הגיב בזמן (20 שניות).'
-        : error instanceof Error && error.message
-          ? error.message
-          : 'טעינת הלו״ז נכשלה.';
-      setScheduleLoadError(friendly);
+      await restoreCachedWeek(targetWeekStart);
+      // Keep the saved week on screen and retry quietly. No yellow banner while that is happening.
+      setScheduleLoadError(null);
+      const attempt = options?.attempt ?? 0;
+      if (attempt < 3) {
+        if (scheduleRetryTimerRef.current) clearTimeout(scheduleRetryTimerRef.current);
+        scheduleRetryTimerRef.current = setTimeout(() => {
+          scheduleRetryTimerRef.current = null;
+          void refetchEventsFromDatabase(targetWeekStart, { attempt: attempt + 1 });
+        }, 4000 * (attempt + 1));
+      }
       return false;
     } finally {
       clearTimeout(timeoutId);
@@ -3980,7 +4064,20 @@ export default function FamilyScheduler() {
       setApiError('');
     }
     try {
-      const response = await fetch(toApiUrl('/api/schedule'), { cache: 'no-store' });
+      const listStart = toIsoDate(addDays(new Date(), -120));
+      const listEnd = toIsoDate(addDays(new Date(), 180));
+      const listQuery = new URLSearchParams({ start: listStart, end: listEnd });
+      const listController = new AbortController();
+      const listTimeout = setTimeout(() => listController.abort(), SCHEDULE_FETCH_TIMEOUT_MS);
+      let response: Response;
+      try {
+        response = await fetch(toApiUrl(`/api/schedule?${listQuery.toString()}`), {
+          cache: 'no-store',
+          signal: listController.signal,
+        });
+      } finally {
+        clearTimeout(listTimeout);
+      }
       const payload = await readJsonSafe(response);
       if (!response.ok) {
         throw new Error(payload?.error || 'טעינת המשימות נכשלה');
@@ -3995,9 +4092,7 @@ export default function FamilyScheduler() {
         console.warn('[UI] silent list reload failed', error);
         return;
       }
-      const msg = error instanceof Error ? error.message : 'טעינה נכשלה';
-      setApiError(msg);
-      setUpcomingListEvents([]);
+      console.warn('[UI] task list refresh failed; keeping the saved copy', error);
     } finally {
       if (!silent) {
         setUpcomingListLoading(false);

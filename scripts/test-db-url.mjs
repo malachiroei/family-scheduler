@@ -1,4 +1,4 @@
-import { normalizeConnectionString, redactDatabaseUrl, resolveDatabaseUrlFromEnv } from "../app/lib/dbUrl.ts";
+import { normalizeConnectionString, redactDatabaseUrl, resolveDatabaseUrlFromEnv, toTransactionPoolerUrl } from "../app/lib/dbUrl.ts";
 
 const assert = (condition, message) => {
   if (!condition) {
@@ -48,5 +48,14 @@ assert(missing.source === "MISSING" && missing.url === "", "empty env is MISSING
 const redacted = redactDatabaseUrl(originalPooler);
 assert(!redacted.includes("Secret"), "redaction must hide the password");
 assert(redacted.includes("aws-0-eu-central-1.pooler.supabase.com"), "redaction must keep the host");
+
+const sessionPooler = originalPooler.replace(":6543", ":5432");
+assert(toTransactionPoolerUrl(sessionPooler).includes(":6543/"), "session pooler port must become 6543");
+assert(
+  toTransactionPoolerUrl(sessionPooler).includes("postgres.awolohfkegyrumpkjxiu:"),
+  "pooler username must stay untouched",
+);
+assert(toTransactionPoolerUrl(originalPooler) === originalPooler, "transaction pooler URL stays verbatim");
+assert(toTransactionPoolerUrl(originalDirect) === originalDirect, "direct db host is not rewritten");
 
 console.log("db URL parsing tests passed");
